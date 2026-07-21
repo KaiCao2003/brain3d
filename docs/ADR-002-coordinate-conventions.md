@@ -61,10 +61,11 @@ At adapter startup, the application records and verifies at least:
 - source annotation identifier;
 - orientation, shape, and resolution returned by the installed atlas;
 - application coordinate-schema and transform versions;
-- content hash recorded during acquisition.
+- SHA-256 of the installed atlas `metadata.json`.
 
-An unexpected library version, atlas version, shape, orientation, or hash is an error, not a
-warning followed by best-effort loading.
+An unexpected library version, atlas version, shape, orientation, or metadata-file SHA is an
+error, not a warning followed by best-effort loading. Phase 1 does not persist or claim a
+package-wide content hash.
 
 ### 2. Use named frames, never bare coordinate triplets
 
@@ -258,9 +259,10 @@ prohibited. If a feature specifically requires the Allen 2020 parcellation, that
 selected, adapted, versioned, and validated as a separate data source.
 
 Stable BrainGlobe's atlas-validation module contains a checksum function that is explicitly an
-unimplemented, always-true placeholder. Acquisition must therefore compute and persist its own
-cryptographic content hash; the application must not claim that upstream verified the atlas
-archive.
+unimplemented, always-true placeholder. Phase 1 therefore computes and persists the SHA-256 of
+the installed `metadata.json` as an exact metadata identity, while explicitly not claiming that
+upstream verified the archive or that all package files were authenticated. A future
+package-wide integrity feature must define a versioned file manifest and hash every covered file.
 
 ### 8. Treat external Allen files as a separate import frame
 

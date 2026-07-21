@@ -7,6 +7,7 @@ name = "mouse-brain-planner"
 version = "0.1.0"
 description = "Transparent, reproducible mouse stereotaxic surgery planning for macOS."
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12,<3.13"
 authors = [{ name = "Mouse Brain Surgery Planner contributors" }]
 classifiers = [
@@ -14,8 +15,9 @@ classifiers = [
   "Environment :: MacOS X",
   "Intended Audience :: Science/Research",
   "Operating System :: MacOS",
+  "License :: Other/Proprietary License",
   "Programming Language :: Python :: 3.12",
-  "Topic :: Scientific/Engineering :: Medical Science Apps.",
+  "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
   "PySide6==6.11.1",
@@ -87,4 +89,3 @@ module = [
   "vtkmodules.*",
 ]
 ignore_missing_imports = true
-
