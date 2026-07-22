@@ -16,9 +16,11 @@ from mouse_brain_planner.analysis.atlas_axis_order import (
     domain_ap_ml_dv_to_brain_globe_physical_ap_dv_ml,
 )
 from mouse_brain_planner.analysis.region_traversal import (
+    ANNOTATION_RAY_PICK_ALGORITHM_VERSION,
     REGION_TRAVERSAL_ALGORITHM_VERSION,
     RegionTraversalInputError,
     analyze_probe_regions,
+    first_annotated_voxel_on_segment,
 )
 from mouse_brain_planner.domain.atlas_models import AtlasAxis, AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.region_models import (
@@ -173,6 +175,77 @@ def _voxel_indices(result: ProbeRegionAnalysis) -> list[tuple[int, int, int]]:
     return [interval.voxel.as_tuple() for interval in result.voxel_intervals]
 
 
+def test_ray_pick_skips_background_and_returns_first_exact_annotated_voxel() -> None:
+    metadata = _metadata(shape=(4, 3, 2), spacing=(10.0, 20.0, 30.0))
+    annotation = np.zeros(metadata.shape_voxels, dtype=np.uint32)
+    annotation[1, 1, 0] = 7
+    annotation[2, 1, 0] = 8
+
+    hit = first_annotated_voxel_on_segment(
+        annotation=annotation,
+        metadata=metadata,
+        start_ap_dv_ml_um=(-15.0, 30.0, 15.0),
+        end_ap_dv_ml_um=(55.0, 30.0, 15.0),
+    )
+
+    assert ANNOTATION_RAY_PICK_ALGORITHM_VERSION.endswith("first-nonzero-v1")
+    assert hit is not None
+    assert hit.index_ap_dv_ml == (1, 1, 0)
+    assert hit.annotation_id == 7
+    assert hit.entry_point_ap_dv_ml_um == pytest.approx((10.0, 30.0, 15.0))
+    assert hit.voxel_center_ap_dv_ml_um == (15.0, 30.0, 15.0)
+    assert hit.distance_from_start_um == pytest.approx(25.0)
+    assert hit.distance_inside_voxel_um == pytest.approx(10.0)
+
+
+def test_ray_pick_returns_none_for_background_or_no_atlas_intersection() -> None:
+    metadata = _metadata(shape=(2, 2, 2))
+    annotation = np.zeros(metadata.shape_voxels, dtype=np.uint16)
+
+    assert (
+        first_annotated_voxel_on_segment(
+            annotation=annotation,
+            metadata=metadata,
+            start_ap_dv_ml_um=(-10.0, 10.0, 10.0),
+            end_ap_dv_ml_um=(30.0, 10.0, 10.0),
+        )
+        is None
+    )
+    assert (
+        first_annotated_voxel_on_segment(
+            annotation=annotation,
+            metadata=metadata,
+            start_ap_dv_ml_um=(-10.0, -10.0, -10.0),
+            end_ap_dv_ml_um=(-1.0, -1.0, -1.0),
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    (
+        ((1.0, 1.0, 1.0), (1.0, 1.0, 1.0)),
+        ((float("nan"), 1.0, 1.0), (2.0, 2.0, 2.0)),
+        ((True, 1.0, 1.0), (2.0, 2.0, 2.0)),
+    ),
+)
+def test_ray_pick_rejects_ambiguous_or_nonfinite_segments(
+    start: tuple[object, object, object],
+    end: tuple[object, object, object],
+) -> None:
+    metadata = _metadata(shape=(2, 2, 2))
+    annotation = np.zeros(metadata.shape_voxels, dtype=np.uint16)
+
+    with pytest.raises(RegionTraversalInputError):
+        first_annotated_voxel_on_segment(
+            annotation=annotation,
+            metadata=metadata,
+            start_ap_dv_ml_um=start,
+            end_ap_dv_ml_um=end,
+        )
+
+
 def test_axis_conversion_is_centralized_and_round_trips_without_sign_guessing() -> None:
     metadata = _metadata(shape=(2, 2, 2))
     point = _point(metadata, ap_um=11.0, ml_um=33.0, dv_um=22.0)
@@ -226,9 +299,7 @@ def test_axis_aligned_clip_preserves_one_voxel_slab_and_repeated_region_runs() -
     assert result.clipped_path_length_um == pytest.approx(50.0)
     assert result.outside_atlas_path_length_um == pytest.approx(10.0)
     assert _voxel_indices(result) == [(0, 0, 0), (1, 0, 0), (2, 0, 0), (3, 0, 0), (4, 0, 0)]
-    assert [interval.length_um for interval in result.voxel_intervals] == pytest.approx(
-        [10.0] * 5
-    )
+    assert [interval.length_um for interval in result.voxel_intervals] == pytest.approx([10.0] * 5)
     assert [run.structure_id for run in result.segments] == [1, 2, 1]
     assert [run.length_um for run in result.segments] == pytest.approx([20.0, 10.0, 20.0])
     assert [run.voxel_count for run in result.segments] == [2, 1, 2]
@@ -372,9 +443,7 @@ def test_non_isotropic_site_assignments_use_half_open_boundaries_and_distinct_st
     assert upper_face.location is TraversalLocation.OUTSIDE_ATLAS
     assert upper_face.voxel is None
     assert not upper_face.inside_atlas and not upper_face.inside_brain
-    assert [item.length_um for item in result.voxel_intervals] == pytest.approx(
-        [30.0, 30.0, 30.0]
-    )
+    assert [item.length_um for item in result.voxel_intervals] == pytest.approx([30.0, 30.0, 30.0])
 
 
 def test_completely_outside_segment_still_assigns_sites_and_reports_full_outside_length() -> None:

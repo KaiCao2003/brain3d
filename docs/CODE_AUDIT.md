@@ -3,6 +3,11 @@
 Audit baseline: `main` commit `51fe26d637b700d39944bbee86e3ea42ded4e7a2`, reviewed on
 2026-07-22 before the end-to-end planner refactor.
 
+> **Historical snapshot:** every present-tense “current” statement below refers to that baseline,
+> not the current development tree. The refactor has since made calibration, target projection,
+> probe planning/region traversal, the LAMBADA major-vessel layer and V2 analysis, and SceneKit 3D
+> product-reachable. See [Project Status](../PROJECT_STATUS.md) for the live inventory.
+
 This document records evidence about what is reachable from the supported product, what is only
 covered by tests, and what belongs to the superseded Qt/VTK application. A symbol is not deleted
 merely because a text search finds no caller: the audit checks static imports, repository-wide

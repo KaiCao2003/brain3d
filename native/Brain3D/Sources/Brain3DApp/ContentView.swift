@@ -47,7 +47,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Save As first if you need this project, imported vessel image, or registration.")
+            Text("Save As first to keep these changes.")
         }
         .confirmationDialog(
             "Discard unsaved animal plan changes and open another project?",
@@ -59,7 +59,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Save As first if you need this project, imported vessel image, or registration.")
+            Text("Save As first to keep these changes.")
         }
     }
 

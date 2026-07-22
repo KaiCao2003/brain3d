@@ -1,24 +1,32 @@
 # Brain3D native macOS app
 
-> **Research prototype:** the app has an interactive 25 µm Allen atlas browser, but it does not
-> yet have calibrated target projection, probe planning, a supported 3D renderer, or a verified
-> major-vessel clearance workflow.
+This Swift package is the native half of the Brain3D animal-research planner. SwiftUI owns the
+single-view workspace and controls; SceneKit renders verified 3D brain, probe, and reference-vessel
+geometry; a typed NDJSON subprocess boundary delegates scientific state and analysis to Python.
 
-This package is the SwiftUI half of the hybrid animal-surgery planner. It keeps the
-Python scientific implementation behind a typed, versioned NDJSON subprocess boundary.
+> **Animal research only — non-human and non-clinical.** This development app is not an
+> installable production release or a qualified navigation device.
 
-The application is restricted to **animal research only — not for human or clinical
-use**. It accepts only `allen_mouse_25um` version `1.2` in the current testing phase.
-The primary workspace provides `Dorsal / Coronal / Sagittal / Horizontal / 3D` modes.
-Coronal, sagittal, and horizontal slices retain independent depths. A click replaces the
-current region selection without moving any slice; drag, pinch, scroll, and the explicit
-controls provide direct navigation. The product path has no focus mode or crosshair.
+## Current workspace
 
-Population vascular density and user subject-image registration remain archived in the
-backend and are intentionally absent from the primary workflow. Neither is a set of
-individual vessels, and neither can establish deep clearance. Bregma-relative AP/ML/DV
-entries remain unprojected until calibration. The 3D mode is an explicit unavailable state
-until a renderer shares the same validated scene state.
+- Exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, one selected mode at a time.
+- Independent retained slice depths, with slider/buttons/wheel, pan, zoom, and compact
+  click-to-replace region labels. A region click never changes depth.
+- No focus mode, crosshair, 2×2 layout, or capillary display.
+- QC-gated subject calibration and AP/ML/DV target projection from bregma; negative values mean
+  posterior, left, and deep/ventral.
+- Probe placement, 2D/3D overlays, region traversal, inspection, and CSV/JSON export.
+- LAMBADA P60_606 reference vessels at diameter ≥30 µm on slices, Dorsal, and 3D.
+- V2 tapered-vessel reference analysis with explicit margin, uncertainty, and two
+  acknowledgements. Its bounded zero-conflict wording is:
+
+  > No conflict detected within the loaded geometry and stated uncertainty assumptions.
+
+The NP1 NP1000 / `PRB_1_4_0480_1` catalog model is a complete source transcription whose
+independent review is still pending; the UI requires acknowledgement. The vessel graph is one
+fixed cleared P60 reference, omits pial/choroidal/smaller vessels, and is not subject-specific.
+Population density and subject-image registration remain archived in Python and absent from the
+primary UI. Only `allen_mouse_25um` v1.2 is accepted in this 25 µm testing phase.
 
 ## Development
 
@@ -30,23 +38,20 @@ open native/Brain3D/build/Brain3D.app
 
 Backend discovery is deterministic and fail-closed:
 
-1. `BRAIN3D_BRIDGE_EXECUTABLE` plus optional JSON-array
-   `BRAIN3D_BRIDGE_ARGUMENTS` and `BRAIN3D_BRIDGE_WORKING_DIRECTORY` override discovery.
-2. Development builds walk upward from the current directory, executable, and source
-   package looking for both `.venv/bin/python` and
-   `src/mouse_brain_planner/bridge/server.py`.
-3. If neither route resolves, the UI says **Backend not configured** and does not claim
-   that an atlas, project, or vessel image is usable.
+1. `BRAIN3D_BRIDGE_EXECUTABLE` plus optional JSON-array `BRAIN3D_BRIDGE_ARGUMENTS` and
+   `BRAIN3D_BRIDGE_WORKING_DIRECTORY` override discovery.
+2. Development builds walk upward from the current directory, executable, and source package for
+   both `.venv/bin/python` and `src/mouse_brain_planner/bridge/server.py`.
+3. If neither route resolves, the UI reports **Backend not configured** and does not substitute
+   demo anatomy or geometry.
 
-The development app launches Python with `-u -m mouse_brain_planner.bridge.server` and
-sets `PYTHONPATH` to the repository `src` directory. The serialized protocol channel has
-a named 15-minute long-operation budget so a pinned ~311 MB density download, hash
-verification, extraction, and 50 µm preparation can complete without poisoning the
-connection. UI operations remain asynchronous to the main thread.
+The development app launches Python with `-u -m mouse_brain_planner.bridge.server` and sets
+`PYTHONPATH` to the repository `src` directory. UI requests are asynchronous and strict decoders
+reject source, schema, revision, hash, coordinate-frame, and size mismatches.
 
 ## Distribution boundary
 
-`Scripts/build-app.sh` creates an ad-hoc-signed development `.app`. A release build still
-needs a bundled deterministic Python runtime/backend, hardened-runtime entitlements,
-Developer ID signing of every nested executable, and notarization. Those distribution
-steps are intentionally not represented as complete by this development bundle.
+`Scripts/build-app.sh` creates an ad-hoc-signed development `.app` that depends on the source
+checkout. A production distribution still requires a deterministic bundled Python runtime,
+hardened-runtime review, Developer ID signing of nested executables, notarization, an SBOM, and
+clean-Mac qualification.

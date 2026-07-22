@@ -72,7 +72,8 @@ def build_calibrated_probe_plan(
         raise ProbePlanningError("calibrated probe planning requires an animal subject ID")
     if not model.permits_verified_device_label and not custom_geometry_acknowledged:
         raise ProbePlanningError(
-            "unverified generic/custom geometry requires explicit user acknowledgment"
+            "probe geometry without completed independent review requires explicit user "
+            "acknowledgment"
         )
     skull = calibration.skull_calibration
     calibrated_target = BregmaRelativeTargetMM(

@@ -1,9 +1,9 @@
 # Development
 
-Brain3D has one supported product path: a SwiftUI macOS application and a Python 3.12 scientific
-service connected by typed NDJSON. Scientific transforms, atlas access, registration, analysis,
-and persistence stay in Python; Swift owns presentation, input, accessibility, and native file
-handling.
+Brain3D has one supported product path: a SwiftUI + SceneKit macOS application and a Python 3.12
+scientific service connected by typed NDJSON. Scientific transforms, atlas access, calibration,
+probe/vessel analysis, and persistence stay in Python; Swift owns presentation, input,
+accessibility, native file handling, and verified SceneKit display geometry.
 
 Start with [Architecture](docs/ARCHITECTURE.md), [Code Audit](docs/CODE_AUDIT.md),
 [ADR-005](docs/ADR-005-independent-slice-viewer.md), and
@@ -75,6 +75,7 @@ for the native process boundary and integration diagnostics.
 
 ```text
 native/Brain3D/               SwiftUI shell, typed client, native tests/build
+  Sources/Brain3DScene/       SceneKit brain/probe/vessel geometry and interaction
 src/mouse_brain_planner/
   atlas/                      BrainGlobe 2.3.1 boundary
   bridge/                     versioned service and handlers
@@ -82,8 +83,10 @@ src/mouse_brain_planner/
   domain/                     Pydantic scientific/project models
   persistence/                deterministic migrations and atomic packages
   rendering/                  raster slices and dorsal projection
-  surgery/                    tested planning math being connected to the product
-  vasculature/                density and subject-image workflows
+  probes/                     source-traceable NP1 and synthetic test catalog
+  surgery/                    product-reachable probe/measurement geometry
+  analysis/                   region traversal and tapered-vessel analysis
+  vasculature/                LAMBADA reference plus archived evidence workflows
 tests/                        headless unit/contract/integration tests
 docs/                         audit, architecture, validation, and ADRs
 ```
@@ -100,8 +103,8 @@ The old Qt/PyVista/VTK application was removed after the audit in
   transform/calibration identity.
 - Project files store model state and immutable data references, never UI objects or complete
   atlas/vessel volumes.
-- Population density, 2D subject evidence, and registered 3D vessel geometry remain separate
-  types and workflows.
+- The LAMBADA radius-bearing graph, archived population density, and archived 2D subject evidence
+  remain separate types and workflows.
 
 ## Coordinate-change checklist
 

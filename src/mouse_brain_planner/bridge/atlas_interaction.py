@@ -16,6 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from mouse_brain_planner.analysis.region_traversal import (
+    ANNOTATION_RAY_PICK_ALGORITHM_VERSION,
+    RegionTraversalInputError,
+    first_annotated_voxel_on_segment,
+)
 from mouse_brain_planner.atlas.brainglobe_adapter import AtlasAdapterError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
 from mouse_brain_planner.bridge.server import (
@@ -52,10 +57,12 @@ class AtlasInteractionBridge:
         self.dispatcher.register("atlas.regions", self.regions)
         self.dispatcher.register("atlas.search", self.search)
         self.dispatcher.register("atlas.point", self.point)
+        self.dispatcher.register("atlas.ray.pick", self.ray_pick)
         self.dispatcher.register("atlas.mesh", self.mesh)
         self.dispatcher.declare_capability("atlasRegionRecords")
         self.dispatcher.declare_capability("atlasRegionSearch")
         self.dispatcher.declare_capability("atlasPhysicalPointLookup")
+        self.dispatcher.declare_capability("atlasAnnotationRayPick")
         self.dispatcher.declare_capability("atlasMeshDescriptor")
 
     def regions(self, params: Mapping[str, object]) -> JsonObject:
@@ -304,6 +311,108 @@ class AtlasInteractionBridge:
             "sourceCoordinateFrame": _source_coordinate_frame(atlas.metadata),
             "atlas": atlas_provenance(atlas),
         }
+
+    def ray_pick(self, params: Mapping[str, object]) -> JsonObject:
+        """Resolve the first annotated voxel crossed by a finite camera ray."""
+
+        coordinate_fields = (
+            "startApMicrometres",
+            "startDvMicrometres",
+            "startMlMicrometres",
+            "endApMicrometres",
+            "endDvMicrometres",
+            "endMlMicrometres",
+        )
+        _validate_params(
+            params,
+            required={"protocolVersion", "frameId", *coordinate_fields},
+        )
+        _require_protocol(params)
+        if params["frameId"] != ATLAS_PHYSICAL_FRAME_ID:
+            raise BridgeError(
+                "INVALID_PARAMS",
+                "frameId must be BRAINGLOBE_PHYSICAL_ASR_UM.",
+                details={"field": "frameId", "expected": ATLAS_PHYSICAL_FRAME_ID},
+            )
+        values = {field: _finite_number(params[field], field=field) for field in coordinate_fields}
+        start = (
+            values["startApMicrometres"],
+            values["startDvMicrometres"],
+            values["startMlMicrometres"],
+        )
+        end = (
+            values["endApMicrometres"],
+            values["endDvMicrometres"],
+            values["endMlMicrometres"],
+        )
+        atlas = self._require_loaded_atlas()
+        try:
+            hit = first_annotated_voxel_on_segment(
+                annotation=atlas.annotation,
+                metadata=atlas.metadata,
+                start_ap_dv_ml_um=start,
+                end_ap_dv_ml_um=end,
+            )
+        except (RegionTraversalInputError, TypeError, ValueError) as error:
+            raise BridgeError(
+                "ATLAS_RAY_INVALID",
+                "The finite atlas camera ray is invalid.",
+                details={"exceptionType": type(error).__name__},
+            ) from error
+        result: JsonObject = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "status": "noAnnotatedVoxel" if hit is None else "hit",
+            "algorithmVersion": ANNOTATION_RAY_PICK_ALGORITHM_VERSION,
+            "hit": None,
+            "coordinateFrame": _source_coordinate_frame(atlas.metadata),
+            "atlas": atlas_provenance(atlas),
+        }
+        if hit is None:
+            return result
+
+        regions_by_id = {region.structure_id: region for region in _validated_regions(atlas)}
+        region = regions_by_id.get(hit.annotation_id)
+        if region is None:
+            raise BridgeError(
+                "ATLAS_CONTRACT_VIOLATION",
+                "The annotation ray crossed an ID missing from the atlas region records.",
+                details={"annotationStructureId": hit.annotation_id},
+            )
+        entry_ap, entry_dv, entry_ml = hit.entry_point_ap_dv_ml_um
+        center_ap, center_dv, center_ml = hit.voxel_center_ap_dv_ml_um
+        center_point = BrainGlobePhysicalPoint(
+            atlas_key=atlas.metadata.atlas_key,
+            atlas_version=atlas.metadata.atlas_package_version,
+            ap_um=center_ap,
+            dv_um=center_dv,
+            ml_um=center_ml,
+        )
+        result["hit"] = {
+            "entryPoint": {
+                "frameId": ATLAS_PHYSICAL_FRAME_ID,
+                "apMicrometres": entry_ap,
+                "dvMicrometres": entry_dv,
+                "mlMicrometres": entry_ml,
+            },
+            "voxelCenter": {
+                "frameId": ATLAS_PHYSICAL_FRAME_ID,
+                "apMicrometres": center_ap,
+                "dvMicrometres": center_dv,
+                "mlMicrometres": center_ml,
+            },
+            "containingVoxelIndex": {
+                "frameId": "BRAINGLOBE_VOXEL_INDEX_ASR",
+                "ap": hit.index_ap_dv_ml[0],
+                "dv": hit.index_ap_dv_ml[1],
+                "ml": hit.index_ap_dv_ml[2],
+            },
+            "annotationStructureId": hit.annotation_id,
+            "region": _region_payload(region),
+            "hemisphere": BrainGlobeAtlasSpace(atlas.metadata).hemisphere(center_point).value,
+            "distanceFromRayStartMicrometres": hit.distance_from_start_um,
+            "distanceInsideVoxelMicrometres": hit.distance_inside_voxel_um,
+        }
+        return result
 
     def _require_loaded_atlas(self) -> LoadedAtlasProtocol:
         atlas = self.dispatcher.context.loaded_atlas

@@ -3,6 +3,13 @@
 - Status: accepted
 - Date: 2026-07-22
 
+## Implementation update — 2026-07-22
+
+The independent-slice decision remains in force. Its later renderer gate is now satisfied by a
+SceneKit module that consumes the same backend-verified atlas, probe, vessel, and ray-pick state.
+The current product path therefore implements all five single-view modes without reintroducing a
+linked cursor, crosshair, focus mode, or 2×2 layout.
+
 ## Context
 
 The intended product must project calibrated AP/ML/DV targets, place Neuropixels geometry, report
@@ -46,7 +53,8 @@ Choose option 3.
 - Mesh/tube presentation does not block calibrated planning and region traversal.
 - The project must add Swift application/ViewModel tests; core transport tests alone are not
   enough.
-- 3D remains visibly unavailable until a separate renderer ADR and validation gate are complete.
+- 3D remained unavailable during the slice-first milestone; the current SceneKit implementation
+  is the renderer added after that gate.
 
 ## Rollback strategy
 

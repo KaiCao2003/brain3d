@@ -11,7 +11,8 @@ open native/Brain3D/build/Brain3D.app
 
 `Scripts/build-app.sh` builds the Swift executable, creates the bundle layout, installs the
 reviewed `Info.plist`, and applies an ad-hoc signature. It does not bundle `.venv`, Python, atlas
-data, vascular data, or project files.
+data, or project files. The LAMBADA derivative currently resolves from the repository's Python
+package beside the source checkout; it is not copied into the development `.app` by this script.
 
 ## Current release blockers
 
@@ -20,7 +21,7 @@ data, vascular data, or project files.
 - Developer ID signing, hardened runtime, entitlements, notarization, and stapling are absent;
 - no clean-account/clean-Mac qualification has been completed;
 - the build has no SBOM or assembled third-party license bundle; and
-- the product workflow itself remains incomplete and unvalidated for animal procedures.
+- the implemented workflow remains unqualified for animal procedures.
 
 The removed Qt/PyVista/VTK stack is not a packaging fallback and is not part of the lockfile.
 
@@ -30,12 +31,14 @@ The removed Qt/PyVista/VTK stack is not a packaging fallback and is not part of 
 Brain3D.app/
   Contents/
     MacOS/Brain3D                 native SwiftUI executable
-    Resources/                   reviewed UI resources and notices
+    Resources/                   reviewed UI resources, notices, LAMBADA asset + manifest
     Frameworks/ or Resources/    deterministic Python runtime and scientific service
 ```
 
-Atlas archives, the optional population-density archive, subject images, vessel graphs, and
-`.mouseplan` projects remain outside the signed bundle. The app records immutable source
+Atlas archives, the optional archived population-density source, subject images, original vessel
+graphs, and `.mouseplan` projects remain outside the signed bundle. A future qualified build must
+bundle the compact CC BY 4.0 LAMBADA P60_606 derivative with its adjacent manifest, attribution,
+and limitations because it is a reviewed application asset. The app records immutable source
 identities and manages user-owned caches.
 
 ## Release process still to implement

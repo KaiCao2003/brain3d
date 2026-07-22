@@ -1,5 +1,6 @@
 import AppKit
 import Brain3DCore
+import Brain3DScene
 import SwiftUI
 
 struct WorkspaceView: View {
@@ -84,6 +85,9 @@ private struct AtlasSliceWorkspace: View {
                     imagePixelHeight: frame?.height ?? 0,
                     viewportIdentity: orientation.rawValue,
                     selection: canvasSelection,
+                    majorVesselOverlay: model.majorVesselSliceOverlay(for: orientation),
+                    probeOverlay: model.probeSliceOverlay(for: orientation),
+                    interactionHelp: "Click to identify a brain region. Drag to pan, pinch to zoom, and scroll to change slices.",
                     accessibilityLabel: "\(orientation.displayName) atlas slice",
                     accessibilityValue: accessibilityValue,
                     resetGeneration: resetGeneration,
@@ -252,10 +256,7 @@ private struct AtlasSliceWorkspace: View {
 
 private struct DorsalVesselWorkspace: View {
     @ObservedObject var model: PlannerViewModel
-
-    private var atlasImage: NSImage? {
-        model.dorsalSurfacePNG.flatMap(NSImage.init(data:))
-    }
+    @State private var resetGeneration = 0
 
     var body: some View {
         VStack(spacing: 10) {
@@ -263,17 +264,56 @@ private struct DorsalVesselWorkspace: View {
                 Label("Dorsal atlas surface", systemImage: "brain.head.profile")
                     .font(.headline)
                 Spacer()
-                Text("Major vessels only")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.orange)
+                Text(
+                    model.majorVesselGeometry == nil
+                        ? "Vessels unavailable"
+                        : "≥30 µm · full-depth · excludes pial/choroidal"
+                )
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(
+                    model.majorVesselGeometry == nil ? Color.secondary : Color.primary
+                )
+                Button("Reset view", systemImage: "arrow.counterclockwise") {
+                    resetGeneration &+= 1
+                }
+                .labelStyle(.iconOnly)
+                .help("Reset pan and zoom")
             }
 
-            if let atlasImage {
-                ZStack(alignment: .bottomLeading) {
-                    Image(nsImage: atlasImage)
-                        .resizable()
-                        .interpolation(.none)
-                        .aspectRatio(contentMode: .fit)
+            if let dorsal = model.dorsalSurface, model.dorsalSurfacePNG != nil {
+                ZStack {
+                    AtlasSliceCanvas(
+                        imageData: model.dorsalSurfacePNG,
+                        imagePixelWidth: dorsal.width,
+                        imagePixelHeight: dorsal.height,
+                        viewportIdentity: "dorsal-reference-vessels",
+                        selection: canvasSelection,
+                        majorVesselOverlay: model.majorVesselDorsalOverlay,
+                        probeOverlay: nil,
+                        interactionHelp: "Click to identify the dorsal-most annotated region. Drag to pan and pinch to zoom.",
+                        accessibilityLabel: "Dorsal atlas with reference major vessels",
+                        accessibilityValue: accessibilityValue,
+                        resetGeneration: resetGeneration,
+                        onPick: { column, row in
+                            model.pickDorsalRegion(column: column, row: row)
+                        },
+                        onSliceStep: { _ in }
+                    )
+
+                    if model.dorsalPickInProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                            .padding(7)
+                            .background(.black.opacity(0.7), in: Circle())
+                            .foregroundStyle(.white)
+                            .frame(
+                                maxWidth: .infinity,
+                                maxHeight: .infinity,
+                                alignment: .topTrailing
+                            )
+                            .padding(8)
+                            .allowsHitTesting(false)
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .background(Color.black)
@@ -287,6 +327,13 @@ private struct DorsalVesselWorkspace: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
+            if let error = model.dorsalPickError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(2)
+            }
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor))
@@ -297,28 +344,206 @@ private struct DorsalVesselWorkspace: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
+
+    private var accessibilityValue: String {
+        let region = model.dorsalRegionPick?.region?.acronym ?? "no selected region"
+        return "\(model.majorVesselStatus), \(region)"
+    }
+
+    private var canvasSelection: AtlasSliceSelection? {
+        guard let pick = model.dorsalRegionPick else { return nil }
+        if let region = pick.region {
+            return AtlasSliceSelection(
+                column: pick.column,
+                row: pick.row,
+                acronym: region.acronym,
+                name: region.name,
+                color: NSColor(
+                    srgbRed: CGFloat(region.rgb[0]) / 255,
+                    green: CGFloat(region.rgb[1]) / 255,
+                    blue: CGFloat(region.rgb[2]) / 255,
+                    alpha: 1
+                )
+            )
+        }
+        return AtlasSliceSelection(
+            column: pick.column,
+            row: pick.row,
+            acronym: "Outside",
+            name: "Outside annotated brain",
+            color: .secondaryLabelColor
+        )
+    }
 }
 
 private struct ThreeDimensionalWorkspace: View {
     @ObservedObject var model: PlannerViewModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var resetGeneration = 0
 
     var body: some View {
-        ContentUnavailableView(
-            "3D scene is not implemented yet",
-            systemImage: "cube.transparent",
-            description: Text(
-                "This mode will render the same verified slice depths, selected region, probe, and radius-bearing vessel geometry. It will not invent geometry from the 2D dorsal image or density layer."
-            )
-        )
+        ZStack {
+            Color(nsColor: .controlBackgroundColor)
+
+            if let snapshot = model.threeDimensionalSnapshot {
+                AnimalAtlasSceneView(
+                    snapshot: snapshot,
+                    reduceMotion: reduceMotion,
+                    resetGeneration: resetGeneration,
+                    phaseChanged: model.updateThreeDimensionalRenderPhase,
+                    rayPicked: { start, end in
+                        model.pickThreeDimensionalRegion(start: start, end: end)
+                    },
+                    blankSelected: model.clearThreeDimensionalRegionSelection
+                )
+            } else {
+                unavailableContent
+            }
+
+            if case .loadingDescriptor = model.threeDimensionalPhase {
+                loadingHUD
+            } else if case .loadingGeometry = model.threeDimensionalPhase {
+                loadingHUD
+            } else if case let .failed(message) = model.threeDimensionalPhase,
+                      model.threeDimensionalSnapshot != nil
+            {
+                ContentUnavailableView(
+                    "3D mouse atlas unavailable",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(message)
+                )
+                .padding(28)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+            }
+
+            if model.threeDimensionalSnapshot != nil {
+                controlsOverlay
+            }
+        }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(12)
-        .background(Color(nsColor: .controlBackgroundColor))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .strokeBorder(Color.secondary.opacity(0.24))
         }
-        .accessibilityValue(model.viewerPhase.message)
+        .task(id: model.threeDimensionalPreparationIdentity) {
+            await model.prepareThreeDimensionalScene()
+        }
+        .onDisappear {
+            model.clearThreeDimensionalRegionSelection()
+        }
+        .accessibilityValue(model.threeDimensionalPhase.message)
+    }
+
+    @ViewBuilder
+    private var unavailableContent: some View {
+        ContentUnavailableView(
+            "3D mouse atlas unavailable",
+            systemImage: "cube.transparent",
+            description: Text(model.threeDimensionalPhase.message)
+        )
+    }
+
+    private var loadingHUD: some View {
+        ProgressView(model.threeDimensionalPhase.message)
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+            .allowsHitTesting(false)
+    }
+
+    private var controlsOverlay: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                regionHUD
+                Spacer(minLength: 24)
+                Button {
+                    resetGeneration &+= 1
+                } label: {
+                    Label("Reset Camera", systemImage: "arrow.counterclockwise")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .background(.ultraThinMaterial, in: Capsule())
+                .disabled(model.threeDimensionalPhase != .ready)
+                .accessibilityHint("Returns to the initial whole-brain view")
+            }
+            Spacer()
+            if model.majorVesselGeometry != nil {
+                Label("Reference vessels · diameter ≥30 µm", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 7)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityLabel("Reference major-vessel layer")
+                    .accessibilityValue(model.majorVesselStatus)
+            }
+        }
+        .padding(14)
+    }
+
+    @ViewBuilder
+    private var regionHUD: some View {
+        if let hit = model.threeDimensionalRegionHit {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(regionColor(hit.region.rgb))
+                    .frame(width: 10, height: 10)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(hit.region.acronym)
+                        .font(.caption.weight(.semibold))
+                    Text(hit.region.name)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Text(hit.hemisphere.rawValue.capitalized)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Selected mouse atlas region")
+        } else if let error = model.threeDimensionalPickError {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+                .padding(.horizontal, 11)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        } else {
+            HStack(spacing: 8) {
+                if model.threeDimensionalPickInProgress {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "cursorarrow.click")
+                }
+                Text(
+                    model.threeDimensionalPickInProgress
+                        ? "Resolving atlas region…"
+                        : "Click the brain to inspect a region"
+                )
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 11)
+            .padding(.vertical, 8)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+        }
+    }
+
+    private func regionColor(_ rgb: [Int]) -> Color {
+        guard rgb.count == 3 else { return .secondary }
+        return Color(
+            red: Double(rgb[0]) / 255,
+            green: Double(rgb[1]) / 255,
+            blue: Double(rgb[2]) / 255
+        )
     }
 }
 

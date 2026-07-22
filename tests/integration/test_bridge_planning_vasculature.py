@@ -373,6 +373,12 @@ def test_backend_project_revision_is_authoritative_for_unsaved_changes(
     assert isinstance(created_project, dict)
     assert created_project["revision"] == 1
     assert created_project["isDirty"] is True
+    assert created_project["rendererAnchor"] == {
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "apMicrometres": 2.5,
+        "dvMicrometres": 1.5,
+        "mlMicrometres": 2.5,
+    }
 
     destination = tmp_path / "revision.mouseplan"
     _call(dispatcher, "project.save", path=str(destination))
@@ -458,6 +464,156 @@ def test_atlas_dorsal_returns_real_ap_ml_surface_projection() -> None:
     assert "not a subject skull surface" in str(dorsal["displayLabel"])
     with Image.open(io.BytesIO(base64.b64decode(str(dorsal["pngBase64"])))) as decoded:
         assert decoded.size == (4, 4)
+
+
+def test_atlas_dorsal_pick_capability_is_discoverable() -> None:
+    dispatcher, _ = _dispatcher()
+
+    hello = _call(dispatcher, "hello", client="dorsal-pick-test")
+
+    capabilities = hello["capabilities"]
+    assert isinstance(capabilities, dict)
+    assert capabilities["atlasDorsalRegionPick"] is True
+
+
+def test_atlas_dorsal_pick_returns_first_annotated_dv_voxel() -> None:
+    dispatcher, _ = _dispatcher()
+    atlas = dispatcher.context.loaded_atlas
+    assert isinstance(atlas, _FakeAtlas)
+    atlas.annotation.fill(0)
+    atlas.annotation[2, 1, 3] = 1
+
+    picked = _call(dispatcher, "atlas.dorsal.pick", column=3, row=2)
+
+    assert set(picked) == {
+        "protocolVersion",
+        "status",
+        "column",
+        "row",
+        "atlasPoint",
+        "containingVoxelIndex",
+        "annotationStructureId",
+        "region",
+        "hemisphere",
+        "atlas",
+    }
+    assert picked["status"] == "hit"
+    assert picked["column"] == 3
+    assert picked["row"] == 2
+    assert picked["atlasPoint"] == {
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "apMicrometres": 2.5,
+        "dvMicrometres": 1.5,
+        "mlMicrometres": 3.5,
+    }
+    assert picked["containingVoxelIndex"] == {
+        "frameId": "BRAINGLOBE_VOXEL_INDEX_ASR",
+        "ap": 2,
+        "dv": 1,
+        "ml": 3,
+    }
+    assert picked["annotationStructureId"] == 1
+    assert picked["region"] == {
+        "structureId": 1,
+        "acronym": "TEST",
+        "name": "Test region",
+        "parentStructureId": None,
+        "structureIdPath": [1],
+        "rgb": [12, 34, 56],
+    }
+    assert picked["hemisphere"] == "left"
+    identity = picked["atlas"]
+    assert isinstance(identity, dict)
+    assert set(identity) == {
+        "identifier",
+        "version",
+        "metadataSha256",
+        "resolutionMicrometres",
+        "shapeVoxels",
+        "orientation",
+        "frameworkName",
+        "sourceAnnotation",
+        "citation",
+        "brainGlobeAtlasApiVersion",
+    }
+    assert identity["identifier"] == "allen_mouse_25um"
+    assert identity["version"] == "1.2"
+    assert identity["metadataSha256"] == "b" * 64
+    assert identity["resolutionMicrometres"] == [1.0, 1.0, 1.0]
+    assert identity["shapeVoxels"] == [4, 2, 4]
+
+
+def test_atlas_dorsal_pick_returns_explicit_no_annotation_payload() -> None:
+    dispatcher, _ = _dispatcher()
+    atlas = dispatcher.context.loaded_atlas
+    assert isinstance(atlas, _FakeAtlas)
+    atlas.annotation.fill(0)
+
+    picked = _call(dispatcher, "atlas.dorsal.pick", column=1, row=3)
+
+    assert picked["status"] == "noAnnotatedVoxel"
+    assert picked["column"] == 1
+    assert picked["row"] == 3
+    for field in (
+        "atlasPoint",
+        "containingVoxelIndex",
+        "annotationStructureId",
+        "region",
+        "hemisphere",
+    ):
+        assert picked[field] is None
+    assert isinstance(picked["atlas"], dict)
+
+
+@pytest.mark.parametrize(
+    ("params", "error_code"),
+    (
+        ({"protocolVersion": 1, "column": 0}, "INVALID_PARAMS"),
+        (
+            {"protocolVersion": 1, "column": 0, "row": 0, "unexpected": 1},
+            "INVALID_PARAMS",
+        ),
+        ({"protocolVersion": 1, "column": True, "row": 0}, "INVALID_PARAMS"),
+        ({"protocolVersion": 1, "column": 0, "row": 0.0}, "INVALID_PARAMS"),
+        ({"protocolVersion": 1, "column": -1, "row": 0}, "INVALID_PARAMS"),
+        ({"protocolVersion": 1, "column": 4, "row": 0}, "DORSAL_PICK_OUT_OF_RANGE"),
+        ({"protocolVersion": 1, "column": 0, "row": 4}, "DORSAL_PICK_OUT_OF_RANGE"),
+        ({"protocolVersion": 2, "column": 0, "row": 0}, "PROTOCOL_VERSION_MISMATCH"),
+    ),
+)
+def test_atlas_dorsal_pick_rejects_invalid_schema_types_and_bounds(
+    params: dict[str, object],
+    error_code: str,
+) -> None:
+    dispatcher, _ = _dispatcher()
+
+    with pytest.raises(BridgeError) as caught:
+        dispatcher.dispatch("atlas.dorsal.pick", params)
+
+    assert caught.value.code == error_code
+
+
+def test_atlas_dorsal_pick_rejects_annotation_region_identity_mismatch() -> None:
+    dispatcher, _ = _dispatcher()
+    atlas = dispatcher.context.loaded_atlas
+    assert isinstance(atlas, _FakeAtlas)
+    atlas.annotation.fill(0)
+    atlas.annotation[0, 0, 0] = 999
+
+    with pytest.raises(BridgeError) as caught:
+        _call(dispatcher, "atlas.dorsal.pick", column=0, row=0)
+
+    assert caught.value.code == "ATLAS_CONTRACT_VIOLATION"
+
+
+def test_atlas_dorsal_pick_requires_open_atlas() -> None:
+    dispatcher = BridgeDispatcher()
+    register_planning_handlers(dispatcher)
+
+    with pytest.raises(BridgeError) as caught:
+        _call(dispatcher, "atlas.dorsal.pick", column=0, row=0)
+
+    assert caught.value.code == "ATLAS_NOT_OPEN"
 
 
 def test_population_reference_prepare_updates_runtime_project_and_exact_contract(

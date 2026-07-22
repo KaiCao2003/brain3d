@@ -87,6 +87,25 @@ public struct AtlasSliceViewport: Equatable, Sendable {
         return point.isFinite ? point : nil
     }
 
+    /// Map a continuous half-open image coordinate into view space.
+    ///
+    /// Atlas physical coordinates divided by axis resolution land directly in
+    /// this coordinate system (for example, 12.5 µm at 25 µm resolution is
+    /// image coordinate 0.5, the center of pixel zero).
+    public func pointForImageCoordinate(column: Double, row: Double) -> CGPoint? {
+        guard
+            column.isFinite, row.isFinite,
+            column >= 0, column < Double(imagePixelWidth),
+            row >= 0, row < Double(imagePixelHeight),
+            let rect = displayedImageRect
+        else { return nil }
+        let point = CGPoint(
+            x: rect.minX + CGFloat(column / Double(imagePixelWidth)) * rect.width,
+            y: rect.minY + CGFloat(row / Double(imagePixelHeight)) * rect.height
+        )
+        return point.isFinite ? point : nil
+    }
+
     /// Clamp pan so a zoomed dimension cannot expose padding beyond its fit position.
     public func clampedPan(_ proposed: CGPoint) -> CGPoint {
         guard proposed.isFinite, let metrics = metrics(zoom: zoom) else { return .zero }

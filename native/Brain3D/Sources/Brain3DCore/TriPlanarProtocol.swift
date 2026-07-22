@@ -410,7 +410,7 @@ public struct AtlasPhysicalCoordinateFrame: Decodable, Equatable, Sendable {
     }
 }
 
-public struct AtlasPhysicalPoint: Decodable, Equatable, Sendable {
+public struct AtlasPhysicalPoint: Codable, Equatable, Sendable {
     public let frameId: String
     public let apMicrometres: Double
     public let dvMicrometres: Double

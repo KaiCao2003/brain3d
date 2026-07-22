@@ -178,7 +178,7 @@ class BridgeContext:
         except (TypeError, ValueError) as error:
             raise BridgeError(
                 "ATLAS_CONTRACT_VIOLATION",
-                "Atlas arrays cannot be rendered safely.",
+                "Atlas arrays cannot be rendered.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         self.loaded_atlas = atlas
@@ -711,7 +711,7 @@ def render_atlas_slice_payload(
     except (TypeError, ValueError, zlib.error) as error:
         raise BridgeError(
             "SLICE_RENDER_FAILED",
-            "The requested atlas slice could not be rendered safely.",
+            "The requested atlas slice could not be rendered.",
             details={"exceptionType": type(error).__name__},
         ) from error
     return {

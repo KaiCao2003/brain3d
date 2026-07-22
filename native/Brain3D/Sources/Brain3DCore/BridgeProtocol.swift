@@ -115,6 +115,14 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
     public let subjectVascularRegistration: Bool
     public let subjectAtlasCalibration: Bool?
     public let calibratedTargetProjection: Bool?
+    public let probeCatalog: Bool?
+    public let calibratedProbePlanning: Bool?
+    public let exactProbeRegionTraversal: Bool?
+    public let atlasMeshDescriptor: Bool?
+    public let atlasAnnotationRayPick: Bool?
+    public let atlasDorsalRegionPick: Bool?
+    public let auditedReferenceMajorVessels: Bool?
+    public let radiusAwareReferenceVesselAnalysis: Bool?
 
     public init(
         atlas25Micrometre: Bool,
@@ -126,7 +134,15 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         subjectVascularOverlay: Bool = false,
         subjectVascularRegistration: Bool = false,
         subjectAtlasCalibration: Bool? = nil,
-        calibratedTargetProjection: Bool? = nil
+        calibratedTargetProjection: Bool? = nil,
+        probeCatalog: Bool? = nil,
+        calibratedProbePlanning: Bool? = nil,
+        exactProbeRegionTraversal: Bool? = nil,
+        atlasMeshDescriptor: Bool? = nil,
+        atlasAnnotationRayPick: Bool? = nil,
+        atlasDorsalRegionPick: Bool? = nil,
+        auditedReferenceMajorVessels: Bool? = nil,
+        radiusAwareReferenceVesselAnalysis: Bool? = nil
     ) {
         self.atlas25Micrometre = atlas25Micrometre
         self.atlasDownload = atlasDownload
@@ -138,6 +154,14 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         self.subjectVascularRegistration = subjectVascularRegistration
         self.subjectAtlasCalibration = subjectAtlasCalibration
         self.calibratedTargetProjection = calibratedTargetProjection
+        self.probeCatalog = probeCatalog
+        self.calibratedProbePlanning = calibratedProbePlanning
+        self.exactProbeRegionTraversal = exactProbeRegionTraversal
+        self.atlasMeshDescriptor = atlasMeshDescriptor
+        self.atlasAnnotationRayPick = atlasAnnotationRayPick
+        self.atlasDorsalRegionPick = atlasDorsalRegionPick
+        self.auditedReferenceMajorVessels = auditedReferenceMajorVessels
+        self.radiusAwareReferenceVesselAnalysis = radiusAwareReferenceVesselAnalysis
     }
 }
 
@@ -293,6 +317,9 @@ public struct ProjectBridgeState: Codable, Equatable, Sendable {
     public let animalResearchOnlyAcknowledged: Bool
     public let calibrationCount: Int?
     public let activeCalibrationId: String?
+    public let probePlanCount: Int?
+    public let probeRegionAnalysisCount: Int?
+    public let rendererAnchor: AtlasPhysicalPoint?
 }
 
 public struct AtlasOpenParameters: Codable, Equatable, Sendable {

@@ -1,0 +1,1439 @@
+import CryptoKit
+import Foundation
+
+public enum ProbePlanningContract {
+    public static let catalogVersion = "brain3d-probe-catalog-v2"
+    public static let neuropixelsModelId = "imec-neuropixels-1.0-np1000-prb-1-4-0480-1"
+    public static let neuropixelsModelVersion = "source-snapshot-2026-07-22"
+    public static let neuropixelsDisplayName = "Neuropixels 1.0 — NP1000 / PRB_1_4_0480_1"
+    public static let sourceTranscribedReviewPendingStatus =
+        "source-transcribed-review-pending"
+    public static let sourceTranscribedReviewPendingWarning =
+        "Source-transcribed manufacturer geometry — independent transcription review "
+            + "pending; explicit acknowledgement required"
+    public static let manufacturerSpecSHA256 =
+        "73feccebeadf45c8e7062028588a5b36e9da9f25d10b5d943f33389c3e791f6f"
+    public static let probeTableSHA256 =
+        "6946867508341555960d0b8af2f8e88589f411fc5ff0e122371d377b71f6a3e4"
+    public static let spikeGLXGeometrySHA256 =
+        "59fa29406dc3f6ad38195157d6ddfecbf3b348e13bc3bfd827f50231adbde704"
+    public static let spikeGLXMetadataSHA256 =
+        "654706c021a6da502b10086390b22464567aad5a94ed0d77a4bc9a36c3b3637f"
+    public static let genericModelId = "generic-linear-test-16"
+    public static let genericModelVersion = "1.0"
+    public static let genericDisplayName = "Generic test probe — one shank / 16 sites"
+    public static let genericWarning =
+        "Generic software-test geometry — not a verified Neuropixels device profile"
+    public static let coordinateOrigin = "primary-shank-tip"
+    public static let localAxisDefinition =
+        "axial-from-tip-toward-base, lateral-right, normal-by-right-hand-rule"
+    public static let insertionAxisDefinition = "entry-toward-tip"
+    public static let atlasFrameId = "BRAINGLOBE_PHYSICAL_ASR_UM"
+    public static let regionFrameId = "BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"
+    public static let planningAlgorithmVersion = "calibrated-target-angle-depth-v1"
+    public static let regionAlgorithmVersion = "probe-region-analysis-bundle-v1"
+    public static let angleConvention =
+        "azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"
+
+    public static func requiresExplicitAcknowledgement(
+        verificationStatus: String
+    ) -> Bool {
+        verificationStatus != "verified"
+    }
+
+    public static func preferredCatalogModel(
+        in models: [ProbeCatalogModel],
+        preservingIdentity selectedIdentity: String?
+    ) -> ProbeCatalogModel? {
+        if let selectedIdentity,
+           let selected = models.first(where: { $0.id == selectedIdentity })
+        {
+            return selected
+        }
+        return models.first {
+            $0.modelId == neuropixelsModelId
+                && $0.modelVersion == neuropixelsModelVersion
+        }
+    }
+}
+
+public enum ProbePlanningValidationError: Error, Equatable, LocalizedError, Sendable {
+    case invalid(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .invalid(message): message
+        }
+    }
+}
+
+public struct ProbeCatalogListParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+
+    public init() { protocolVersion = BridgeProtocolVersion.current }
+}
+
+public struct ProbeCatalogGetParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let modelId: String
+    public let modelVersion: String
+
+    public init(modelId: String, modelVersion: String) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.modelId = modelId
+        self.modelVersion = modelVersion
+    }
+}
+
+public struct ProbePlanListParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+
+    public init(projectId: String) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+    }
+}
+
+public struct ProbePlanGetParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let planId: String
+
+    public init(projectId: String, planId: String) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.planId = planId
+    }
+}
+
+public struct ProbePlanCreateParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let targetId: String
+    public let modelId: String
+    public let modelVersion: String
+    public let name: String
+    public let azimuthDegrees: Double
+    public let elevationDegrees: Double
+    public let insertionDepthMicrometres: Double
+    public let axialRotationDegrees: Double
+    public let customGeometryAcknowledged: Bool
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        targetId: String,
+        modelId: String,
+        modelVersion: String,
+        name: String,
+        azimuthDegrees: Double,
+        elevationDegrees: Double,
+        insertionDepthMicrometres: Double,
+        axialRotationDegrees: Double,
+        customGeometryAcknowledged: Bool
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        self.targetId = targetId
+        self.modelId = modelId
+        self.modelVersion = modelVersion
+        self.name = name
+        self.azimuthDegrees = azimuthDegrees
+        self.elevationDegrees = elevationDegrees
+        self.insertionDepthMicrometres = insertionDepthMicrometres
+        self.axialRotationDegrees = axialRotationDegrees
+        self.customGeometryAcknowledged = customGeometryAcknowledged
+    }
+}
+
+public struct ProbePlanUpdateParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let planId: String
+    public let expectedPlanInputSha256: String
+    public let targetId: String
+    public let modelId: String
+    public let modelVersion: String
+    public let name: String
+    public let azimuthDegrees: Double
+    public let elevationDegrees: Double
+    public let insertionDepthMicrometres: Double
+    public let axialRotationDegrees: Double
+    public let customGeometryAcknowledged: Bool
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        planId: String,
+        expectedPlanInputSha256: String,
+        targetId: String,
+        modelId: String,
+        modelVersion: String,
+        name: String,
+        azimuthDegrees: Double,
+        elevationDegrees: Double,
+        insertionDepthMicrometres: Double,
+        axialRotationDegrees: Double,
+        customGeometryAcknowledged: Bool
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        self.planId = planId
+        self.expectedPlanInputSha256 = expectedPlanInputSha256
+        self.targetId = targetId
+        self.modelId = modelId
+        self.modelVersion = modelVersion
+        self.name = name
+        self.azimuthDegrees = azimuthDegrees
+        self.elevationDegrees = elevationDegrees
+        self.insertionDepthMicrometres = insertionDepthMicrometres
+        self.axialRotationDegrees = axialRotationDegrees
+        self.customGeometryAcknowledged = customGeometryAcknowledged
+    }
+}
+
+public struct ProbePlanRemoveParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let planId: String
+    public let expectedPlanInputSha256: String
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        planId: String,
+        expectedPlanInputSha256: String
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        self.planId = planId
+        self.expectedPlanInputSha256 = expectedPlanInputSha256
+    }
+}
+
+public struct ProbeRegionGetParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let planId: String
+
+    public init(projectId: String, planId: String) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.planId = planId
+    }
+}
+
+public struct ProbeRegionAnalyzeParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let planId: String
+    public let expectedPlanInputSha256: String
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        planId: String,
+        expectedPlanInputSha256: String
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        self.planId = planId
+        self.expectedPlanInputSha256 = expectedPlanInputSha256
+    }
+}
+
+public enum ProbeRegionExportFormat: String, Codable, CaseIterable, Equatable, Sendable {
+    case csv
+    case json
+}
+
+public struct ProbeRegionExportParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let planId: String
+    public let expectedPlanInputSha256: String
+    public let format: ProbeRegionExportFormat
+
+    public init(
+        projectId: String,
+        planId: String,
+        expectedPlanInputSha256: String,
+        format: ProbeRegionExportFormat
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.planId = planId
+        self.expectedPlanInputSha256 = expectedPlanInputSha256
+        self.format = format
+    }
+}
+
+public struct ProbeCatalogSourceArtifact: Codable, Equatable, Sendable {
+    public let title: String
+    public let sourceUrl: String
+    public let documentRevision: String
+    public let retrievedOn: String
+    public let sha256: String
+    public let citation: String
+}
+
+public struct ProbeCatalogSite: Codable, Equatable, Identifiable, Sendable {
+    public let siteId: String
+    public let role: String
+    public let bank: String?
+    public let axialFromTipMicrometres: Double
+    public let lateralMicrometres: Double
+    public let normalMicrometres: Double
+
+    public var id: String { siteId }
+}
+
+public struct ProbeCatalogShank: Codable, Equatable, Identifiable, Sendable {
+    public let shankId: String
+    public let lengthMicrometres: Double
+    public let widthMicrometres: Double
+    public let thicknessMicrometres: Double
+    public let tipGeometry: String
+    public let tipLengthMicrometres: Double
+    public let tipGeometryNotes: String
+    public let centerLateralMicrometres: Double
+    public let centerNormalMicrometres: Double
+    public let siteCount: Int
+    public let sites: [ProbeCatalogSite]
+
+    public var id: String { shankId }
+}
+
+public struct ProbeCatalogModel: Codable, Equatable, Identifiable, Sendable {
+    public let modelId: String
+    public let modelVersion: String
+    public let displayName: String
+    public let manufacturer: String?
+    public let productCode: String?
+    public let hardwareRevision: String?
+    public let verificationStatus: String
+    public let verifiedDeviceLabelPermitted: Bool
+    public let shankCount: Int
+    public let siteCount: Int
+    public let units: String
+    public let warning: String?
+    public let geometryNotes: String?
+    public let reviewNotes: String?
+    public let completeGeometryTranscribed: Bool?
+    public let independentTranscriptionReviewCompleted: Bool?
+    public let transcribedBy: String?
+    public let independentlyReviewedBy: String?
+    public let coordinateOrigin: String?
+    public let localAxisDefinition: String?
+    public let insertionAxisDefinition: String?
+    public let primarySources: [ProbeCatalogSourceArtifact]?
+    public let shanks: [ProbeCatalogShank]?
+
+    public var id: String { "\(modelId)@\(modelVersion)" }
+
+    public var requiresExplicitAcknowledgement: Bool {
+        ProbePlanningContract.requiresExplicitAcknowledgement(
+            verificationStatus: verificationStatus
+        )
+    }
+}
+
+public struct ProbeCatalogListResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let catalogVersion: String
+    public let modelCount: Int
+    public let models: [ProbeCatalogModel]
+}
+
+public struct ProbeCatalogGetResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let catalogVersion: String
+    public let model: ProbeCatalogModel
+}
+
+public struct ProbeVoxelIndex: Codable, Equatable, Sendable {
+    public let ap: Int
+    public let dv: Int
+    public let ml: Int
+
+    public init(ap: Int, dv: Int, ml: Int) {
+        self.ap = ap
+        self.dv = dv
+        self.ml = ml
+    }
+}
+
+public struct ProbePhysicalPoint: Codable, Equatable, Sendable {
+    public let apMicrometres: Double
+    public let dvMicrometres: Double
+    public let mlMicrometres: Double
+    public let insideAtlas: Bool
+    public let voxelIndex: ProbeVoxelIndex?
+
+    public init(
+        apMicrometres: Double,
+        dvMicrometres: Double,
+        mlMicrometres: Double,
+        insideAtlas: Bool = true,
+        voxelIndex: ProbeVoxelIndex? = nil
+    ) {
+        self.apMicrometres = apMicrometres
+        self.dvMicrometres = dvMicrometres
+        self.mlMicrometres = mlMicrometres
+        self.insideAtlas = insideAtlas
+        self.voxelIndex = voxelIndex
+    }
+
+    public subscript(axis: AtlasAnatomicalAxis) -> Double {
+        switch axis {
+        case .ap: apMicrometres
+        case .dv: dvMicrometres
+        case .ml: mlMicrometres
+        }
+    }
+}
+
+public struct ProbeSourceTarget: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let origin: String
+    public let componentOrder: [String]
+    public let units: String
+    public let apMillimetres: Double
+    public let mlMillimetres: Double
+    public let dvMillimetres: Double
+}
+
+public struct ProbeCanonicalPoint: Codable, Equatable, Sendable {
+    public let apMicrometres: Double
+    public let mlMicrometres: Double
+    public let dvMicrometres: Double
+}
+
+public struct ProbeCanonicalFrame: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let componentOrder: [String]
+    public let units: String
+    public let apPositiveDirection: String
+    public let mlPositiveDirection: String
+    public let dvPositiveDirection: String
+    public let entry: ProbeCanonicalPoint
+    public let target: ProbeCanonicalPoint
+    public let tip: ProbeCanonicalPoint
+}
+
+public struct ProbeAtlasFrame: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let componentOrder: [String]
+    public let units: String
+    public let origin: String
+    public let entry: ProbePhysicalPoint
+    public let target: ProbePhysicalPoint
+    public let tip: ProbePhysicalPoint
+}
+
+public struct ProbePlacement: Codable, Equatable, Sendable {
+    public let placementId: String
+    public let method: String
+    public let azimuthDegrees: Double
+    public let elevationDegrees: Double
+    public let insertionDepthMicrometres: Double
+    public let axialRotationDegrees: Double
+    public let angleConvention: String
+    public let canonicalFrame: ProbeCanonicalFrame
+    public let atlasFrame: ProbeAtlasFrame
+}
+
+public struct ProbePlacedShank: Codable, Equatable, Identifiable, Sendable {
+    public let shankId: String
+    public let entry: ProbePhysicalPoint
+    public let tip: ProbePhysicalPoint
+    public let widthMicrometres: Double
+    public let thicknessMicrometres: Double
+    public let conservativeEnvelopeRadiusMicrometres: Double
+    public let envelopeDefinition: String
+
+    public init(
+        shankId: String,
+        entry: ProbePhysicalPoint,
+        tip: ProbePhysicalPoint,
+        widthMicrometres: Double,
+        thicknessMicrometres: Double,
+        conservativeEnvelopeRadiusMicrometres: Double,
+        envelopeDefinition: String
+    ) {
+        self.shankId = shankId
+        self.entry = entry
+        self.tip = tip
+        self.widthMicrometres = widthMicrometres
+        self.thicknessMicrometres = thicknessMicrometres
+        self.conservativeEnvelopeRadiusMicrometres = conservativeEnvelopeRadiusMicrometres
+        self.envelopeDefinition = envelopeDefinition
+    }
+
+    public var id: String { shankId }
+}
+
+public struct ProbeRecordingSite: Codable, Equatable, Identifiable, Sendable {
+    public let shankId: String
+    public let siteId: String
+    public let role: String
+    public let bank: String?
+    public let point: ProbePhysicalPoint
+
+    public init(
+        shankId: String,
+        siteId: String,
+        role: String,
+        bank: String? = nil,
+        point: ProbePhysicalPoint
+    ) {
+        self.shankId = shankId
+        self.siteId = siteId
+        self.role = role
+        self.bank = bank
+        self.point = point
+    }
+
+    public var id: String { "\(shankId):\(siteId)" }
+}
+
+public struct ProbePlanProvenance: Codable, Equatable, Sendable {
+    public let calibrationId: String
+    public let calibrationVersion: Int
+    public let calibrationSha256: String
+    public let atlasMetadataSha256: String
+    public let projectionSha256: String
+    public let planningAlgorithmVersion: String
+    public let planInputSha256: String
+    public let catalogVersion: String
+}
+
+public struct ProbePlanSummary: Codable, Equatable, Identifiable, Sendable {
+    public let planId: String
+    public let planVersion: Int
+    public let name: String
+    public let targetId: String
+    public let targetLabel: String
+    public let modelId: String
+    public let modelVersion: String
+    public let modelDisplayName: String
+    public let verificationStatus: String
+    public let inputSha256: String
+    public let calibrationId: String
+    public let calibrationVersion: Int
+    public let regionAnalysisAvailable: Bool
+    public let regionAnalysisSha256: String?
+    public let usableForNavigation: Bool
+
+    public var id: String { planId }
+}
+
+public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
+    public let planId: String
+    public let planVersion: Int
+    public let name: String
+    public let targetId: String
+    public let targetLabel: String
+    public let modelId: String
+    public let modelVersion: String
+    public let modelDisplayName: String
+    public let verificationStatus: String
+    public let inputSha256: String
+    public let calibrationId: String
+    public let calibrationVersion: Int
+    public let regionAnalysisAvailable: Bool
+    public let regionAnalysisSha256: String?
+    public let usableForNavigation: Bool
+    public let sourceTarget: ProbeSourceTarget
+    public let placement: ProbePlacement
+    public let shanks: [ProbePlacedShank]
+    public let recordingSites: [ProbeRecordingSite]
+    public let provenance: ProbePlanProvenance
+    public let warning: String
+
+    public var id: String { planId }
+}
+
+public struct ProbePlanListResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let planCount: Int
+    public let plans: [ProbePlanSummary]
+}
+
+public struct ProbePlanGetResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let plan: ProbePlanDetail
+    public let regionAnalysis: ProbeRegionAnalysisBundle?
+}
+
+public struct ProbePlanMutationResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let plan: ProbePlanDetail
+    public let priorAnalysisCleared: Bool?
+}
+
+public struct ProbePlanRemoveResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let planId: String
+    public let regionAnalysisRemoved: Bool
+}
+
+public struct ProbeRegionPoint: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let componentOrder: [String]
+    public let units: String
+    public let apMicrometres: Double
+    public let mlMicrometres: Double
+    public let dvMicrometres: Double
+}
+
+public struct ProbeRegionSegment: Codable, Equatable, Identifiable, Sendable {
+    public let structureId: Int
+    public let acronym: String
+    public let name: String
+    public let hemisphere: String
+    public let location: String
+    public let entryDepthMicrometres: Double
+    public let exitDepthMicrometres: Double
+    public let lengthMicrometres: Double
+    public let entryPoint: ProbeRegionPoint
+    public let exitPoint: ProbeRegionPoint
+    public let voxelCount: Int
+    public let rgb: [Int]
+
+    public var id: String {
+        "\(structureId):\(entryDepthMicrometres):\(exitDepthMicrometres)"
+    }
+}
+
+public struct ProbeRegionSiteAssignment: Codable, Equatable, Identifiable, Sendable {
+    public let siteId: String
+    public let structureId: Int
+    public let acronym: String
+    public let name: String
+    public let location: String
+    public let insideAtlas: Bool
+    public let insideBrain: Bool
+    public let point: ProbeRegionPoint
+    public let voxelIndex: ProbeVoxelIndex?
+
+    public var id: String { siteId }
+}
+
+public struct ProbeRegionProvenance: Codable, Equatable, Sendable {
+    public let atlasIdentifier: String
+    public let atlasVersion: String
+    public let atlasMetadataSha256: String
+    public let annotationSha256: String
+    public let annotationVersion: String
+    public let algorithmVersion: String
+    public let inputDigest: String
+    public let tieBreakRule: String
+}
+
+public struct ProbeShankRegionAnalysis: Codable, Equatable, Identifiable, Sendable {
+    public let analysisId: String
+    public let shankId: String
+    public let totalPathLengthMicrometres: Double
+    public let clippedPathLengthMicrometres: Double
+    public let outsideAtlasPathLengthMicrometres: Double
+    public let intersectsAtlas: Bool
+    public let segments: [ProbeRegionSegment]
+    public let recordingSiteAssignments: [ProbeRegionSiteAssignment]
+    public let provenance: ProbeRegionProvenance
+
+    public var id: String { shankId }
+}
+
+public struct ProbeRegionAnalysisBundle: Codable, Equatable, Identifiable, Sendable {
+    public let analysisId: String
+    public let planId: String
+    public let planVersion: Int
+    public let planInputSha256: String
+    public let algorithmVersion: String
+    public let analysisSha256: String
+    public let computedAt: String
+    public let usableForNavigation: Bool
+    public let shanks: [ProbeShankRegionAnalysis]
+
+    public var id: String { analysisId }
+}
+
+public struct ProbeRegionResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let regionAnalysis: ProbeRegionAnalysisBundle
+}
+
+public struct ProbeRegionExportResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let planId: String
+    public let planInputSha256: String
+    public let analysisSha256: String
+    public let format: ProbeRegionExportFormat
+    public let mimeType: String
+    public let suggestedFileName: String
+    public let content: String
+    public let contentSha256: String
+    public let projectMutated: Bool
+}
+
+public enum ProbePlanningValidator {
+    private static let acceptedVerificationStatuses: Set<String> = [
+        "verified",
+        ProbePlanningContract.sourceTranscribedReviewPendingStatus,
+        "user-defined-unverified",
+    ]
+
+    private static let neuropixelsSourceIdentities: [(url: String, sha256: String)] = [
+        (
+            "https://www.neuropixels.org/_files/ugd/"
+                + "328966_c5e4d31e8a974962b5eb8ec975408c9f.pdf",
+            ProbePlanningContract.manufacturerSpecSHA256
+        ),
+        (
+            "https://raw.githubusercontent.com/billkarsh/ProbeTable/"
+                + "207f7bf424b0fa26f271700b970e27a58a9a1111/Tables/probe_features.json",
+            ProbePlanningContract.probeTableSHA256
+        ),
+        (
+            "https://raw.githubusercontent.com/billkarsh/SpikeGLX/"
+                + "d67bee45fa2635873456eb5d3f5e5a051690e64f/Src-imro/IMROTbl.cpp",
+            ProbePlanningContract.spikeGLXGeometrySHA256
+        ),
+        (
+            "https://raw.githubusercontent.com/billkarsh/SpikeGLX/"
+                + "d67bee45fa2635873456eb5d3f5e5a051690e64f/Markdown/Metadata_Help.md",
+            ProbePlanningContract.spikeGLXMetadataSHA256
+        ),
+    ]
+
+    public static func validateCreate(_ request: ProbePlanCreateParameters) throws {
+        try validateInput(
+            protocolVersion: request.protocolVersion,
+            projectId: request.projectId,
+            revision: request.expectedProjectRevision,
+            targetId: request.targetId,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            name: request.name,
+            azimuth: request.azimuthDegrees,
+            elevation: request.elevationDegrees,
+            depth: request.insertionDepthMicrometres,
+            rotation: request.axialRotationDegrees,
+            acknowledged: request.customGeometryAcknowledged
+        )
+    }
+
+    public static func validateUpdate(_ request: ProbePlanUpdateParameters) throws {
+        try validateInput(
+            protocolVersion: request.protocolVersion,
+            projectId: request.projectId,
+            revision: request.expectedProjectRevision,
+            targetId: request.targetId,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            name: request.name,
+            azimuth: request.azimuthDegrees,
+            elevation: request.elevationDegrees,
+            depth: request.insertionDepthMicrometres,
+            rotation: request.axialRotationDegrees,
+            acknowledged: request.customGeometryAcknowledged
+        )
+        try requireUUID(request.planId, "planId")
+        try requireSha(request.expectedPlanInputSha256, "expectedPlanInputSha256")
+    }
+
+    public static func validateCatalogList(_ result: ProbeCatalogListResult) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "listed")
+        guard result.catalogVersion == ProbePlanningContract.catalogVersion,
+              result.modelCount == result.models.count,
+              result.modelCount == 2,
+              result.models[0].modelId == ProbePlanningContract.neuropixelsModelId,
+              result.models[0].modelVersion == ProbePlanningContract.neuropixelsModelVersion,
+              result.models[1].modelId == ProbePlanningContract.genericModelId,
+              result.models[1].modelVersion == ProbePlanningContract.genericModelVersion
+        else {
+            throw invalid(
+                "Probe catalog must contain the reviewed NP1 identity followed by the test fixture."
+            )
+        }
+        for model in result.models { try validateCatalogModel(model, detailed: false) }
+    }
+
+    public static func validateCatalogGet(
+        _ result: ProbeCatalogGetResult,
+        modelId: String,
+        modelVersion: String
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "found")
+        guard result.catalogVersion == ProbePlanningContract.catalogVersion,
+              result.model.modelId == modelId,
+              result.model.modelVersion == modelVersion
+        else { throw invalid("Probe catalog detail does not match the requested identity.") }
+        try validateCatalogModel(result.model, detailed: true)
+    }
+
+    public static func validatePlanList(
+        _ result: ProbePlanListResult,
+        projectId: String,
+        projectRevision: Int
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "listed")
+        guard result.projectId == projectId,
+              result.projectRevision == projectRevision,
+              result.planCount == result.plans.count
+        else { throw invalid("Probe-plan list is inconsistent with current project state.") }
+        var ids = Set<String>()
+        for plan in result.plans {
+            try validateSummary(plan)
+            guard ids.insert(plan.planId).inserted else {
+                throw invalid("Probe-plan list contains duplicate plan IDs.")
+            }
+        }
+    }
+
+    public static func validatePlanGet(
+        _ result: ProbePlanGetResult,
+        projectId: String,
+        projectRevision: Int,
+        planId: String
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "found")
+        guard result.projectId == projectId,
+              result.projectRevision == projectRevision,
+              result.plan.planId == planId
+        else { throw invalid("Probe-plan detail is stale or belongs to another project.") }
+        try validatePlan(result.plan)
+        if let analysis = result.regionAnalysis {
+            try validateRegionBundle(analysis, plan: result.plan)
+        }
+    }
+
+    public static func validateMutation(
+        _ result: ProbePlanMutationResult,
+        projectId: String,
+        expectedStatus: String,
+        expectedRevision: Int
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, expectedStatus)
+        guard result.projectId == projectId, result.projectRevision == expectedRevision else {
+            throw invalid("Probe-plan mutation revision or project identity is inconsistent.")
+        }
+        if expectedStatus == "updated", result.priorAnalysisCleared != true {
+            throw invalid("A probe-plan update must explicitly clear its stale region analysis.")
+        }
+        try validatePlan(result.plan)
+    }
+
+    public static func validateRemove(
+        _ result: ProbePlanRemoveResult,
+        projectId: String,
+        planId: String,
+        expectedRevision: Int
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "removed")
+        guard result.projectId == projectId,
+              result.planId == planId,
+              result.projectRevision == expectedRevision
+        else { throw invalid("Probe-plan removal acknowledgement is inconsistent.") }
+    }
+
+    public static func validateRegionResult(
+        _ result: ProbeRegionResult,
+        projectId: String,
+        plan: ProbePlanDetail,
+        expectedStatus: String,
+        expectedRevision: Int
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, expectedStatus)
+        guard result.projectId == projectId, result.projectRevision == expectedRevision else {
+            throw invalid("Probe-region result is stale or belongs to another project.")
+        }
+        try validateRegionBundle(result.regionAnalysis, plan: plan)
+    }
+
+    public static func validateExport(
+        _ result: ProbeRegionExportResult,
+        projectId: String,
+        plan: ProbePlanDetail,
+        analysis: ProbeRegionAnalysisBundle,
+        format: ProbeRegionExportFormat,
+        projectRevision: Int
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "exportedReadOnly")
+        let expectedMime = format == .csv ? "text/csv" : "application/json"
+        let expectedSuffix = ".\(format.rawValue)"
+        guard result.projectId == projectId,
+              result.projectRevision == projectRevision,
+              result.planId == plan.planId,
+              result.planInputSha256 == plan.inputSha256,
+              result.analysisSha256 == analysis.analysisSha256,
+              result.format == format,
+              result.mimeType == expectedMime,
+              result.suggestedFileName.hasSuffix(expectedSuffix),
+              !result.content.isEmpty,
+              result.projectMutated == false
+        else { throw invalid("Probe-region export identity, format, or read-only status is invalid.") }
+        let digest = SHA256.hash(data: Data(result.content.utf8)).map {
+            String(format: "%02x", $0)
+        }.joined()
+        guard result.contentSha256 == digest else {
+            throw invalid("Probe-region export content SHA-256 does not match its content.")
+        }
+    }
+
+    public static func validatePlan(_ plan: ProbePlanDetail) throws {
+        try validateSummaryFields(
+            planId: plan.planId,
+            planVersion: plan.planVersion,
+            name: plan.name,
+            targetId: plan.targetId,
+            modelId: plan.modelId,
+            modelVersion: plan.modelVersion,
+            modelDisplayName: plan.modelDisplayName,
+            verificationStatus: plan.verificationStatus,
+            inputSha256: plan.inputSha256,
+            calibrationId: plan.calibrationId,
+            calibrationVersion: plan.calibrationVersion,
+            regionAnalysisAvailable: plan.regionAnalysisAvailable,
+            regionAnalysisSha256: plan.regionAnalysisSha256,
+            usableForNavigation: plan.usableForNavigation
+        )
+        guard plan.sourceTarget.componentOrder == ["AP", "ML", "DV"],
+              plan.sourceTarget.units == "millimetre",
+              [plan.sourceTarget.apMillimetres, plan.sourceTarget.mlMillimetres,
+               plan.sourceTarget.dvMillimetres].allSatisfy(\.isFinite)
+        else { throw invalid("Probe source target must preserve finite AP/ML/DV millimetres.") }
+        let placement = plan.placement
+        try requireUUID(placement.placementId, "placementId")
+        guard placement.method == "stereotaxic-target-plus-manipulator-angles",
+              placement.angleConvention == ProbePlanningContract.angleConvention,
+              placement.azimuthDegrees.isFinite, (-180 ... 180).contains(placement.azimuthDegrees),
+              placement.elevationDegrees.isFinite, (-90 ... 90).contains(placement.elevationDegrees),
+              placement.insertionDepthMicrometres.isFinite,
+              placement.insertionDepthMicrometres > 0,
+              placement.axialRotationDegrees.isFinite,
+              (-180 ... 180).contains(placement.axialRotationDegrees)
+        else { throw invalid("Probe placement angles, depth, method, or convention are invalid.") }
+        guard placement.canonicalFrame.componentOrder == ["AP", "ML", "DV"],
+              placement.canonicalFrame.units == "micrometre",
+              placement.canonicalFrame.apPositiveDirection == "anterior",
+              placement.canonicalFrame.mlPositiveDirection == "right",
+              placement.canonicalFrame.dvPositiveDirection == "dorsal/up",
+              placement.atlasFrame.frameId == ProbePlanningContract.atlasFrameId,
+              placement.atlasFrame.componentOrder == ["AP", "DV", "ML"],
+              placement.atlasFrame.units == "micrometre",
+              placement.atlasFrame.origin == "anterior/superior/right atlas corner"
+        else { throw invalid("Probe placement coordinate frames are not the reviewed frames.") }
+        try validatePhysicalPoint(placement.atlasFrame.entry)
+        try validatePhysicalPoint(placement.atlasFrame.target)
+        try validatePhysicalPoint(placement.atlasFrame.tip)
+        guard !plan.shanks.isEmpty else { throw invalid("Probe plan must contain a shank.") }
+        var shankIds = Set<String>()
+        for shank in plan.shanks {
+            guard !shank.shankId.isEmpty, shankIds.insert(shank.shankId).inserted,
+                  [shank.widthMicrometres, shank.thicknessMicrometres,
+                   shank.conservativeEnvelopeRadiusMicrometres]
+                    .allSatisfy({ $0.isFinite && $0 > 0 }),
+                  !shank.envelopeDefinition.isEmpty
+            else { throw invalid("Probe shank geometry is missing, duplicate, or non-positive.") }
+            try validatePhysicalPoint(shank.entry)
+            try validatePhysicalPoint(shank.tip)
+        }
+        var sites = Set<String>()
+        for site in plan.recordingSites {
+            guard shankIds.contains(site.shankId), !site.siteId.isEmpty,
+                  sites.insert(site.id).inserted,
+                  ["recording", "reference", "other"].contains(site.role)
+            else { throw invalid("Probe recording-site identity or role is invalid.") }
+            try validatePhysicalPoint(site.point)
+        }
+        guard plan.provenance.calibrationId == plan.calibrationId,
+              plan.provenance.calibrationVersion == plan.calibrationVersion,
+              plan.provenance.planInputSha256 == plan.inputSha256,
+              plan.provenance.catalogVersion == ProbePlanningContract.catalogVersion,
+              plan.provenance.planningAlgorithmVersion
+                == ProbePlanningContract.planningAlgorithmVersion
+        else { throw invalid("Probe plan provenance does not match the displayed plan.") }
+        try requireSha(plan.provenance.calibrationSha256, "calibrationSha256")
+        try requireSha(plan.provenance.atlasMetadataSha256, "atlasMetadataSha256")
+        try requireSha(plan.provenance.projectionSha256, "projectionSha256")
+        guard !plan.warning.isEmpty else {
+            throw invalid("Probe plan must retain its animal-planning warning.")
+        }
+    }
+
+    public static func validateRegionBundle(
+        _ bundle: ProbeRegionAnalysisBundle,
+        plan: ProbePlanDetail
+    ) throws {
+        try requireUUID(bundle.analysisId, "analysisId")
+        guard bundle.planId == plan.planId,
+              bundle.planVersion == plan.planVersion,
+              bundle.planInputSha256 == plan.inputSha256,
+              bundle.algorithmVersion == ProbePlanningContract.regionAlgorithmVersion,
+              bundle.usableForNavigation == false,
+              !bundle.shanks.isEmpty,
+              ISO8601DateFormatter().date(from: bundle.computedAt) != nil
+        else { throw invalid("Probe-region bundle is stale, navigational, or malformed.") }
+        try requireSha(bundle.analysisSha256, "analysisSha256")
+        var shankIds = Set<String>()
+        let planShanks = Set(plan.shanks.map(\.shankId))
+        for shank in bundle.shanks {
+            try requireUUID(shank.analysisId, "shank analysisId")
+            guard planShanks.contains(shank.shankId), shankIds.insert(shank.shankId).inserted,
+                  shank.totalPathLengthMicrometres.isFinite,
+                  shank.clippedPathLengthMicrometres.isFinite,
+                  shank.outsideAtlasPathLengthMicrometres.isFinite,
+                  shank.totalPathLengthMicrometres >= 0,
+                  shank.clippedPathLengthMicrometres >= 0,
+                  shank.outsideAtlasPathLengthMicrometres >= 0,
+                  abs(shank.totalPathLengthMicrometres
+                        - shank.clippedPathLengthMicrometres
+                        - shank.outsideAtlasPathLengthMicrometres) < 1e-5
+            else { throw invalid("Probe-region shank lengths or identity are inconsistent.") }
+            var priorExit = -Double.infinity
+            for segment in shank.segments {
+                guard segment.structureId >= 0,
+                      !segment.acronym.isEmpty, !segment.name.isEmpty,
+                      segment.entryDepthMicrometres.isFinite,
+                      segment.exitDepthMicrometres.isFinite,
+                      segment.lengthMicrometres.isFinite,
+                      segment.entryDepthMicrometres >= priorExit - 1e-7,
+                      segment.exitDepthMicrometres >= segment.entryDepthMicrometres,
+                      abs(segment.lengthMicrometres
+                        - (segment.exitDepthMicrometres - segment.entryDepthMicrometres)) < 1e-5,
+                      segment.voxelCount > 0,
+                      segment.rgb.count == 3,
+                      segment.rgb.allSatisfy({ (0 ... 255).contains($0) })
+                else { throw invalid("Probe-region segment intervals or RGB values are invalid.") }
+                try validateRegionPoint(segment.entryPoint)
+                try validateRegionPoint(segment.exitPoint)
+                priorExit = segment.exitDepthMicrometres
+            }
+            var siteIds = Set<String>()
+            for site in shank.recordingSiteAssignments {
+                guard !site.siteId.isEmpty, siteIds.insert(site.siteId).inserted,
+                      !site.acronym.isEmpty, !site.name.isEmpty,
+                      !site.insideBrain || site.insideAtlas,
+                      site.insideAtlas == (site.voxelIndex != nil)
+                else { throw invalid("Probe recording-site region assignment is inconsistent.") }
+                try validateRegionPoint(site.point)
+            }
+            let provenance = shank.provenance
+            guard provenance.atlasIdentifier == SafetyPolicy.supportedAtlasIdentifier,
+                  provenance.atlasVersion == SafetyPolicy.supportedAtlasVersion,
+                  !provenance.annotationVersion.isEmpty,
+                  !provenance.algorithmVersion.isEmpty,
+                  !provenance.tieBreakRule.isEmpty
+            else { throw invalid("Probe-region provenance is incomplete or uses another atlas.") }
+            try requireSha(provenance.atlasMetadataSha256, "atlasMetadataSha256")
+            try requireSha(provenance.annotationSha256, "annotationSha256")
+            try requireSha(provenance.inputDigest, "inputDigest")
+        }
+    }
+
+    private static func validateSummary(_ plan: ProbePlanSummary) throws {
+        try validateSummaryFields(
+            planId: plan.planId,
+            planVersion: plan.planVersion,
+            name: plan.name,
+            targetId: plan.targetId,
+            modelId: plan.modelId,
+            modelVersion: plan.modelVersion,
+            modelDisplayName: plan.modelDisplayName,
+            verificationStatus: plan.verificationStatus,
+            inputSha256: plan.inputSha256,
+            calibrationId: plan.calibrationId,
+            calibrationVersion: plan.calibrationVersion,
+            regionAnalysisAvailable: plan.regionAnalysisAvailable,
+            regionAnalysisSha256: plan.regionAnalysisSha256,
+            usableForNavigation: plan.usableForNavigation
+        )
+    }
+
+    private static func validateSummaryFields(
+        planId: String,
+        planVersion: Int,
+        name: String,
+        targetId: String,
+        modelId: String,
+        modelVersion: String,
+        modelDisplayName: String,
+        verificationStatus: String,
+        inputSha256: String,
+        calibrationId: String,
+        calibrationVersion: Int,
+        regionAnalysisAvailable: Bool,
+        regionAnalysisSha256: String?,
+        usableForNavigation: Bool
+    ) throws {
+        try requireUUID(planId, "planId")
+        try requireUUID(targetId, "targetId")
+        try requireUUID(calibrationId, "calibrationId")
+        try requireSha(inputSha256, "inputSha256")
+        guard planVersion > 0, calibrationVersion > 0,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !modelId.isEmpty, !modelVersion.isEmpty, !modelDisplayName.isEmpty,
+              acceptedVerificationStatuses.contains(verificationStatus),
+              usableForNavigation == false,
+              regionAnalysisAvailable == (regionAnalysisSha256 != nil)
+        else { throw invalid("Probe-plan summary identity, status, or safety flag is invalid.") }
+        let isNeuropixels = modelId == ProbePlanningContract.neuropixelsModelId
+            && modelVersion == ProbePlanningContract.neuropixelsModelVersion
+            && modelDisplayName == ProbePlanningContract.neuropixelsDisplayName
+            && verificationStatus
+                == ProbePlanningContract.sourceTranscribedReviewPendingStatus
+        let isGenericTestFixture = modelId == ProbePlanningContract.genericModelId
+            && modelVersion == ProbePlanningContract.genericModelVersion
+            && modelDisplayName == ProbePlanningContract.genericDisplayName
+            && verificationStatus == "user-defined-unverified"
+        guard isNeuropixels || isGenericTestFixture else {
+            throw invalid("Probe-plan model identity and verification status do not match.")
+        }
+        if let regionAnalysisSha256 {
+            try requireSha(regionAnalysisSha256, "regionAnalysisSha256")
+        }
+    }
+
+    private static func validateCatalogModel(
+        _ model: ProbeCatalogModel,
+        detailed: Bool
+    ) throws {
+        guard !model.modelId.isEmpty, !model.modelVersion.isEmpty, !model.displayName.isEmpty,
+              model.shankCount > 0, model.siteCount >= 0,
+              model.units == "micrometre",
+              acceptedVerificationStatuses.contains(model.verificationStatus),
+              model.verifiedDeviceLabelPermitted == (model.verificationStatus == "verified")
+        else { throw invalid("Probe catalog model identity, units, or verification gate is invalid.") }
+
+        switch model.modelId {
+        case ProbePlanningContract.neuropixelsModelId:
+            guard model.modelVersion == ProbePlanningContract.neuropixelsModelVersion,
+                  model.displayName == ProbePlanningContract.neuropixelsDisplayName,
+                  model.manufacturer == "imec",
+                  model.productCode == "PRB_1_4_0480_1",
+                  model.hardwareRevision == nil,
+                  model.verificationStatus
+                    == ProbePlanningContract.sourceTranscribedReviewPendingStatus,
+                  model.verifiedDeviceLabelPermitted == false,
+                  model.shankCount == 1,
+                  model.siteCount == 960,
+                  model.warning == ProbePlanningContract.sourceTranscribedReviewPendingWarning
+            else {
+                throw invalid("Neuropixels NP1 identity or review-pending warning changed.")
+            }
+        case ProbePlanningContract.genericModelId:
+            guard model.modelVersion == ProbePlanningContract.genericModelVersion,
+                  model.displayName == ProbePlanningContract.genericDisplayName,
+                  model.manufacturer == nil,
+                  model.productCode == nil,
+                  model.hardwareRevision == nil,
+                  model.verificationStatus == "user-defined-unverified",
+                  model.verifiedDeviceLabelPermitted == false,
+                  model.shankCount == 1,
+                  model.siteCount == 16,
+                  model.warning == ProbePlanningContract.genericWarning
+            else { throw invalid("Generic test probe identity or unverified warning changed.") }
+        default:
+            throw invalid("Probe catalog contains an unsupported model identity.")
+        }
+
+        guard detailed == (model.shanks != nil) else {
+            throw invalid("Probe catalog detail level is inconsistent with the response method.")
+        }
+        guard detailed else {
+            guard model.geometryNotes == nil,
+                  model.reviewNotes == nil,
+                  model.completeGeometryTranscribed == nil,
+                  model.independentTranscriptionReviewCompleted == nil,
+                  model.transcribedBy == nil,
+                  model.independentlyReviewedBy == nil,
+                  model.coordinateOrigin == nil,
+                  model.localAxisDefinition == nil,
+                  model.insertionAxisDefinition == nil,
+                  model.primarySources == nil
+            else { throw invalid("Probe catalog list unexpectedly contains detail metadata.") }
+            return
+        }
+
+        guard let shanks = model.shanks,
+              let geometryNotes = model.geometryNotes,
+              !geometryNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let reviewNotes = model.reviewNotes,
+              !reviewNotes.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              model.completeGeometryTranscribed != nil,
+              model.independentTranscriptionReviewCompleted != nil,
+              model.coordinateOrigin == ProbePlanningContract.coordinateOrigin,
+              model.localAxisDefinition == ProbePlanningContract.localAxisDefinition,
+              model.insertionAxisDefinition == ProbePlanningContract.insertionAxisDefinition,
+              let primarySources = model.primarySources
+        else { throw invalid("Probe catalog detail provenance or coordinate frame is incomplete.") }
+
+        guard shanks.count == model.shankCount,
+              shanks.reduce(0, { $0 + $1.sites.count }) == model.siteCount
+        else { throw invalid("Probe catalog shank or site counts are inconsistent.") }
+        var shankIds = Set<String>(), siteIds = Set<String>()
+        for shank in shanks {
+            guard !shank.shankId.isEmpty, shankIds.insert(shank.shankId).inserted,
+                  [shank.lengthMicrometres, shank.widthMicrometres,
+                   shank.thicknessMicrometres].allSatisfy({ $0.isFinite && $0 > 0 }),
+                  ["chisel", "flat", "triangular", "tapered", "user-defined"]
+                    .contains(shank.tipGeometry),
+                  shank.tipLengthMicrometres.isFinite,
+                  shank.tipLengthMicrometres >= 0,
+                  shank.tipLengthMicrometres < shank.lengthMicrometres,
+                  !shank.tipGeometryNotes
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  shank.centerLateralMicrometres.isFinite,
+                  shank.centerNormalMicrometres.isFinite,
+                  shank.siteCount == shank.sites.count
+            else { throw invalid("Probe catalog shank geometry is invalid.") }
+            for site in shank.sites {
+                guard !site.siteId.isEmpty, siteIds.insert(site.siteId).inserted,
+                      ["recording", "reference", "other"].contains(site.role),
+                      site.axialFromTipMicrometres.isFinite,
+                      (0 ... shank.lengthMicrometres).contains(site.axialFromTipMicrometres),
+                      site.lateralMicrometres.isFinite,
+                      abs(site.lateralMicrometres) <= shank.widthMicrometres / 2,
+                      site.normalMicrometres.isFinite,
+                      abs(site.normalMicrometres) <= shank.thicknessMicrometres / 2
+                else { throw invalid("Probe catalog recording-site geometry is invalid.") }
+            }
+        }
+
+        for source in primarySources {
+            guard !source.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  source.sourceUrl.hasPrefix("https://"),
+                  !source.documentRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !source.retrievedOn.isEmpty,
+                  !source.citation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            else { throw invalid("Probe primary-source provenance is incomplete.") }
+            try requireSha(source.sha256, "primary source sha256")
+        }
+
+        if model.modelId == ProbePlanningContract.neuropixelsModelId {
+            try validateNeuropixelsCatalogDetail(
+                model,
+                shanks: shanks,
+                primarySources: primarySources
+            )
+        } else {
+            try validateGenericCatalogDetail(
+                model,
+                shanks: shanks,
+                primarySources: primarySources
+            )
+        }
+    }
+
+    private static func validateNeuropixelsCatalogDetail(
+        _ model: ProbeCatalogModel,
+        shanks: [ProbeCatalogShank],
+        primarySources: [ProbeCatalogSourceArtifact]
+    ) throws {
+        guard model.completeGeometryTranscribed == true,
+              model.independentTranscriptionReviewCompleted == false,
+              model.transcribedBy == "Brain3D automated source transcription",
+              model.independentlyReviewedBy == nil,
+              primarySources.count == neuropixelsSourceIdentities.count
+        else {
+            throw invalid(
+                "Review-pending NP1 geometry cannot claim independent verification."
+            )
+        }
+        for (source, expected) in zip(primarySources, neuropixelsSourceIdentities) {
+            guard source.sourceUrl == expected.url,
+                  source.sha256 == expected.sha256,
+                  source.retrievedOn == "2026-07-22"
+            else { throw invalid("Neuropixels NP1 primary-source identity changed.") }
+        }
+
+        guard let shank = shanks.first,
+              shank.shankId == "shank-0",
+              shank.lengthMicrometres == 10_000,
+              shank.widthMicrometres == 70,
+              shank.thicknessMicrometres == 24,
+              shank.tipGeometry == "chisel",
+              shank.tipLengthMicrometres == 175,
+              shank.tipGeometryNotes.contains("175"),
+              shank.tipGeometryNotes.contains("209"),
+              shank.centerLateralMicrometres == 0,
+              shank.centerNormalMicrometres == 0,
+              shank.siteCount == 960
+        else { throw invalid("Neuropixels NP1 shank or tip geometry changed.") }
+
+        let referenceSites: Set<Int> = [191, 575, 959]
+        for (index, site) in shank.sites.enumerated() {
+            let row = index / 2
+            let column = index % 2
+            let expectedLateral: Double
+            if row.isMultiple(of: 2) {
+                expectedLateral = column == 0 ? -8 : 24
+            } else {
+                expectedLateral = column == 0 ? -24 : 8
+            }
+            guard site.siteId == String(format: "electrode-%03d", index),
+                  site.role == (referenceSites.contains(index) ? "reference" : "recording"),
+                  site.bank == "bank-\(index / 384)",
+                  site.axialFromTipMicrometres == Double(209 + 20 * row),
+                  site.lateralMicrometres == expectedLateral,
+                  site.normalMicrometres == 0
+            else {
+                throw invalid("Neuropixels NP1 site table changed at electrode \(index).")
+            }
+        }
+    }
+
+    private static func validateGenericCatalogDetail(
+        _ model: ProbeCatalogModel,
+        shanks: [ProbeCatalogShank],
+        primarySources: [ProbeCatalogSourceArtifact]
+    ) throws {
+        guard model.completeGeometryTranscribed == false,
+              model.independentTranscriptionReviewCompleted == false,
+              model.transcribedBy == nil,
+              model.independentlyReviewedBy == nil,
+              primarySources.isEmpty,
+              let shank = shanks.first,
+              shank.shankId == "test-shank-1",
+              shank.lengthMicrometres == 10_000,
+              shank.widthMicrometres == 70,
+              shank.thicknessMicrometres == 20,
+              shank.tipGeometry == "triangular",
+              shank.tipLengthMicrometres == 200,
+              shank.centerLateralMicrometres == 0,
+              shank.centerNormalMicrometres == 0,
+              shank.siteCount == 16
+        else { throw invalid("Generic software-test probe geometry changed.") }
+        for (index, site) in shank.sites.enumerated() {
+            guard site.siteId == String(format: "test-site-%02d", index + 1),
+                  site.role == "recording",
+                  site.bank == "software-test",
+                  site.axialFromTipMicrometres == Double(index + 1) * 250,
+                  site.lateralMicrometres == 0,
+                  site.normalMicrometres == 0
+            else { throw invalid("Generic software-test site table changed.") }
+        }
+    }
+
+    private static func validateInput(
+        protocolVersion: Int,
+        projectId: String,
+        revision: Int,
+        targetId: String,
+        modelId: String,
+        modelVersion: String,
+        name: String,
+        azimuth: Double,
+        elevation: Double,
+        depth: Double,
+        rotation: Double,
+        acknowledged: Bool
+    ) throws {
+        guard protocolVersion == BridgeProtocolVersion.current else {
+            throw invalid("Probe request protocol version is unsupported.")
+        }
+        try requireUUID(projectId, "projectId")
+        try requireUUID(targetId, "targetId")
+        guard revision >= 0,
+              !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              name.count <= 200,
+              !modelId.isEmpty, !modelVersion.isEmpty,
+              azimuth.isFinite, (-180 ... 180).contains(azimuth),
+              elevation.isFinite, (-90 ... 90).contains(elevation),
+              depth.isFinite, depth > 0,
+              rotation.isFinite, (-180 ... 180).contains(rotation)
+        else { throw invalid("Probe-plan name, angles, depth, or revision is invalid.") }
+        let requiresAcknowledgement: Bool
+        switch modelId {
+        case ProbePlanningContract.neuropixelsModelId:
+            guard modelVersion == ProbePlanningContract.neuropixelsModelVersion else {
+                throw invalid("The requested Neuropixels model version is not catalogued.")
+            }
+            requiresAcknowledgement = true
+        case ProbePlanningContract.genericModelId:
+            guard modelVersion == ProbePlanningContract.genericModelVersion else {
+                throw invalid("The requested generic test model version is not catalogued.")
+            }
+            requiresAcknowledgement = true
+        default:
+            throw invalid("The requested probe model identity is not in this catalog.")
+        }
+        if requiresAcknowledgement, !acknowledged {
+            throw invalid(
+                "This probe geometry requires explicit acknowledgement before animal planning."
+            )
+        }
+    }
+
+    private static func validatePhysicalPoint(_ point: ProbePhysicalPoint) throws {
+        guard [point.apMicrometres, point.dvMicrometres, point.mlMicrometres]
+            .allSatisfy(\.isFinite), point.insideAtlas == (point.voxelIndex != nil)
+        else { throw invalid("Probe atlas point or inside-atlas voxel state is inconsistent.") }
+    }
+
+    private static func validateRegionPoint(_ point: ProbeRegionPoint) throws {
+        guard point.frameId == ProbePlanningContract.regionFrameId,
+              point.componentOrder == ["AP", "ML", "DV"],
+              point.units == "micrometre",
+              [point.apMicrometres, point.mlMicrometres, point.dvMicrometres]
+                .allSatisfy(\.isFinite)
+        else { throw invalid("Probe-region point does not use exact AP/ML/DV physical units.") }
+    }
+
+    private static func requireEnvelope(
+        _ protocolVersion: Int,
+        _ status: String,
+        _ expectedStatus: String
+    ) throws {
+        guard protocolVersion == BridgeProtocolVersion.current, status == expectedStatus else {
+            throw invalid("Probe bridge protocol version or status is invalid.")
+        }
+    }
+
+    private static func requireUUID(_ value: String, _ field: String) throws {
+        guard UUID(uuidString: value) != nil else { throw invalid("\(field) must be a UUID.") }
+    }
+
+    private static func requireSha(_ value: String, _ field: String) throws {
+        guard value.utf8.count == 64,
+              value.utf8.allSatisfy({
+                  ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+              })
+        else { throw invalid("\(field) must be 64 lowercase hexadecimal characters.") }
+    }
+
+    private static func invalid(_ message: String) -> ProbePlanningValidationError {
+        .invalid(message)
+    }
+}

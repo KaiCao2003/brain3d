@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mouse-brain-planner"
 version = "0.1.0"
-description = "Experimental macOS workspace for pinned mouse-atlas data and static views."
+description = "Animal-only mouse stereotaxy, atlas, probe, and reference-vessel planning."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12,<3.13"

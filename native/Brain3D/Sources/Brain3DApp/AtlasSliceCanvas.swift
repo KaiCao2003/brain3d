@@ -21,6 +21,9 @@ struct AtlasSliceCanvas: NSViewRepresentable {
     let imagePixelHeight: Int
     let viewportIdentity: String
     let selection: AtlasSliceSelection?
+    let majorVesselOverlay: MajorVesselSliceOverlay?
+    let probeOverlay: ProbeSliceOverlay?
+    let interactionHelp: String
     let accessibilityLabel: String
     let accessibilityValue: String
     let resetGeneration: Int
@@ -44,6 +47,9 @@ struct AtlasSliceCanvas: NSViewRepresentable {
             imagePixelHeight: imagePixelHeight,
             viewportIdentity: viewportIdentity,
             selection: selection,
+            majorVesselOverlay: majorVesselOverlay,
+            probeOverlay: probeOverlay,
+            interactionHelp: interactionHelp,
             accessibilityLabel: accessibilityLabel,
             accessibilityValue: accessibilityValue,
             resetGeneration: resetGeneration,
@@ -58,12 +64,26 @@ final class AtlasSliceNSView: NSView {
     private static let minimumZoom: CGFloat = 1.0
     private static let maximumZoom: CGFloat = 12.0
     private static let dragThreshold: CGFloat = 4.0
+    // The core still scales from the measured vessel diameter. These lower
+    // bounds and the achromatic halo are display aids only: they keep a real
+    // subpixel intersection visible without changing path coordinates or
+    // source radius data.
+    private static let minimumVesselCoreWidth: CGFloat = 2.25
+    private static let minimumVesselPointDiameter: CGFloat = 3.25
+    private static let vesselHaloExpansion: CGFloat = 3.0
+    private static let vesselCoreColor = NSColor(
+        calibratedWhite: 0.98,
+        alpha: 0.98
+    )
+    private static let vesselHaloColor = NSColor.black.withAlphaComponent(0.88)
 
     private var imageData: Data?
     private var image: NSImage?
     private var imagePixelWidth = 0
     private var imagePixelHeight = 0
     private var selection: AtlasSliceSelection?
+    private var majorVesselOverlay: MajorVesselSliceOverlay?
+    private var probeOverlay: ProbeSliceOverlay?
     private var lastViewportIdentity: String?
     private var lastPositiveImagePixelSize: (width: Int, height: Int)?
     private var pickHandler: ((Int, Int) -> Void)?
@@ -112,6 +132,9 @@ final class AtlasSliceNSView: NSView {
         imagePixelHeight: Int,
         viewportIdentity: String,
         selection: AtlasSliceSelection?,
+        majorVesselOverlay: MajorVesselSliceOverlay?,
+        probeOverlay: ProbeSliceOverlay?,
+        interactionHelp: String,
         accessibilityLabel: String,
         accessibilityValue: String,
         resetGeneration: Int,
@@ -139,10 +162,13 @@ final class AtlasSliceNSView: NSView {
         self.imagePixelWidth = sanitizedWidth
         self.imagePixelHeight = sanitizedHeight
         self.selection = selection
+        self.majorVesselOverlay = majorVesselOverlay
+        self.probeOverlay = probeOverlay
         pickHandler = onPick
         sliceStepHandler = onSliceStep
         setAccessibilityLabel(accessibilityLabel)
         setAccessibilityValue(accessibilityValue)
+        setAccessibilityHelp(interactionHelp)
         if resetGeneration != lastResetGeneration {
             lastResetGeneration = resetGeneration
             resetViewport()
@@ -172,6 +198,8 @@ final class AtlasSliceNSView: NSView {
             hints: nil
         )
         context?.imageInterpolation = previousInterpolation ?? .default
+        drawMajorVesselsIfPresent()
+        drawProbeOverlayIfPresent()
         drawSelectionIfPresent()
     }
 
@@ -369,5 +397,195 @@ final class AtlasSliceNSView: NSView {
             at: CGPoint(x: bubbleRect.minX + 9, y: bubbleRect.minY + 21),
             withAttributes: subtitleAttributes
         )
+    }
+
+    private func drawProbeOverlayIfPresent() {
+        guard let probeOverlay else { return }
+
+        for intersection in probeOverlay.shankIntersections {
+            switch intersection.geometry {
+            case let .point(imagePoint):
+                guard let point = viewport.pointForImageCoordinate(
+                    column: imagePoint.column,
+                    row: imagePoint.row
+                ) else { continue }
+                let outer = NSBezierPath(
+                    ovalIn: CGRect(x: point.x - 5, y: point.y - 5, width: 10, height: 10)
+                )
+                NSColor.black.withAlphaComponent(0.8).setStroke()
+                outer.lineWidth = 4
+                outer.stroke()
+                NSColor.systemOrange.setStroke()
+                outer.lineWidth = 2
+                outer.stroke()
+            case let .segment(start, end):
+                guard
+                    let startPoint = viewport.pointForImageCoordinate(
+                        column: start.column,
+                        row: start.row
+                    ),
+                    let endPoint = viewport.pointForImageCoordinate(
+                        column: end.column,
+                        row: end.row
+                    )
+                else { continue }
+                let line = NSBezierPath()
+                line.move(to: startPoint)
+                line.line(to: endPoint)
+                line.lineCapStyle = .round
+                NSColor.black.withAlphaComponent(0.75).setStroke()
+                line.lineWidth = 5
+                line.stroke()
+                NSColor.systemOrange.setStroke()
+                line.lineWidth = 2.5
+                line.stroke()
+            }
+        }
+
+        for marker in probeOverlay.markers where marker.role == .recordingSite {
+            guard let point = viewport.pointForImageCoordinate(
+                column: marker.imagePoint.column,
+                row: marker.imagePoint.row
+            ) else { continue }
+            let rect = CGRect(x: point.x - 2.5, y: point.y - 2.5, width: 5, height: 5)
+            NSColor.black.withAlphaComponent(0.8).setStroke()
+            NSColor.systemCyan.setFill()
+            let path = NSBezierPath(roundedRect: rect, xRadius: 1, yRadius: 1)
+            path.lineWidth = 1.5
+            path.fill()
+            path.stroke()
+        }
+
+        for marker in probeOverlay.markers where marker.role != .recordingSite {
+            guard let point = viewport.pointForImageCoordinate(
+                column: marker.imagePoint.column,
+                row: marker.imagePoint.row
+            ) else { continue }
+            let path: NSBezierPath
+            let color: NSColor
+            switch marker.role {
+            case .entry:
+                path = triangle(at: point, radius: 6, pointsUp: true)
+                color = .systemGreen
+            case .target:
+                path = diamond(at: point, radius: 6)
+                color = .systemYellow
+            case .tip:
+                path = triangle(at: point, radius: 6, pointsUp: false)
+                color = .systemRed
+            case .recordingSite:
+                continue
+            }
+            NSColor.black.withAlphaComponent(0.85).setStroke()
+            color.setFill()
+            path.lineWidth = 2
+            path.fill()
+            path.stroke()
+        }
+    }
+
+    private func drawMajorVesselsIfPresent() {
+        guard let overlay = majorVesselOverlay,
+              overlay.inPlaneResolutionMicrometres.isFinite,
+              overlay.inPlaneResolutionMicrometres > 0,
+              let imageRect = viewport.displayedImageRect,
+              imagePixelWidth > 0
+        else { return }
+        let pointsPerImagePixel = imageRect.width / CGFloat(imagePixelWidth)
+        var paths: [Int: NSBezierPath] = [:]
+        var pointMarkers: [(CGPoint, CGFloat)] = []
+        for segment in overlay.segments {
+            guard let start = viewport.pointForImageCoordinate(
+                column: segment.start.column,
+                row: segment.start.row
+            ), let end = viewport.pointForImageCoordinate(
+                column: segment.end.column,
+                row: segment.end.row
+            ) else { continue }
+            let averageRadius = (segment.startRadiusMicrometres
+                + segment.endRadiusMicrometres) / 2
+            let physicalWidth = 2 * averageRadius / overlay.inPlaneResolutionMicrometres
+            let lineWidth = max(
+                Self.minimumVesselCoreWidth,
+                CGFloat(physicalWidth) * pointsPerImagePixel
+            )
+            if hypot(end.x - start.x, end.y - start.y) < 0.25 {
+                pointMarkers.append((start, lineWidth))
+                continue
+            }
+            // Round upward so batching never draws a radius-bearing segment
+            // narrower than its physical display width.
+            let widthBucket = Int((lineWidth * 4).rounded(.up))
+            let path = paths[widthBucket] ?? NSBezierPath()
+            path.move(to: start)
+            path.line(to: end)
+            path.lineCapStyle = .round
+            paths[widthBucket] = path
+        }
+        let sortedWidthBuckets = paths.keys.sorted()
+        for widthBucket in sortedWidthBuckets {
+            guard let path = paths[widthBucket] else { continue }
+            let lineWidth = CGFloat(widthBucket) / 4
+            Self.vesselHaloColor.setStroke()
+            path.lineWidth = lineWidth + Self.vesselHaloExpansion
+            path.stroke()
+        }
+        let pointDiameters = pointMarkers.map { point, lineWidth in
+            (point, max(Self.minimumVesselPointDiameter, lineWidth))
+        }
+        for (point, coreDiameter) in pointDiameters {
+            let haloDiameter = coreDiameter + Self.vesselHaloExpansion
+            let halo = NSBezierPath(
+                ovalIn: CGRect(
+                    x: point.x - haloDiameter / 2,
+                    y: point.y - haloDiameter / 2,
+                    width: haloDiameter,
+                    height: haloDiameter
+                )
+            )
+            Self.vesselHaloColor.setFill()
+            halo.fill()
+        }
+        // Draw every neutral core after every halo so dense Dorsal paths do
+        // not lose a thinner branch underneath a later width bucket's halo.
+        for widthBucket in sortedWidthBuckets {
+            guard let path = paths[widthBucket] else { continue }
+            let lineWidth = CGFloat(widthBucket) / 4
+            Self.vesselCoreColor.setStroke()
+            path.lineWidth = lineWidth
+            path.stroke()
+        }
+        for (point, coreDiameter) in pointDiameters {
+            let core = NSBezierPath(
+                ovalIn: CGRect(
+                    x: point.x - coreDiameter / 2,
+                    y: point.y - coreDiameter / 2,
+                    width: coreDiameter,
+                    height: coreDiameter
+                )
+            )
+            Self.vesselCoreColor.setFill()
+            core.fill()
+        }
+    }
+
+    private func triangle(at point: CGPoint, radius: CGFloat, pointsUp: Bool) -> NSBezierPath {
+        let sign: CGFloat = pointsUp ? -1 : 1
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: point.x, y: point.y + sign * radius))
+        path.line(to: CGPoint(x: point.x - radius, y: point.y - sign * radius * 0.75))
+        path.line(to: CGPoint(x: point.x + radius, y: point.y - sign * radius * 0.75))
+        path.close()
+        return path
+    }
+
+    private func diamond(at point: CGPoint, radius: CGFloat) -> NSBezierPath {
+        let path = NSBezierPath()
+        path.move(to: CGPoint(x: point.x, y: point.y - radius))
+        path.line(to: CGPoint(x: point.x + radius, y: point.y))
+        path.line(to: CGPoint(x: point.x, y: point.y + radius))
+        path.line(to: CGPoint(x: point.x - radius, y: point.y))
+        path.close()
+        return path
     }
 }

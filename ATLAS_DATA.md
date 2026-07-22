@@ -159,7 +159,7 @@ midline (`5700 µm`). The adapter checks BrainGlobe's scalar hemisphere labels (
 without loading its hemisphere volume, and hemisphere classification uses the persisted midline
 rather than inferring one from the current array shape at the call site.
 
-## Population vascular density is a separate source
+## Archived population density is a separate source
 
 The optional vascular layer is not part of the BrainGlobe atlas package and must not be described
 as an Allen vessel annotation. It comes from Yongsoo Kim's
@@ -175,8 +175,22 @@ dorsal overlay is a DV maximum projection.
 
 That product is a symmetrized four-mouse population vascular length density with a 100 µm local
 window. It is not individual vessel paths, is not subject-specific, and cannot establish vessel
-clearance. The 50 µm prepared grid also does not acquire 25 µm vascular resolution merely because
-it is composited over a 25 µm atlas image. Full provenance and terms are in
+clearance. The workflow remains archived in the backend and is absent from the primary UI. The
+50 µm prepared grid does not acquire 25 µm vascular resolution merely because it is composited
+over a 25 µm atlas image.
+
+## LAMBADA major-vessel reference
+
+The primary major-vessel layer is a bundled derivative of Renier, de Launoit, and Skriabine's
+P60_606 graph, [Zenodo record 18876865](https://zenodo.org/records/18876865), DOI
+`10.5281/zenodo.18876865`, CC BY 4.0. It is bound to the accepted Allen 25 µm array shape and
+contains maximal consecutive in-bounds runs whose point radius is at least 15 µm (diameter at
+least 30 µm). It is overlaid on intersecting slices, Dorsal, and the SceneKit 3D brain.
+
+The graph is one fixed cleared P60 reference, not subject-specific vasculature. The source omits
+pial and choroidal vessels, and the derivative omits smaller vessels. Full identity, extraction,
+coordinate conversion, checks, counts, and limitations are in
+[LAMBADA Major Vessels](docs/LAMBADA_MAJOR_VESSELS.md) and
 [Third-Party Software and Data](THIRD_PARTY.md).
 
 ## No official CCF bregma
@@ -185,11 +199,11 @@ The CCF is an average of ex-cranio fixed brains and has no single source skull. 
 provide one uniquely correct bregma or lambda for the CCF. Atlas origin, physical center,
 hemisphere midline, and renderer origin are not bregma.
 
-Atlas lookup remains atlas-native. The current application may preserve an exact AP/ML/DV target
-entered in millimetres from bregma, but that record is explicitly unprojected and unusable for
-navigation. Projection appears only after the user selects or defines a named, versioned
-calibration profile with landmarks, transform, units, atlas identity, uncertainty, and citation.
-No IBL or other estimate may be applied invisibly.
+Atlas lookup remains atlas-native. The application first preserves exact AP/ML/DV values entered
+in millimetres from bregma as an unprojected record. Projection occurs only after the user creates
+and activates a named, versioned subject calibration with matched landmarks, transform, units,
+atlas identity, residuals, uncertainty, and declared QC source. No IBL or other estimate is
+applied invisibly.
 
 ## Not included in the current build
 
@@ -199,12 +213,10 @@ No IBL or other estimate may be applied invisibly.
 - chunked or memory-mapped BrainGlobe 3.x storage;
 - atlas upgrades or migration across package versions;
 - a full atlas-file content manifest;
-- calibrated bregma-to-atlas target projection or navigation;
-- a validated subject-specific 3D vessel graph or vessel-clearance calculation;
+- a validated subject-specific 3D vessel graph;
 - automatic subject-image vessel segmentation;
-- a native 3D renderer in bridge protocol v1;
 - automatic cache removal; and
-- any inference of a vessel-free surgical corridor.
+- any inference that omitted or subject-specific vessels are absent.
 
 Consult [Scientific Validation](SCIENTIFIC_VALIDATION.md) for exactly which real-data and
 synthetic-data tests have been run.

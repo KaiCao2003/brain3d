@@ -155,6 +155,7 @@ def test_extension_capabilities_are_discoverable_without_loading_atlas() -> None
     assert capabilities["atlasRegionRecords"] is True
     assert capabilities["atlasRegionSearch"] is True
     assert capabilities["atlasPhysicalPointLookup"] is True
+    assert capabilities["atlasAnnotationRayPick"] is True
     assert capabilities["atlasMeshDescriptor"] is True
     assert diagnostics == ""
 
@@ -318,6 +319,83 @@ def test_point_lookup_background_is_explicit_null(fake_atlas: _FakeLoadedAtlas) 
     assert responses[0]["result"]["annotationStructureId"] == 0
 
 
+def _ray_params(**patch: object) -> dict[str, object]:
+    params: dict[str, object] = {
+        "protocolVersion": 1,
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "startApMicrometres": -100.0,
+        "startDvMicrometres": 12.5,
+        "startMlMicrometres": 12.5,
+        "endApMicrometres": 200.0,
+        "endDvMicrometres": 12.5,
+        "endMlMicrometres": 12.5,
+    }
+    params.update(patch)
+    return params
+
+
+def test_annotation_ray_pick_returns_first_exact_voxel_and_region(
+    fake_atlas: _FakeLoadedAtlas,
+) -> None:
+    responses, diagnostics = _run(
+        _request("ray", "atlas.ray.pick", _ray_params()),
+        atlas=fake_atlas,
+    )
+
+    result = responses[0]["result"]
+    assert result["status"] == "hit"
+    assert result["algorithmVersion"] == "amanatides-woo-clipped-half-open-first-nonzero-v1"
+    assert result["coordinateFrame"]["axisOrder"] == ["AP", "DV", "ML"]
+    hit = result["hit"]
+    assert hit["containingVoxelIndex"] == {
+        "frameId": "BRAINGLOBE_VOXEL_INDEX_ASR",
+        "ap": 0,
+        "dv": 0,
+        "ml": 0,
+    }
+    assert hit["voxelCenter"] == {
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "apMicrometres": 12.5,
+        "dvMicrometres": 12.5,
+        "mlMicrometres": 12.5,
+    }
+    assert hit["entryPoint"]["apMicrometres"] == pytest.approx(0.0)
+    assert hit["distanceFromRayStartMicrometres"] == pytest.approx(100.0)
+    assert hit["distanceInsideVoxelMicrometres"] == pytest.approx(25.0)
+    assert hit["annotationStructureId"] == 385
+    assert hit["region"]["name"] == "Primary visual area"
+    assert diagnostics == ""
+
+
+@pytest.mark.parametrize(
+    ("patch", "error_code"),
+    (
+        ({"frameId": "STEREOTAXIC_USER_BREGMA"}, "INVALID_PARAMS"),
+        ({"startApMicrometres": True}, "INVALID_PARAMS"),
+        ({"endApMicrometres": float("nan")}, "PARSE_ERROR"),
+        (
+            {
+                "endApMicrometres": -100.0,
+                "endDvMicrometres": 12.5,
+                "endMlMicrometres": 12.5,
+            },
+            "ATLAS_RAY_INVALID",
+        ),
+    ),
+)
+def test_annotation_ray_pick_rejects_implicit_frames_and_invalid_segments(
+    fake_atlas: _FakeLoadedAtlas,
+    patch: dict[str, object],
+    error_code: str,
+) -> None:
+    responses, _ = _run(
+        _request("invalid-ray", "atlas.ray.pick", _ray_params(**patch)),
+        atlas=fake_atlas,
+    )
+
+    assert responses[0]["error"]["code"] == error_code
+
+
 @pytest.mark.parametrize(
     ("patch", "error_code"),
     [
@@ -435,7 +513,10 @@ def test_mesh_path_escape_is_rejected_even_if_adapter_double_returns_it(
     assert responses[0]["error"]["code"] == "ATLAS_MESH_PATH_INVALID"
 
 
-@pytest.mark.parametrize("method", ["atlas.regions", "atlas.search", "atlas.point", "atlas.mesh"])
+@pytest.mark.parametrize(
+    "method",
+    ["atlas.regions", "atlas.search", "atlas.point", "atlas.ray.pick", "atlas.mesh"],
+)
 def test_all_interaction_methods_require_an_open_atlas(method: str) -> None:
     params_by_method: dict[str, dict[str, object]] = {
         "atlas.regions": {"protocolVersion": 1},
@@ -447,6 +528,7 @@ def test_all_interaction_methods_require_an_open_atlas(method: str) -> None:
             "dvMicrometres": 0,
             "mlMicrometres": 0,
         },
+        "atlas.ray.pick": _ray_params(),
         "atlas.mesh": {"protocolVersion": 1, "target": "root"},
     }
 

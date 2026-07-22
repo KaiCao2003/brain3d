@@ -1,11 +1,11 @@
 # Installation
 
-Brain3D currently builds a native SwiftUI development `.app` that launches a separate Python
-scientific service from the repository environment. The supported development target is Apple
-Silicon (`arm64`), macOS 14 or later, CPython 3.12, and Swift.
+Brain3D currently builds a native SwiftUI + SceneKit development `.app` that launches a separate
+Python scientific service from the repository environment. The supported development target is
+Apple Silicon (`arm64`), macOS 14 or later, CPython 3.12, and Swift.
 
-> **Animal research only:** this is not a certified medical, veterinary, or surgical-navigation
-> device. The current alpha is not usable to guide an animal procedure.
+> **Animal research only — non-human and non-clinical:** this is not a certified medical,
+> veterinary, or surgical-navigation device. The development build is not a qualified release.
 
 ## Prerequisites
 
@@ -77,8 +77,12 @@ above after reviewing [Atlas Data](ATLAS_DATA.md) and the
 | --- | ---: |
 | 25 µm reference plus annotation arrays | 462,274,560 bytes / 0.43 GiB |
 | Optional pinned population-density archive | 311,493,514 bytes |
+| Bundled LAMBADA P60_606 major-vessel derivative | 814,393 bytes |
 
-Peak memory and temporary disk use are higher. Existing 10 µm cache data is ignored.
+The population-density workflow is archived and absent from the primary UI. The bundled LAMBADA
+reference is integrity-checked and filtered to diameter ≥30 µm; it is one fixed cleared specimen,
+not subject-specific data. Peak memory and temporary disk use are higher. Existing 10 µm cache
+data is ignored.
 
 ## Application-owned locations
 
@@ -113,10 +117,11 @@ Run `uv sync --frozen --no-dev` at the repository root and confirm `.venv/bin/py
 Confirm the service is connected and the application-owned directories are writable. An
 uncached atlas needs an explicit networked download; a validated cached atlas can open offline.
 
-### 3D unavailable
+### 3D scene does not load
 
-This is expected. The supported app currently exposes fixed raster views and no 3D renderer. The
-removed Qt renderer is not a fallback product.
+Confirm the 25 µm atlas is open and the Python bridge remains connected. The SceneKit view requires
+the verified atlas scene descriptor/mesh and rejects malformed or mismatched geometry. The removed
+Qt renderer is not a fallback product.
 
 ### Project validation fails
 

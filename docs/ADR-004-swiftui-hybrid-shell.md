@@ -45,39 +45,41 @@ SwiftUI owns:
 - windows, menus, native file panels, keyboard focus, accessibility, and presentation;
 - asynchronous bridge lifecycle and explicit disconnected/loading/error states;
 - rendering bridge-produced atlas PNGs and verified mesh assets;
-- landmark editing controls that send declared pixel and atlas coordinates.
+- SceneKit camera interaction, ray construction, and display of verified brain/probe/vessel
+  geometry; and
+- calibration, target, probe, and vessel controls that send declared typed inputs.
 
 Python owns:
 
 - BrainGlobe atlas acquisition, validation, metadata, hierarchy, arrays, and mesh provenance;
 - coordinate systems and transforms;
+- subject calibration, AP/ML/DV target projection, probe geometry, voxel traversal, and
+  tapered-radius major-vessel analysis;
 - subject dorsal-image byte preservation, landmark fitting, residuals, and atlas-grid resampling;
 - population reference-density validation and its non-subject-specific limitation;
-- project models, migrations, checksums, atomic save, backup recovery, exports, and future probe
-  calculations.
+- project models, migrations, checksums, atomic save, backup recovery, and exports.
 
 Swift must not duplicate or reinterpret atlas axes, fit scientific transforms, infer laterality,
 or calculate vessel clearance. A UI cannot display a subject image as registered until Python
 returns a registration, residuals, and explicit laterality confirmation. Population vascular
 density can never be presented as individual vessel paths or used for subject clearance.
 
-The current protocol-v1 feature boundary is:
+The implemented protocol-v1 feature boundary, expanded on 2026-07-22 without changing the
+process decision, is:
 
 - exactly `allen_mouse_25um` v1.2; 10 µm is not offered during testing;
-- dorsal, coronal, sagittal, and horizontal verified raster views;
-- no native 3D renderer, represented by an explicit unavailable state;
-- an optional transparent dorsal DV-maximum overlay from the pinned Mendeley Data v1
-  `10.17632/stxvn5sv44.1` four-mouse population vascular length-density field;
-- a separate user-supplied subject dorsal image with byte provenance, landmarks, laterality,
-  residuals, and registration, but no automatic or implied vessel segmentation; and
-- exact storage of `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` implant targets with AP−
-  posterior/back, ML− left, and DV− deep/ventral. Projection and navigation remain locked until
-  explicit calibration.
+- exactly one selected `Dorsal / Coronal / Sagittal / Horizontal / 3D` view, with independent
+  slice depths and click-to-replace region labels;
+- a SceneKit brain/probe/reference-vessel scene with camera control and atlas ray picking;
+- signed bregma AP/ML/DV targets, versioned subject calibration, QC-gated projection, and probe
+  planning/region export;
+- a radius-bearing LAMBADA P60_606 reference filtered to diameter ≥30 µm, shown in 2D,
+  Dorsal, and 3D; and
+- V2 tapered-surface reference analysis with explicit margin, uncertainty, risk-input, and
+  incomplete-coverage acknowledgements.
 
-The population layer and subject layer are composited over the dorsal brain as distinct evidence
-sources. Neither one can establish a vessel-free path. The population field contains no
-individual vessel paths; the subject image may contain arbitrary opaque pixels unless the user
-supplies an independently reviewed transparent mask.
+Population density and subject-image registration remain archived backend capabilities and are
+not exposed in the primary planning UI.
 
 The persistent application warning is:
 
@@ -100,7 +102,7 @@ Before expanding the hybrid shell, a real user journey must pass repeatedly with
 8. save, quit, reopen, and reproduce the matrix and overlay without numeric drift.
 
 All unavailable features must say why they are unavailable. This gate does not claim surgical,
-subject-anatomical, or vascular safety accuracy.
+subject-anatomical, or vascular/procedural accuracy.
 
 ## Consequences
 

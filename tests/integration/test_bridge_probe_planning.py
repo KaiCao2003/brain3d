@@ -22,6 +22,9 @@ from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, B
 from mouse_brain_planner.probes.catalog import (
     GENERIC_TEST_MODEL_ID,
     GENERIC_TEST_MODEL_VERSION,
+    NEUROPIXELS_1_0_MANUFACTURER_SPEC_SHA256,
+    NEUROPIXELS_1_0_MODEL_ID,
+    NEUROPIXELS_1_0_MODEL_VERSION,
 )
 
 
@@ -101,7 +104,34 @@ def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path
     target_id = _calibrated_target(dispatcher, session)
 
     catalog = _call(dispatcher, "probe.catalog.list")
-    assert catalog["modelCount"] == 1
+    assert catalog["modelCount"] == 2
+    catalog_models = catalog["models"]
+    assert isinstance(catalog_models, list)
+    assert catalog_models[0]["modelId"] == NEUROPIXELS_1_0_MODEL_ID
+    assert catalog_models[0]["verificationStatus"] == "source-transcribed-review-pending"
+    assert "review pending" in catalog_models[0]["warning"]
+
+    neuropixels = _call(
+        dispatcher,
+        "probe.catalog.get",
+        modelId=NEUROPIXELS_1_0_MODEL_ID,
+        modelVersion=NEUROPIXELS_1_0_MODEL_VERSION,
+    )["model"]
+    assert isinstance(neuropixels, dict)
+    assert neuropixels["siteCount"] == 960
+    assert neuropixels["completeGeometryTranscribed"] is True
+    assert neuropixels["independentTranscriptionReviewCompleted"] is False
+    assert neuropixels["independentlyReviewedBy"] is None
+    sources = neuropixels["primarySources"]
+    assert isinstance(sources, list)
+    assert len(sources) == 4
+    assert sources[0]["sha256"] == NEUROPIXELS_1_0_MANUFACTURER_SPEC_SHA256
+    shanks = neuropixels["shanks"]
+    assert isinstance(shanks, list)
+    assert shanks[0]["tipGeometry"] == "chisel"
+    assert shanks[0]["tipLengthMicrometres"] == 175
+    assert len(shanks[0]["sites"]) == 960
+
     model = _call(
         dispatcher,
         "probe.catalog.get",
@@ -223,8 +253,8 @@ def test_probe_planning_fails_closed_without_acknowledgment_and_on_stale_hash() 
         "projectId": str(session.project.project_uuid),
         "expectedProjectRevision": session.project_revision,
         "targetId": target_id,
-        "modelId": GENERIC_TEST_MODEL_ID,
-        "modelVersion": GENERIC_TEST_MODEL_VERSION,
+        "modelId": NEUROPIXELS_1_0_MODEL_ID,
+        "modelVersion": NEUROPIXELS_1_0_MODEL_VERSION,
         "name": "Unacknowledged",
         "azimuthDegrees": 0,
         "elevationDegrees": -90,

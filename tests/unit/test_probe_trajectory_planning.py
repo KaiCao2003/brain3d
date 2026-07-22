@@ -165,6 +165,54 @@ def test_verified_model_label_requires_complete_source_and_independent_review() 
     assert verified.permits_verified_device_label
 
 
+def test_source_transcribed_review_pending_cannot_claim_independent_review() -> None:
+    source = ProbeSourceArtifact(
+        title="Test-only source snapshot",
+        source_url="https://example.invalid/source-snapshot.json",
+        document_revision="fixture-1",
+        retrieved_on=date(2026, 7, 22),
+        sha256="b" * 64,
+        citation="Test fixture only",
+    )
+
+    with pytest.raises(ValidationError, match="requires primary sources"):
+        ProbeModelVerification(
+            status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+            complete_geometry_transcribed=True,
+            transcribed_by="Automated transcription",
+        )
+
+    pending = ProbeModelVerification(
+        status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+        primary_sources=(source,),
+        complete_geometry_transcribed=True,
+        independent_transcription_review_completed=False,
+        transcribed_by="Automated transcription",
+    )
+    assert not pending.independent_transcription_review_completed
+    assert pending.independently_reviewed_by is None
+
+    with pytest.raises(ValidationError, match="cannot claim completed independent review"):
+        ProbeModelVerification(
+            status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+            primary_sources=(source,),
+            complete_geometry_transcribed=True,
+            independent_transcription_review_completed=True,
+            transcribed_by="Automated transcription",
+            independently_reviewed_by="Reviewer",
+        )
+
+    with pytest.raises(ValidationError, match="cannot name an independent reviewer"):
+        ProbeModelVerification(
+            status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+            primary_sources=(source,),
+            complete_geometry_transcribed=True,
+            independent_transcription_review_completed=False,
+            transcribed_by="Automated transcription",
+            independently_reviewed_by="Reviewer",
+        )
+
+
 def test_probe_model_rejects_sites_outside_declared_geometry() -> None:
     with pytest.raises(ValidationError, match="beyond declared shank length"):
         ProbeShankDefinition(
@@ -325,9 +373,7 @@ def test_all_shank_centerlines_apply_lateral_offsets_and_keep_envelopes() -> Non
     assert shanks[0].tip.as_ap_ml_dv() == pytest.approx((0, 0, -2000))
     assert shanks[1].entry.as_ap_ml_dv() == pytest.approx((-40, 250, 0))
     assert shanks[1].tip.as_ap_ml_dv() == pytest.approx((-40, 250, -2000))
-    assert shanks[1].conservative_envelope_radius_um == pytest.approx(
-        (70**2 + 24**2) ** 0.5 / 2
-    )
+    assert shanks[1].conservative_envelope_radius_um == pytest.approx((70**2 + 24**2) ** 0.5 / 2)
 
 
 def test_insertion_depth_cannot_exceed_any_declared_shank_length() -> None:

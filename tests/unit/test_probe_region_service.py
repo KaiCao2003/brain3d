@@ -21,7 +21,11 @@ from mouse_brain_planner.domain.probe_plan_models import (
 )
 from mouse_brain_planner.domain.surgery_common import AnimalSurgeryContext
 from mouse_brain_planner.domain.transform_models import AnatomicalPoint
-from mouse_brain_planner.probes.catalog import list_probe_models
+from mouse_brain_planner.probes.catalog import (
+    GENERIC_TEST_MODEL_ID,
+    GENERIC_TEST_MODEL_VERSION,
+    get_probe_model,
+)
 from mouse_brain_planner.surgery.trajectory import placement_from_target_angles_depth
 
 
@@ -69,7 +73,7 @@ def _metadata() -> AtlasMetadata:
 
 
 def _plan(metadata: AtlasMetadata) -> ProbePlanRecord:
-    model = list_probe_models()[0]
+    model = get_probe_model(GENERIC_TEST_MODEL_ID, GENERIC_TEST_MODEL_VERSION)
     name = "Synthetic vertical plan"
     placement = placement_from_target_angles_depth(
         context=AnimalSurgeryContext(subject_id="mouse-test"),

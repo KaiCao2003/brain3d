@@ -4,109 +4,74 @@ Status reviewed: 2026-07-22
 
 ## Bottom line
 
-Brain3D is an early technical prototype. The supported SwiftUI application now provides a usable
-25 µm mouse-atlas browser: one full-size selected mode, independent movable coronal/sagittal/
-horizontal depths, pan/zoom/wheel controls, compact click-to-identify region labels, and persisted
-viewer state. It also preserves signed bregma AP/ML/DV entries. Real 3D anatomy, actual registered
-major-vessel geometry, calibrated target projection, probe placement, and end-to-end surgical
-analysis are still missing.
+The current development tree implements the end-to-end native research-planning path: independent
+25 µm atlas slices, subject calibration and target projection, probe planning and region traversal,
+the LAMBADA major-vessel reference, tapered-radius probe/vessel analysis, and a synchronized
+SceneKit 3D view. It remains an engineering testing build—not a qualified distribution or a
+validated animal-surgery navigation system.
 
-Public visibility is intended to make this gap inspectable. It is not a release or validation
-claim.
+The source is public at [KaiCao2003/brain3d](https://github.com/KaiCao2003/brain3d), with current
+work in [draft pull request #1](https://github.com/KaiCao2003/brain3d/pull/1).
 
-## Evidence from the current implementation
+## Current product path
 
-### Slice navigation
-
-The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`. Coronal, sagittal, and
-horizontal each retain an independent persisted depth and expose a slider, previous/next buttons,
-precise wheel stepping, direct pan, anchored zoom, and reset. A click replaces one compact region
-label on the current frame without changing any depth. Stale frames and revisions are rejected.
-
-### 3D
-
-The same view model rejects the 3D mode with the explicit message that bridge protocol v1 does
-not expose a renderer. `WorkspaceView.swift` displays an unavailable-state card. Historical
-Qt/VTK code is available only in Git commit `51fe26d`; it does not make 3D available in the
-supported SwiftUI app.
-
-### Blood vessels
-
-Population density and subject-image registration remain archived in the backend but are removed
-from the primary UI. The visible product path is major-vessels-only and currently reports that no
-reviewed graph is loaded.
-
-VesSAP/VesselGraph was audited down to raw nodes, edges, radii, threshold code, warped labels, and
-elastix artifacts. Its public files do not provide a complete auditable subject-to-Allen mapping
-or edge-linked branch paths. Drawing endpoint chords would create false slice intersections, so
-the overlay remains fail-closed. Neither archived evidence layer supports clearance.
-
-### Implant coordinates
-
-The SwiftUI sidebar accepts named bregma-relative AP/ML/DV millimetres with the requested sign
-convention: negative AP is posterior, negative ML is left, and negative DV is deep/ventral. The
-backend preserves those exact values. It intentionally does not draw them on the atlas because no
-validated bregma/skull-to-Allen calibration exists.
-
-## Source inventory by maturity
-
-| Area | Role | Product status |
+| Area | Implemented behavior | Important boundary |
 | --- | --- | --- |
-| `native/Brain3D/Sources/Brain3DApp/` | SwiftUI windows, acknowledgement gate, sidebar, interactive atlas canvas | Current experimental UI |
-| `native/Brain3D/Sources/Brain3DCore/` | Bridge client, typed protocol, validation policies | Current infrastructure |
-| `src/mouse_brain_planner/bridge/` | Python service called by SwiftUI | Current infrastructure |
-| `src/mouse_brain_planner/atlas/` | Pinned BrainGlobe atlas access and identity checks | Current infrastructure |
-| `src/mouse_brain_planner/rendering/` | Full-resolution raster slices and dorsal projections | Current interactive viewer backend |
-| `src/mouse_brain_planner/persistence/` | Checksummed `.mouseplan` packages and migrations | Current infrastructure |
-| `src/mouse_brain_planner/vasculature/` | Population density and subject-image registration | Archived evidence layers, not vessel geometry |
-| `src/mouse_brain_planner/coordinates/` | Named frames and transform utilities | Mixed current infrastructure and future groundwork |
-| `src/mouse_brain_planner/analysis/` | Exact clipped voxel DDA and atlas-axis conversion | Verified engine, not yet exposed in the app |
-| `src/mouse_brain_planner/domain/` | Project models plus probe/stereotaxy/craniotomy types | Mixed; many types are not exposed in the app |
-| `src/mouse_brain_planner/surgery/` | Trajectory, craniotomy, stereotaxy, and measurement algorithms | Experimental groundwork, not a usable workflow |
-| Git commit `51fe26d` | Last complete PySide6/PyVista/VTK implementation | Historical only; removed from current package |
+| Native workspace | Exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, one full-size view | No focus mode, crosshair, or 2×2 layout |
+| Atlas slices | Independent persisted depths, buttons/slider/wheel, pan/zoom, click-to-replace region label | `allen_mouse_25um` v1.2 only; 10 µm excluded from testing |
+| 3D | SceneKit brain mesh, camera control/reset, click-to-identify, probe envelopes, vessel tubes | Rendering consumes backend-verified geometry; scientific analysis remains in Python |
+| Coordinates | Signed AP/ML/DV millimetres from bregma | AP− posterior, ML− left, DV− deep/ventral |
+| Calibration | Create/list/inspect/validate/activate/remove subject calibration; QC-gated target projection | No default Allen bregma transform is invented |
+| Probes | Versioned catalog, placement CRUD, 2D/3D overlays, site/region traversal, inspector, CSV/JSON export | NP1 is source-transcribed and review-pending, not independently verified |
+| Major vessels | LAMBADA P60_606 radius-bearing graph in slices, Dorsal, and 3D | Reference specimen only; diameter ≥30 µm; pial/choroidal/smaller vessels omitted |
+| Vessel analysis | V2 tapered-surface clearance with probe envelope, margin, uncertainty, conflicts, provenance | Requires risk-input and incomplete-coverage acknowledgements |
+| Projects | Revisioned, checksummed `.mouseplan` save/open, migrations, backup recovery | Stale revisions and source mismatches fail closed |
 
-The large number of functions is therefore not evidence of a large working feature set. The
-current tree combines the hybrid prototype with future domain groundwork. Phase 1 removed the
-older UI stack and its dependencies; `mouse-brain-planner` now requires an explicit command and
-cannot launch a second GUI.
+Population vascular density and subject dorsal-image registration remain archived backend
+capabilities. They are not shown in the primary UI and are not interpreted as vessel paths.
 
-## What has engineering coverage
+## Probe evidence state
 
-Tests cover protocol validation, atlas identity, independent viewer state, coordinate invariants,
-deterministic rendering, viewport/scroll math, project checksums/migrations, source hashes,
-registration math, and lower-level geometry. Native tests cover strict response shapes and safety
-gates. The completed viewer checkpoint has Python `389 passed, 1 skipped` and Swift `62` tests.
-Actual macOS UI automation changed coronal and sagittal depths independently, switched modes,
-replaced a region selection, and confirmed that neither clicking nor switching moved a depth.
+The catalog's Neuropixels 1.0 NP1000 / `PRB_1_4_0480_1` entry transcribes the complete 960-site
+geometry from pinned manufacturer, ProbeTable, and SpikeGLX source snapshots. Digests, retrieval
+dates, coordinate rules, product identity, shank dimensions, tip geometry, references, and banks
+are retained in the model.
 
-These tests answer questions such as “does this transform round-trip?”, “did the project reopen
-with the same depths?”, and “can a user navigate the atlas?” They do not answer “is this an
-individual vessel?” or “is this procedure safe?” No prospective animal study, phantom targeting study,
-histological accuracy study, or formal usability validation has been completed.
+Its exact status is `source-transcribed-review-pending`. Independent full-table review has not
+been completed, so the UI requires explicit acknowledgement. The generic 16-site entry is a
+synthetic software-test model and is labeled accordingly.
 
-## Data boundary
+## Vessel evidence state
 
-- The atlas is BrainGlobe `allen_mouse_25um` package `1.2`; 25 µm is sampling resolution, not
-  targeting accuracy.
-- The integrated vascular source is Kim 2022 Mendeley Data v1,
-  DOI `10.17632/stxvn5sv44.1`, CC BY 4.0. It provides population density, not vessel paths.
-- The VesSAP/VesselGraph reference has source-proven 3 µm specimen voxels and radii, but its
-  public registration package and edge geometry are insufficient for an exact Allen slice
-  overlay; it remains unintegrated.
-- Atlas and data archives are downloaded to user caches and are not committed to this repository.
+The current layer is derived from Renier, de Launoit, and Skriabine's P60_606 graph,
+[Zenodo record 18876865](https://zenodo.org/records/18876865), DOI
+`10.5281/zenodo.18876865`, CC BY 4.0. The immutable derivative keeps in-bounds runs whose point
+radius is at least 15 µm: 71,313 points, 59,495 segments, and 11,818 polylines. Runtime checks bind
+the asset to its manifest, hashes, array schema, Allen 25 µm frame, and extraction rule.
 
-## Minimum bar before animal-procedure use
+The V2 algorithm minimizes the probe-envelope distance to tapered vessel surfaces, rather than
+assuming a constant radius or using only centerline distance. It subtracts the declared required
+margin and registration uncertainty and reports the nearest geometry and conflict class. A
+zero-conflict result uses only this bounded statement:
 
-This project should not be used to guide an animal procedure until all of the following have been
-implemented and independently validated:
+> No conflict detected within the loaded geometry and stated uncertainty assumptions.
 
-1. ~~movable AP/DV/ML slice navigation with independent persisted depths~~ — implemented;
-2. a supported interactive 3D view synchronized with the slice cursor;
-3. a clearly sourced vessel representation that distinguishes population reference data from
-   subject-specific evidence;
-4. measured bregma/lambda/skull-to-atlas calibration with residuals and uncertainty;
-5. visible target/entry/trajectory behavior exercised end to end, not merely lower-level models;
-6. independent phantom, histology, animal-workflow, and usability evidence; and
-7. a packaged, signed, notarized build qualified on a clean Mac.
+The graph is a fixed, cleared P60 reference. It is not subject-specific; pial and choroidal
+vessels were removed upstream, smaller vessels are filtered, and biological/registration error is
+not bounded. Those limitations remain visible at the point of analysis.
 
-Until then, treat the repository as research and engineering work in progress.
+## Engineering evidence and remaining qualification work
+
+Python tests cover source integrity, coordinate transforms, calibration, probe placement, exact
+voxel traversal, tapered vessel geometry, bridge validation, persistence, and real cached atlas
+smoke paths. Swift tests cover strict protocol decoding, independent view state, viewport math,
+slice overlays, SceneKit transforms, mesh/tube construction, and off-screen render smoke paths.
+The app can be built and ad-hoc signed for development and is exercised as a real macOS process.
+
+That evidence validates software behavior, not biological or procedural accuracy. Remaining work
+before any qualified distribution includes independent NP1 transcription review, reference- and
+subject-ground-truth studies, measured workflow/error studies, formal usability work, a bundled
+deterministic Python runtime, Developer ID signing, notarization, and clean-Mac qualification.
+
+No prospective animal study, phantom targeting study, histological outcome study, or formal
+clinical/veterinary-device validation is claimed.

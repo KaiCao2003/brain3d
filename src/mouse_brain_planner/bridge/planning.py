@@ -16,9 +16,15 @@ import numpy as np
 from PIL import Image
 from pydantic import ValidationError
 
+from mouse_brain_planner.atlas.brainglobe_adapter import AtlasAdapterError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
+from mouse_brain_planner.bridge.atlas_interaction import (
+    ATLAS_PHYSICAL_FRAME_ID,
+    _region_payload,
+)
 from mouse_brain_planner.bridge.calibration import register_calibration_handlers
 from mouse_brain_planner.bridge.implant_targets import register_implant_target_handlers
+from mouse_brain_planner.bridge.major_vessels import register_major_vessel_handlers
 from mouse_brain_planner.bridge.probe_planning import register_probe_planning_handlers
 from mouse_brain_planner.bridge.server import (
     SUPPORTED_ATLAS_IDENTIFIER,
@@ -27,6 +33,7 @@ from mouse_brain_planner.bridge.server import (
     BridgeError,
     JsonObject,
     LoadedAtlasProtocol,
+    atlas_provenance,
     encode_rgb_png,
 )
 from mouse_brain_planner.bridge.viewer_state import (
@@ -34,8 +41,11 @@ from mouse_brain_planner.bridge.viewer_state import (
     register_viewer_state_handlers,
 )
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
-from mouse_brain_planner.domain.atlas_models import AtlasMetadata
-from mouse_brain_planner.domain.coordinate_models import BrainGlobeVoxelIndex
+from mouse_brain_planner.domain.atlas_models import AtlasMetadata, RegionRecord
+from mouse_brain_planner.domain.coordinate_models import (
+    BrainGlobePhysicalPoint,
+    BrainGlobeVoxelIndex,
+)
 from mouse_brain_planner.domain.project_models import PlannerProject, ViewerSliceDepths
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
@@ -120,6 +130,7 @@ class PlanningBridgeSession:
 
         self.dispatcher.register("state.get", self.state_get, replace=True)
         self.dispatcher.register("atlas.dorsal", self.atlas_dorsal)
+        self.dispatcher.register("atlas.dorsal.pick", self.atlas_dorsal_pick)
         self.dispatcher.register("project.new", self.project_new)
         self.dispatcher.register("project.open", self.project_open)
         self.dispatcher.register("project.save", self.project_save)
@@ -154,9 +165,15 @@ class PlanningBridgeSession:
             replace_project=self._replace_project_after_probe_mutation,
             get_atlas=self._require_loaded_atlas,
         )
+        register_major_vessel_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+        )
         self.dispatcher.declare_capability("populationReferenceDensityPrepare")
         self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
         self.dispatcher.declare_capability("populationReferenceDensityOverlay")
+        self.dispatcher.declare_capability("atlasDorsalRegionPick")
 
     def atlas_dorsal(self, params: Mapping[str, object]) -> JsonObject:
         """Return the real atlas dorsal-boundary projection on the AP/ML grid."""
@@ -174,7 +191,7 @@ class PlanningBridgeSession:
         except (TypeError, ValueError) as error:
             raise BridgeError(
                 "DORSAL_SURFACE_RENDER_FAILED",
-                "The atlas dorsal surface projection could not be rendered safely.",
+                "The atlas dorsal surface projection could not be rendered.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         height, width = frame.rgb.shape[:2]
@@ -210,6 +227,96 @@ class PlanningBridgeSession:
                 "orientation": atlas.metadata.standardized_orientation,
             },
         }
+
+    def atlas_dorsal_pick(self, params: Mapping[str, object]) -> JsonObject:
+        """Resolve an AP/ML dorsal pixel to its first annotated DV voxel."""
+
+        _validate_params(
+            params,
+            required={"protocolVersion", "column", "row"},
+        )
+        _require_protocol(params)
+        atlas = self._require_loaded_atlas()
+        row = _nonnegative_integer(params["row"], field_name="row")
+        column = _nonnegative_integer(params["column"], field_name="column")
+        ap_count, dv_count, ml_count = atlas.metadata.shape_voxels
+        if row >= ap_count or column >= ml_count:
+            raise BridgeError(
+                "DORSAL_PICK_OUT_OF_RANGE",
+                "The selected intrinsic dorsal pixel is outside the AP/ML atlas grid.",
+                details={
+                    "column": column,
+                    "row": row,
+                    "width": ml_count,
+                    "height": ap_count,
+                },
+            )
+
+        annotation_column = np.asarray(atlas.annotation[row, :, column])
+        if annotation_column.shape != (dv_count,):
+            raise BridgeError(
+                "ATLAS_CONTRACT_VIOLATION",
+                "The dorsal annotation column does not match the reviewed atlas DV extent.",
+                details={
+                    "expectedShape": [dv_count],
+                    "actualShape": list(annotation_column.shape),
+                },
+            )
+        annotated_dv_indices = np.flatnonzero(annotation_column)
+        result: JsonObject = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "status": "noAnnotatedVoxel",
+            "column": column,
+            "row": row,
+            "atlasPoint": None,
+            "containingVoxelIndex": None,
+            "annotationStructureId": None,
+            "region": None,
+            "hemisphere": None,
+            "atlas": atlas_provenance(atlas),
+        }
+        if annotated_dv_indices.size == 0:
+            return result
+
+        dv_index = int(annotated_dv_indices[0])
+        annotation_structure_id = int(annotation_column[dv_index])
+        if annotation_structure_id <= 0:
+            raise BridgeError(
+                "ATLAS_CONTRACT_VIOLATION",
+                "The first nonzero dorsal annotation is not a positive structure ID.",
+                details={"annotationStructureId": annotation_structure_id},
+            )
+        index = BrainGlobeVoxelIndex(
+            atlas_key=atlas.metadata.atlas_key,
+            atlas_version=atlas.metadata.atlas_package_version,
+            ap=row,
+            dv=dv_index,
+            ml=column,
+        )
+        point = BrainGlobeAtlasSpace(atlas.metadata).index_to_center(index)
+        region = _dorsal_pick_region(atlas, point, annotation_structure_id)
+
+        result.update(
+            {
+                "status": "hit",
+                "atlasPoint": {
+                    "frameId": ATLAS_PHYSICAL_FRAME_ID,
+                    "apMicrometres": point.ap_um,
+                    "dvMicrometres": point.dv_um,
+                    "mlMicrometres": point.ml_um,
+                },
+                "containingVoxelIndex": {
+                    "frameId": index.frame_id,
+                    "ap": index.ap,
+                    "dv": index.dv,
+                    "ml": index.ml,
+                },
+                "annotationStructureId": annotation_structure_id,
+                "region": _region_payload(region),
+                "hemisphere": BrainGlobeAtlasSpace(atlas.metadata).hemisphere(point).value,
+            }
+        )
+        return result
 
     def state_get(self, params: Mapping[str, object]) -> JsonObject:
         _validate_params(params, required={"protocolVersion"})
@@ -315,6 +422,16 @@ class PlanningBridgeSession:
                     ),
                     "probePlanCount": len(project.probe_plans),
                     "probeRegionAnalysisCount": len(project.probe_region_analyses),
+                    "rendererAnchor": (
+                        None
+                        if project.renderer_anchor is None
+                        else {
+                            "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+                            "apMicrometres": project.renderer_anchor.ap_um,
+                            "dvMicrometres": project.renderer_anchor.dv_um,
+                            "mlMicrometres": project.renderer_anchor.ml_um,
+                        }
+                    ),
                 }
             ),
             "viewer": viewer,
@@ -915,7 +1032,7 @@ class PlanningBridgeSession:
         except (ValueError, ValidationError) as error:
             raise BridgeError(
                 "REFERENCE_DENSITY_DISPLAY_UPDATE_FAILED",
-                "The population density display state could not be stored safely.",
+                "The population density display state could not be stored.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         updated.touch(
@@ -981,7 +1098,7 @@ class PlanningBridgeSession:
         except (OSError, TypeError, ValueError) as error:
             raise BridgeError(
                 "REFERENCE_DENSITY_OVERLAY_FAILED",
-                "The population density projection could not be rendered safely.",
+                "The population density projection could not be rendered.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         height, width = projection.rgba.shape[:2]
@@ -1284,6 +1401,50 @@ def register_planning_handlers(
     )
     session.register()
     return session
+
+
+def _dorsal_pick_region(
+    atlas: LoadedAtlasProtocol,
+    point: BrainGlobePhysicalPoint,
+    annotation_structure_id: int,
+) -> RegionRecord:
+    try:
+        region = atlas.region_at(point)
+    except (AtlasAdapterError, KeyError, OSError, TypeError, ValueError) as error:
+        raise BridgeError(
+            "ATLAS_POINT_LOOKUP_FAILED",
+            "The reviewed atlas could not resolve the dorsal annotation region.",
+            details={"exceptionType": type(error).__name__},
+        ) from error
+    if not isinstance(region, RegionRecord):
+        raise BridgeError(
+            "ATLAS_CONTRACT_VIOLATION",
+            "A nonzero dorsal annotation did not resolve to a normalized region record.",
+            details={
+                "annotationStructureId": annotation_structure_id,
+                "returnedType": type(region).__name__,
+            },
+        )
+    if region.structure_id != annotation_structure_id:
+        raise BridgeError(
+            "ATLAS_CONTRACT_VIOLATION",
+            "The dorsal annotation ID does not match the resolved region identity.",
+            details={
+                "annotationStructureId": annotation_structure_id,
+                "regionStructureId": region.structure_id,
+            },
+        )
+    return region
+
+
+def _nonnegative_integer(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            f"{field_name} must be a nonnegative integer.",
+            details={"field": field_name},
+        )
+    return value
 
 
 def _validate_params(

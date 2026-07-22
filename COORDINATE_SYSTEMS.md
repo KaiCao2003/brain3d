@@ -317,14 +317,16 @@ unit conversion alone does not create stereotaxic calibration.
 
 ## Dorsal overlay plane
 
-The dorsal atlas image, the population-density projection, and a registered subject image share a
-display grid with AP as rows and ML as columns. The population layer is a maximum over DV, so it
-contains no recoverable DV position. A subject dorsal image is mapped from `[pixel column,
-pixel row]` into atlas physical `[AP,ML]` micrometres through an explicit registered transform.
+The current Dorsal view projects the radius-bearing LAMBADA P60_606 reference graph onto the
+atlas AP-by-ML grid. This collapses all retained DV positions; it does not imply that a projected
+line lies on the cortical surface. Coronal, sagittal, and horizontal views instead include only
+vessel portions whose radius-bearing volume intersects the current slice slab. SceneKit renders
+the same physical `[AP,DV,ML]` points and radii after the centralized display-axis conversion.
 
-Compositing either image over the brain is a visualization operation. It does not convert a
-two-dimensional image into a 3D vessel graph, and it cannot establish clearance to an
-unprojected bregma target.
+Archived population-density and registered subject-image paths also use an AP-by-ML display grid,
+but they are absent from the primary UI and never substituted for the LAMBADA graph. A population
+maximum contains no recoverable DV position, and a registered 2D image does not become 3D vessel
+geometry.
 
 ## Provenance and external Allen data
 

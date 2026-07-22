@@ -30,6 +30,7 @@ class ProbeVerificationStatus(StrEnum):
     """Whether a geometry passed the full source/transcription review gate."""
 
     VERIFIED = "verified"
+    SOURCE_TRANSCRIBED_REVIEW_PENDING = "source-transcribed-review-pending"
     USER_DEFINED_UNVERIFIED = "user-defined-unverified"
 
 
@@ -44,6 +45,7 @@ class ProbeSiteRole(StrEnum):
 class ProbeTipGeometry(StrEnum):
     """Explicit tip classification without inferred dimensions."""
 
+    CHISEL = "chisel"
     FLAT = "flat"
     TRIANGULAR = "triangular"
     TAPERED = "tapered"
@@ -104,6 +106,23 @@ class ProbeModelVerification(BaseModel):
             )
             if same_reviewer:
                 raise ValueError("probe transcriber and independent reviewer must be different")
+        elif self.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING:
+            if not self.primary_sources:
+                raise ValueError("source-transcribed probe model requires primary sources")
+            if not self.complete_geometry_transcribed:
+                raise ValueError(
+                    "source-transcribed probe model requires complete geometry transcription"
+                )
+            if self.transcribed_by is None:
+                raise ValueError("source-transcribed probe model requires a named transcriber")
+            if self.independent_transcription_review_completed:
+                raise ValueError(
+                    "review-pending probe model cannot claim completed independent review"
+                )
+            if self.independently_reviewed_by is not None:
+                raise ValueError(
+                    "review-pending probe model cannot name an independent reviewer as completed"
+                )
         return self
 
 

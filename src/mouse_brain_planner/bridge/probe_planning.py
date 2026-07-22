@@ -51,6 +51,7 @@ from mouse_brain_planner.domain.probe_models import (
     PlacedProbeShank,
     PlacedRecordingSite,
     ProbeModelDefinition,
+    ProbeVerificationStatus,
 )
 from mouse_brain_planner.domain.probe_plan_models import (
     ProbePlanRecord,
@@ -148,8 +149,7 @@ class ProbePlanningBridge:
             "projectRevision": self.get_revision(),
             "planCount": len(project.probe_plans),
             "plans": [
-                _plan_summary(plan, analyses.get(plan.plan_uuid))
-                for plan in project.probe_plans
+                _plan_summary(plan, analyses.get(plan.plan_uuid)) for plan in project.probe_plans
             ],
         }
 
@@ -168,9 +168,7 @@ class ProbePlanningBridge:
             "projectId": str(project.project_uuid),
             "projectRevision": self.get_revision(),
             "plan": _plan_detail(plan, project.atlas),
-            "regionAnalysis": (
-                None if analysis is None else _region_bundle_payload(analysis)
-            ),
+            "regionAnalysis": (None if analysis is None else _region_bundle_payload(analysis)),
         }
 
     def plan_create(self, params: Mapping[str, object]) -> JsonObject:
@@ -263,13 +261,9 @@ class ProbePlanningBridge:
         )
         updated = _project_update(
             project,
-            probe_plans=[
-                item for item in project.probe_plans if item.plan_uuid != plan.plan_uuid
-            ],
+            probe_plans=[item for item in project.probe_plans if item.plan_uuid != plan.plan_uuid],
             probe_region_analyses=[
-                item
-                for item in project.probe_region_analyses
-                if item.plan_uuid != plan.plan_uuid
+                item for item in project.probe_region_analyses if item.plan_uuid != plan.plan_uuid
             ],
         )
         updated.touch(
@@ -361,9 +355,12 @@ class ProbePlanningBridge:
             (item for item in current_project.probe_plans if item.plan_uuid == plan.plan_uuid),
             None,
         )
-        if current_revision != integer_value(
-            params["expectedProjectRevision"], "expectedProjectRevision"
-        ) or current_plan is None or current_plan.input_sha256 != plan.input_sha256:
+        if (
+            current_revision
+            != integer_value(params["expectedProjectRevision"], "expectedProjectRevision")
+            or current_plan is None
+            or current_plan.input_sha256 != plan.input_sha256
+        ):
             raise BridgeError(
                 "ANALYSIS_STALE",
                 "Probe inputs changed before the region analysis could be stored.",
@@ -487,11 +484,7 @@ class ProbePlanningBridge:
             )
         target_id = uuid_value(params["targetId"], "targetId")
         target = next(
-            (
-                item
-                for item in project.unprojected_bregma_targets
-                if item.target_uuid == target_id
-            ),
+            (item for item in project.unprojected_bregma_targets if item.target_uuid == target_id),
             None,
         )
         if target is None:
@@ -637,11 +630,7 @@ def _find_calibration(
     calibration_uuid: UUID,
 ) -> AtlasRegisteredCalibration:
     calibration = next(
-        (
-            item
-            for item in project.calibrations
-            if item.calibration_uuid == calibration_uuid
-        ),
+        (item for item in project.calibrations if item.calibration_uuid == calibration_uuid),
         None,
     )
     if calibration is None:
@@ -712,15 +701,31 @@ def _model_payload(model: ProbeModelDefinition, *, detail: bool) -> JsonObject:
         "shankCount": model.declared_shank_count,
         "siteCount": sum(len(shank.sites) for shank in model.shanks),
         "units": model.units,
-        "warning": (
-            "Generic software-test geometry — not a verified Neuropixels device profile"
-            if not model.permits_verified_device_label
-            else None
-        ),
+        "warning": _model_warning(model),
     }
     if detail:
         base["geometryNotes"] = model.geometry_notes
         base["reviewNotes"] = model.verification.review_notes
+        base["completeGeometryTranscribed"] = model.verification.complete_geometry_transcribed
+        base["independentTranscriptionReviewCompleted"] = (
+            model.verification.independent_transcription_review_completed
+        )
+        base["transcribedBy"] = model.verification.transcribed_by
+        base["independentlyReviewedBy"] = model.verification.independently_reviewed_by
+        base["coordinateOrigin"] = model.coordinate_origin
+        base["localAxisDefinition"] = model.local_axis_definition
+        base["insertionAxisDefinition"] = model.insertion_axis_definition
+        base["primarySources"] = [
+            {
+                "title": source.title,
+                "sourceUrl": source.source_url,
+                "documentRevision": source.document_revision,
+                "retrievedOn": source.retrieved_on.isoformat(),
+                "sha256": source.sha256,
+                "citation": source.citation,
+            }
+            for source in model.verification.primary_sources
+        ]
         base["shanks"] = [
             {
                 "shankId": shank.shank_id,
@@ -729,6 +734,7 @@ def _model_payload(model: ProbeModelDefinition, *, detail: bool) -> JsonObject:
                 "thicknessMicrometres": shank.thickness_um,
                 "tipGeometry": shank.tip_geometry.value,
                 "tipLengthMicrometres": shank.tip_length_um,
+                "tipGeometryNotes": shank.tip_geometry_notes,
                 "centerLateralMicrometres": shank.center_lateral_um,
                 "centerNormalMicrometres": shank.center_normal_um,
                 "siteCount": len(shank.sites),
@@ -747,6 +753,19 @@ def _model_payload(model: ProbeModelDefinition, *, detail: bool) -> JsonObject:
             for shank in model.shanks
         ]
     return base
+
+
+def _model_warning(model: ProbeModelDefinition) -> str | None:
+    """Return a status-specific warning without overstating source review."""
+
+    if model.permits_verified_device_label:
+        return None
+    if model.verification.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING:
+        return (
+            "Source-transcribed manufacturer geometry — independent transcription review "
+            "pending; explicit acknowledgement required"
+        )
+    return "Generic software-test geometry — not a verified Neuropixels device profile"
 
 
 def _plan_summary(

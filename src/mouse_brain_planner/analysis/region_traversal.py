@@ -37,6 +37,7 @@ from mouse_brain_planner.domain.region_models import (
 )
 
 REGION_TRAVERSAL_ALGORITHM_VERSION: Final = "amanatides-woo-clipped-half-open-v1"
+ANNOTATION_RAY_PICK_ALGORITHM_VERSION: Final = "amanatides-woo-clipped-half-open-first-nonzero-v1"
 TIE_BREAK_RULE: Final[
     Literal[
         "half-open-lower-inclusive; negative crossings own following negative-side interval; "
@@ -59,6 +60,106 @@ class _RawVoxelInterval:
     index_ap_dv_ml: tuple[int, int, int]
     entry_t: float
     exit_t: float
+
+
+@dataclass(frozen=True, slots=True)
+class AnnotationRayHit:
+    """First annotated voxel crossed by one finite physical-space ray segment."""
+
+    index_ap_dv_ml: tuple[int, int, int]
+    annotation_id: int
+    entry_point_ap_dv_ml_um: tuple[float, float, float]
+    voxel_center_ap_dv_ml_um: tuple[float, float, float]
+    distance_from_start_um: float
+    distance_inside_voxel_um: float
+
+
+def first_annotated_voxel_on_segment(
+    *,
+    annotation: NDArray[Any],
+    metadata: AtlasMetadata,
+    start_ap_dv_ml_um: Sequence[float],
+    end_ap_dv_ml_um: Sequence[float],
+) -> AnnotationRayHit | None:
+    """Return the first nonzero annotation voxel crossed by a finite segment.
+
+    Coordinates use BrainGlobe physical ``(AP, DV, ML)`` micrometres.  The
+    segment may begin and end outside the atlas; it is clipped to the exact
+    half-open atlas volume before the same deterministic DDA used for probe
+    region traversal.  Background ID ``0`` is skipped without guessing a
+    neighboring label.
+    """
+
+    if not isinstance(metadata, AtlasMetadata):
+        raise TypeError("metadata must be an AtlasMetadata")
+    if not isinstance(annotation, np.ndarray):
+        raise TypeError("annotation must be a NumPy array")
+    if annotation.ndim != 3 or annotation.shape != metadata.shape_voxels:
+        raise RegionTraversalInputError("annotation must have the exact atlas [AP, DV, ML] shape")
+    if np.issubdtype(annotation.dtype, np.bool_) or not np.issubdtype(annotation.dtype, np.integer):
+        raise TypeError("annotation labels must use a non-boolean integer NumPy dtype")
+
+    start = _physical_triplet(start_ap_dv_ml_um, "start_ap_dv_ml_um")
+    end = _physical_triplet(end_ap_dv_ml_um, "end_ap_dv_ml_um")
+    physical_delta = end - start
+    total_length_um = float(np.linalg.norm(physical_delta))
+    if not math.isfinite(total_length_um) or total_length_um <= 0:
+        raise RegionTraversalInputError("ray-pick segment must have finite positive length")
+
+    spacing = np.asarray(metadata.resolution_um, dtype=np.float64)
+    start_voxel = start / spacing
+    end_voxel = end / spacing
+    clipped = _clip_segment_to_half_open_volume(
+        start_voxel,
+        end_voxel,
+        metadata.shape_voxels,
+    )
+    if clipped is None:
+        return None
+    intervals = _traverse_clipped_voxels(
+        start_voxel,
+        end_voxel,
+        metadata.shape_voxels,
+        clipped[0],
+        clipped[1],
+    )
+    for interval in intervals:
+        annotation_id = int(annotation[interval.index_ap_dv_ml])
+        if annotation_id == 0:
+            continue
+        entry_point = start + interval.entry_t * physical_delta
+        center = (np.asarray(interval.index_ap_dv_ml, dtype=np.float64) + 0.5) * spacing
+        return AnnotationRayHit(
+            index_ap_dv_ml=interval.index_ap_dv_ml,
+            annotation_id=annotation_id,
+            entry_point_ap_dv_ml_um=(
+                float(entry_point[0]),
+                float(entry_point[1]),
+                float(entry_point[2]),
+            ),
+            voxel_center_ap_dv_ml_um=(
+                float(center[0]),
+                float(center[1]),
+                float(center[2]),
+            ),
+            distance_from_start_um=interval.entry_t * total_length_um,
+            distance_inside_voxel_um=(interval.exit_t - interval.entry_t) * total_length_um,
+        )
+    return None
+
+
+def _physical_triplet(value: object, field: str) -> NDArray[np.float64]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or len(value) != 3:
+        raise RegionTraversalInputError(f"{field} must contain exactly three coordinates")
+    if any(isinstance(component, bool) for component in value):
+        raise RegionTraversalInputError(f"{field} must contain non-boolean finite numbers")
+    try:
+        point = np.asarray(tuple(float(component) for component in value), dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise RegionTraversalInputError(f"{field} must contain finite numbers") from error
+    if point.shape != (3,) or not np.all(np.isfinite(point)):
+        raise RegionTraversalInputError(f"{field} must contain finite numbers")
+    return point
 
 
 def analyze_probe_regions(
@@ -107,9 +208,7 @@ def analyze_probe_regions(
     spacing_ap_dv_ml = np.asarray(metadata.resolution_um, dtype=np.float64)
     entry_voxel_ap_dv_ml = entry_physical_ap_dv_ml / spacing_ap_dv_ml
     tip_voxel_ap_dv_ml = tip_physical_ap_dv_ml / spacing_ap_dv_ml
-    if not np.all(np.isfinite(entry_voxel_ap_dv_ml)) or not np.all(
-        np.isfinite(tip_voxel_ap_dv_ml)
-    ):
+    if not np.all(np.isfinite(entry_voxel_ap_dv_ml)) or not np.all(np.isfinite(tip_voxel_ap_dv_ml)):
         raise RegionTraversalInputError("continuous voxel endpoints must be finite")
 
     shape_ap_dv_ml = metadata.shape_voxels
@@ -246,9 +345,7 @@ def _validate_inputs(
             "annotation shape must equal atlas [AP, DV, ML] shape; "
             f"got {annotation.shape}, expected {metadata.shape_voxels}"
         )
-    if np.issubdtype(annotation.dtype, np.bool_) or not np.issubdtype(
-        annotation.dtype, np.integer
-    ):
+    if np.issubdtype(annotation.dtype, np.bool_) or not np.issubdtype(annotation.dtype, np.integer):
         raise TypeError("annotation labels must use a non-boolean integer NumPy dtype")
     expected_identity = (metadata.atlas_key, metadata.atlas_package_version)
     actual_identity = (segment.entry.atlas_key, segment.entry.atlas_version)
@@ -402,9 +499,7 @@ def _traverse_clipped_voxels(
         for axis in tied_axes:
             indices[axis] += steps[axis]
             next_crossing[axis] += crossing_delta[axis]
-        if next_t <= current_t and not any(
-            0 <= indices[axis] < shape[axis] for axis in tied_axes
-        ):
+        if next_t <= current_t and not any(0 <= indices[axis] < shape[axis] for axis in tied_axes):
             raise RuntimeError("DDA made no positive-length progress")
         current_t = next_t
     else:
@@ -510,8 +605,7 @@ def _run_length_encode_regions(
         structure_id = voxel_intervals[run_start].structure_id
         run_end = run_start + 1
         while (
-            run_end < len(voxel_intervals)
-            and voxel_intervals[run_end].structure_id == structure_id
+            run_end < len(voxel_intervals) and voxel_intervals[run_end].structure_id == structure_id
         ):
             run_end += 1
         first = voxel_intervals[run_start]
