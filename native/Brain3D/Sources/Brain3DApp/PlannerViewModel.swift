@@ -163,6 +163,12 @@ final class PlannerViewModel: ObservableObject {
     @Published private(set) var implantTargets: [UnprojectedImplantTarget] = []
     @Published private(set) var implantOperationInProgress = false
     @Published private(set) var implantOperationError: String?
+    @Published private(set) var calibrations: [CalibrationSummary] = []
+    @Published private(set) var activeCalibrationId: String?
+    @Published private(set) var selectedCalibration: CalibrationSummary?
+    @Published private(set) var targetProjections: [String: CalibratedTargetProjectionResult] = [:]
+    @Published private(set) var calibrationOperationInProgress = false
+    @Published private(set) var calibrationOperationError: String?
 
     private let launchConfiguration: BridgeLaunchConfiguration?
     private var bridgeClient: BridgeClient?
@@ -341,6 +347,28 @@ final class PlannerViewModel: ObservableObject {
             && !projectOperationInProgress
     }
 
+    var canManageCalibration: Bool {
+        connection.isReady
+            && backendState?.project != nil
+            && helloResult?.capabilities.subjectAtlasCalibration == true
+            && helloResult?.capabilities.calibratedTargetProjection == true
+            && !projectOperationInProgress
+            && !calibrationOperationInProgress
+    }
+
+    var calibrationProjectId: String? { backendState?.project?.projectId }
+
+    var calibrationProjectRevision: Int? { backendState?.project?.revision }
+
+    var activeCalibration: CalibrationSummary? {
+        guard let activeCalibrationId else { return nil }
+        return calibrations.first { $0.calibrationId == activeCalibrationId }
+    }
+
+    func projection(for targetId: String) -> CalibratedTargetProjectionResult? {
+        targetProjections[targetId]
+    }
+
     var subjectImageWidth: Int {
         importedVessel?.widthPixels ?? backendState?.subjectVessels.primaryImage?.widthPixels ?? 0
     }
@@ -399,6 +427,11 @@ final class PlannerViewModel: ObservableObject {
         hasUnsavedChanges = false
         implantTargets = []
         implantOperationError = nil
+        calibrations = []
+        activeCalibrationId = nil
+        selectedCalibration = nil
+        targetProjections = [:]
+        calibrationOperationError = nil
         atlasLoadPhase = .idle
         dorsalLoadPhase = .unavailable("Connect to the planning service")
         clearPopulationDensity(clearPreparation: true)
@@ -546,20 +579,64 @@ final class PlannerViewModel: ObservableObject {
     func refreshState() async {
         guard let bridgeClient, connection.isReady else { return }
         do {
+            let previousProjectId = backendState?.project?.projectId
+            let previousActiveCalibrationId = activeCalibrationId
             let state: PlannerBridgeState = try await bridgeClient.request(
                 method: "state.get",
                 params: StateParameters()
             )
             try validate(state: state)
-            if state.project != nil {
+            if let project = state.project {
                 let listed: ImplantListResult = try await bridgeClient.request(
                     method: "implant.list",
                     params: ImplantListParameters()
                 )
                 try ImplantTargetValidator.validateList(listed)
                 implantTargets = listed.targets
+                let listedTargetIds = Set(listed.targets.map(\.targetId))
+                targetProjections = targetProjections.filter {
+                    listedTargetIds.contains($0.key)
+                }
+                if helloResult?.capabilities.subjectAtlasCalibration == true {
+                    let listedCalibrations: CalibrationListResult = try await bridgeClient.request(
+                        method: "calibration.list",
+                        params: CalibrationListParameters(projectId: project.projectId)
+                    )
+                    try CalibrationValidator.validateList(
+                        listedCalibrations,
+                        projectId: project.projectId
+                    )
+                    guard listedCalibrations.projectRevision == project.revision,
+                          project.calibrationCount == nil
+                            || project.calibrationCount == listedCalibrations.calibrationCount,
+                          project.activeCalibrationId == listedCalibrations.activeCalibrationId
+                    else {
+                        throw CalibrationValidationError.inconsistentCalibrationList
+                    }
+                    calibrations = listedCalibrations.calibrations
+                    activeCalibrationId = listedCalibrations.activeCalibrationId
+                    if let selectedId = selectedCalibration?.calibrationId {
+                        selectedCalibration = calibrations.first {
+                            $0.calibrationId == selectedId
+                        }
+                    }
+                    if previousProjectId != project.projectId
+                        || previousActiveCalibrationId != activeCalibrationId
+                    {
+                        targetProjections = [:]
+                    }
+                } else {
+                    calibrations = []
+                    activeCalibrationId = nil
+                    selectedCalibration = nil
+                    targetProjections = [:]
+                }
             } else {
                 implantTargets = []
+                calibrations = []
+                activeCalibrationId = nil
+                selectedCalibration = nil
+                targetProjections = [:]
             }
             backendState = state
             hasUnsavedChanges = state.project?.isDirty ?? false
@@ -581,6 +658,10 @@ final class PlannerViewModel: ObservableObject {
             connection = .failed(error.localizedDescription)
             backendState = nil
             implantTargets = []
+            calibrations = []
+            activeCalibrationId = nil
+            selectedCalibration = nil
+            targetProjections = [:]
             clearPopulationDensity(clearPreparation: true)
             clearViewerState(message: "Planning state is unavailable")
         }
@@ -654,9 +735,238 @@ final class PlannerViewModel: ObservableObject {
             guard !implantTargets.contains(where: { $0.targetId == targetId }) else {
                 throw ImplantOperationFailure.mutationNotPublished
             }
+            targetProjections[targetId] = nil
             return true
         } catch {
             implantOperationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func createCalibration(_ request: CalibrationCreateParameters) async -> Bool {
+        calibrationOperationError = nil
+        guard
+            let bridgeClient,
+            canManageCalibration,
+            let project = backendState?.project,
+            request.projectId == project.projectId,
+            request.expectedProjectRevision == project.revision
+        else {
+            calibrationOperationError = "Open the current animal plan before calibrating."
+            return false
+        }
+        calibrationOperationInProgress = true
+        defer { calibrationOperationInProgress = false }
+        do {
+            try CalibrationValidator.validateCreate(request)
+            let result: CalibrationMutationResult = try await bridgeClient.request(
+                method: "calibration.create",
+                params: request
+            )
+            try CalibrationValidator.validateMutation(
+                result,
+                projectId: project.projectId,
+                expectedStatus: "created",
+                expectedRevision: project.revision + 1
+            )
+            await refreshState()
+            guard calibrations.contains(where: {
+                $0.calibrationId == result.calibration.calibrationId
+            }) else {
+                throw CalibrationValidationError.inconsistentCalibrationList
+            }
+            selectedCalibration = result.calibration
+            hasUnsavedChanges = true
+            return true
+        } catch {
+            calibrationOperationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func loadCalibration(calibrationId: String) async -> Bool {
+        calibrationOperationError = nil
+        guard
+            let bridgeClient,
+            canManageCalibration,
+            let project = backendState?.project
+        else {
+            calibrationOperationError = "Open the current animal plan before loading calibration data."
+            return false
+        }
+        calibrationOperationInProgress = true
+        defer { calibrationOperationInProgress = false }
+        do {
+            let result: CalibrationGetResult = try await bridgeClient.request(
+                method: "calibration.get",
+                params: CalibrationGetParameters(
+                    projectId: project.projectId,
+                    calibrationId: calibrationId
+                )
+            )
+            try CalibrationValidator.validateGet(
+                result,
+                projectId: project.projectId,
+                calibrationId: calibrationId
+            )
+            selectedCalibration = result.calibration
+            return true
+        } catch {
+            calibrationOperationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func setActiveCalibration(calibrationId: String) async -> Bool {
+        calibrationOperationError = nil
+        guard
+            let bridgeClient,
+            canManageCalibration,
+            let project = backendState?.project
+        else {
+            calibrationOperationError = "Open the current animal plan before selecting a calibration."
+            return false
+        }
+        calibrationOperationInProgress = true
+        defer { calibrationOperationInProgress = false }
+        do {
+            let result: CalibrationMutationResult = try await bridgeClient.request(
+                method: "calibration.setActive",
+                params: CalibrationMutationParameters(
+                    projectId: project.projectId,
+                    expectedProjectRevision: project.revision,
+                    calibrationId: calibrationId
+                )
+            )
+            try CalibrationValidator.validateMutation(
+                result,
+                projectId: project.projectId,
+                expectedStatus: "activeCalibrationSet",
+                expectedRevision: project.revision + 1
+            )
+            targetProjections = [:]
+            await refreshState()
+            guard activeCalibrationId == calibrationId else {
+                throw CalibrationValidationError.inconsistentCalibrationList
+            }
+            hasUnsavedChanges = true
+            return true
+        } catch {
+            calibrationOperationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func validateCalibration(calibrationId: String) async -> Bool {
+        calibrationOperationError = nil
+        guard
+            let bridgeClient,
+            canManageCalibration,
+            let project = backendState?.project
+        else {
+            calibrationOperationError = "Open the current animal plan before validating a calibration."
+            return false
+        }
+        calibrationOperationInProgress = true
+        defer { calibrationOperationInProgress = false }
+        do {
+            let result: CalibrationValidationResult = try await bridgeClient.request(
+                method: "calibration.validate",
+                params: CalibrationGetParameters(
+                    projectId: project.projectId,
+                    calibrationId: calibrationId
+                )
+            )
+            try CalibrationValidator.validateValidation(
+                result,
+                projectId: project.projectId,
+                calibrationId: calibrationId
+            )
+            selectedCalibration = result.calibration
+            return true
+        } catch {
+            calibrationOperationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func removeCalibration(calibrationId: String) async -> Bool {
+        calibrationOperationError = nil
+        guard
+            let bridgeClient,
+            canManageCalibration,
+            let project = backendState?.project
+        else {
+            calibrationOperationError = "Open the current animal plan before removing a calibration."
+            return false
+        }
+        calibrationOperationInProgress = true
+        defer { calibrationOperationInProgress = false }
+        do {
+            let result: CalibrationRemoveResult = try await bridgeClient.request(
+                method: "calibration.remove",
+                params: CalibrationMutationParameters(
+                    projectId: project.projectId,
+                    expectedProjectRevision: project.revision,
+                    calibrationId: calibrationId
+                )
+            )
+            try CalibrationValidator.validateRemove(
+                result,
+                projectId: project.projectId,
+                calibrationId: calibrationId,
+                expectedRevision: project.revision + 1
+            )
+            targetProjections = targetProjections.filter {
+                $0.value.provenance.calibrationId != calibrationId
+            }
+            if selectedCalibration?.calibrationId == calibrationId {
+                selectedCalibration = nil
+            }
+            await refreshState()
+            guard !calibrations.contains(where: { $0.calibrationId == calibrationId }) else {
+                throw CalibrationValidationError.inconsistentCalibrationList
+            }
+            hasUnsavedChanges = true
+            return true
+        } catch {
+            calibrationOperationError = error.localizedDescription
+            return false
+        }
+    }
+
+    func projectImplantTarget(targetId: String) async -> Bool {
+        calibrationOperationError = nil
+        guard
+            let bridgeClient,
+            canManageCalibration,
+            let project = backendState?.project,
+            let activeCalibrationId
+        else {
+            calibrationOperationError = "Select a passing subject calibration before projecting."
+            return false
+        }
+        calibrationOperationInProgress = true
+        defer { calibrationOperationInProgress = false }
+        do {
+            let result: CalibratedTargetProjectionResult = try await bridgeClient.request(
+                method: "calibration.projectTarget",
+                params: CalibrationProjectTargetParameters(
+                    projectId: project.projectId,
+                    targetId: targetId
+                )
+            )
+            try CalibrationValidator.validateProjection(
+                result,
+                projectId: project.projectId,
+                targetId: targetId,
+                activeCalibrationId: activeCalibrationId
+            )
+            targetProjections[targetId] = result
+            return true
+        } catch {
+            targetProjections[targetId] = nil
+            calibrationOperationError = error.localizedDescription
             return false
         }
     }

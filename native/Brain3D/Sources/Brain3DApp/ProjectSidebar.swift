@@ -11,6 +11,7 @@ struct ProjectSidebar: View {
     @State private var targetAPMillimetres = ""
     @State private var targetMLMillimetres = ""
     @State private var targetDVMillimetres = ""
+    @State private var showingCalibrationSheet = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +30,9 @@ struct ProjectSidebar: View {
                 .background(.bar)
         }
         .background(.thinMaterial)
+        .sheet(isPresented: $showingCalibrationSheet) {
+            CalibrationSheet(model: model)
+        }
     }
 
     private var majorVesselsSection: some View {
@@ -54,12 +58,18 @@ struct ProjectSidebar: View {
             )
             StatusRow(
                 label: "Projection",
-                value: "Locked — bregma/skull calibration is required"
+                value: projectionStatus
             )
             StatusRow(
                 label: "Stored sites",
                 value: "\(model.implantTargets.count) unprojected"
             )
+            Button("Calibrations…", systemImage: "ruler") {
+                showingCalibrationSheet = true
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(!model.canManageCalibration)
             VStack(alignment: .leading, spacing: 7) {
                 TextField("Site label", text: $targetLabel)
                     .textFieldStyle(.roundedBorder)
@@ -104,12 +114,15 @@ struct ProjectSidebar: View {
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let error = model.calibrationOperationError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ForEach(model.implantTargets) { target in
                 implantTargetCard(target)
             }
-            Text("No atlas position is inferred from these fields before calibration.")
-                .font(.caption)
-                .foregroundStyle(.orange)
         }
     }
 
@@ -136,13 +149,57 @@ struct ProjectSidebar: View {
             Text(targetCoordinateSummary(target))
             .font(.caption2.monospacedDigit())
             .fixedSize(horizontal: false, vertical: true)
-            Text("From bregma · unprojected · not usable for navigation")
+            if let projection = model.projection(for: target.targetId) {
+                Text(atlasCoordinateSummary(projection))
+                    .font(.caption2.monospacedDigit())
+                Text(voxelSummary(projection))
+                    .font(.caption2.monospacedDigit())
+                Text(
+                    "Calibration \(String(projection.provenance.calibrationSha256.prefix(10)))… "
+                        + "· planning only · not navigation"
+                )
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(.orange)
+            } else {
+                Text("From bregma · unprojected · not navigation")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.orange)
+                if model.activeCalibration != nil {
+                    Button("Project to atlas") {
+                        Task { _ = await model.projectImplantTarget(targetId: target.targetId) }
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.mini)
+                    .disabled(model.calibrationOperationInProgress)
+                }
+            }
         }
         .padding(8)
         .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
+    }
+
+    private var projectionStatus: String {
+        guard let calibration = model.activeCalibration else {
+            return "Locked — subject calibration required"
+        }
+        return "Active v\(calibration.calibrationVersion) · \(calibration.quality.uppercased())"
+    }
+
+    private func atlasCoordinateSummary(_ result: CalibratedTargetProjectionResult) -> String {
+        let point = result.atlasPoint
+        return "Atlas AP \(signedMicrometres(point.apMicrometres)) · "
+            + "DV \(signedMicrometres(point.dvMicrometres)) · "
+            + "ML \(signedMicrometres(point.mlMicrometres))"
+    }
+
+    private func voxelSummary(_ result: CalibratedTargetProjectionResult) -> String {
+        let voxel = result.containingVoxelIndex
+        return "Voxel AP \(voxel.ap) · DV \(voxel.dv) · ML \(voxel.ml)"
+    }
+
+    private func signedMicrometres(_ value: Double) -> String {
+        String(format: "%+.1f µm", value)
     }
 
     private func signed(_ value: Double) -> String {

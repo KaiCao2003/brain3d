@@ -12,6 +12,7 @@ from mouse_brain_planner.coordinates.anatomical_atlas import (
     canonical_atlas_frame,
 )
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
+from mouse_brain_planner.domain.transform_models import AnatomicalPoint
 
 
 def test_brainglobe_ap_dv_ml_to_canonical_ap_ml_dv_sign_round_trip() -> None:
@@ -50,3 +51,23 @@ def test_canonical_to_brainglobe_rejects_wrong_frame() -> None:
             canonical.model_copy(update={"frame_id": "wrong"}),
             atlas,
         )
+
+
+def test_unbounded_conversion_is_explicit_for_probe_clipping_only() -> None:
+    atlas = make_allen_metadata_test_double(25)
+    outside = AnatomicalPoint(
+        frame_id=canonical_atlas_frame(atlas).frame_id,
+        ap_um=100,
+        ml_um=100,
+        dv_um=100,
+    )
+
+    with pytest.raises(ValueError, match="outside"):
+        canonical_anatomical_to_brainglobe_physical(outside, atlas)
+
+    physical = canonical_anatomical_to_brainglobe_physical(
+        outside,
+        atlas,
+        require_inside=False,
+    )
+    assert physical.as_tuple() == (-100, -100, -100)

@@ -12,6 +12,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.probe_plan_models import (
+    ProbePlanRecord,
+    ProbeRegionAnalysisBundle,
+)
 from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
 from mouse_brain_planner.domain.vessel_models import (
     DorsalVascularRegistration,
@@ -26,6 +30,8 @@ MAX_SUBJECT_VASCULAR_IMAGES = 128
 MAX_DORSAL_VASCULAR_REGISTRATIONS = 1_024
 MAX_UNPROJECTED_BREGMA_TARGETS = 256
 MAX_CALIBRATIONS = 32
+MAX_PROBE_PLANS = 32
+MAX_PROBE_REGION_ANALYSES = 32
 
 
 class ViewerSliceDepths(BaseModel):
@@ -127,6 +133,14 @@ class PlannerProject(BaseModel):
         max_length=MAX_CALIBRATIONS,
     )
     active_calibration_uuid: UUID | None = None
+    probe_plans: list[ProbePlanRecord] = Field(
+        default_factory=list,
+        max_length=MAX_PROBE_PLANS,
+    )
+    probe_region_analyses: list[ProbeRegionAnalysisBundle] = Field(
+        default_factory=list,
+        max_length=MAX_PROBE_REGION_ANALYSES,
+    )
     coordinate_convention: str = "BrainGlobe ASR: [AP,DV,ML], origin A/S/R, increasing P/I/L, µm"
     scientific_disclaimer_acknowledged: bool = False
     user_notes: str = ""
@@ -170,6 +184,13 @@ class PlannerProject(BaseModel):
         if active_calibration is not None and not active_calibration.permits_planning:
             raise ValueError("a failed calibration cannot be active")
 
+        plan_ids = [item.plan_uuid for item in self.probe_plans]
+        if len(plan_ids) != len(set(plan_ids)):
+            raise ValueError("probe plans contain duplicate UUIDs")
+        analyses_by_plan = [item.plan_uuid for item in self.probe_region_analyses]
+        if len(analyses_by_plan) != len(set(analyses_by_plan)):
+            raise ValueError("only one current region-analysis bundle is allowed per probe plan")
+
         if self.atlas is None:
             if self.linked_cursor is not None:
                 raise ValueError("a linked atlas cursor requires atlas metadata")
@@ -181,6 +202,8 @@ class PlannerProject(BaseModel):
                 raise ValueError("atlas region state requires atlas metadata")
             if self.calibrations or self.active_calibration_uuid is not None:
                 raise ValueError("atlas-registered calibration state requires atlas metadata")
+            if self.probe_plans or self.probe_region_analyses:
+                raise ValueError("probe planning state requires atlas metadata")
             if (
                 self.subject_vascular_images
                 or self.dorsal_vascular_registrations
@@ -245,6 +268,43 @@ class PlannerProject(BaseModel):
                 raise ValueError(
                     "calibration animal subject ID does not match the current project subject"
                 )
+
+        plans_by_id = {item.plan_uuid: item for item in self.probe_plans}
+        for plan in self.probe_plans:
+            if plan.atlas_metadata_sha256 != self.atlas.metadata_sha256:
+                raise ValueError("probe plan atlas metadata digest does not match project atlas")
+            if plan.placement.context.subject_id != self.subject_id:
+                raise ValueError("probe plan animal subject ID does not match the project subject")
+            referenced_calibration = calibrations_by_id.get(plan.calibration_uuid)
+            if referenced_calibration is None:
+                raise ValueError("probe plan references an unavailable calibration")
+            if referenced_calibration.calibration_version != plan.calibration_version:
+                raise ValueError(
+                    "probe plan calibration version does not match project calibration"
+                )
+            if not plan.probe_model.permits_verified_device_label and not (
+                plan.placement.custom_geometry_acknowledged
+            ):
+                raise ValueError("unverified probe plan geometry requires explicit acknowledgment")
+        for bundle in self.probe_region_analyses:
+            referenced_plan = plans_by_id.get(bundle.plan_uuid)
+            if referenced_plan is None:
+                raise ValueError("region analysis references an unavailable probe plan")
+            if bundle.plan_version != referenced_plan.plan_version or (
+                bundle.plan_input_sha256 != referenced_plan.input_sha256
+            ):
+                raise ValueError("region analysis is stale for its current probe plan")
+            placement_ids = {
+                analysis.placement_uuid for analysis in bundle.shank_analyses
+            }
+            if placement_ids != {referenced_plan.placement.placement_uuid}:
+                raise ValueError("region analysis placement does not match its probe plan")
+            expected_shanks = {
+                shank.shank_id for shank in referenced_plan.probe_model.shanks
+            }
+            actual_shanks = {analysis.shank_id for analysis in bundle.shank_analyses}
+            if actual_shanks != expected_shanks:
+                raise ValueError("region analysis does not cover every probe-model shank")
 
         if self.viewer_slice_depths is not None:
             depth_limits = {

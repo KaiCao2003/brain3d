@@ -358,6 +358,22 @@ class CalibrationBridge:
         _require_protocol(params)
         project = self._validated_mutation_project(params)
         calibration = _find_calibration(project, params["calibrationId"])
+        referencing_plan_ids = sorted(
+            str(plan.plan_uuid)
+            for plan in project.probe_plans
+            if plan.calibration_uuid == calibration.calibration_uuid
+        )
+        if referencing_plan_ids:
+            raise BridgeError(
+                "CALIBRATION_IN_USE",
+                "The calibration is referenced by persisted probe plans and cannot be removed.",
+                details={
+                    "calibrationId": str(calibration.calibration_uuid),
+                    "probePlanCount": len(referencing_plan_ids),
+                    "probePlanIds": referencing_plan_ids,
+                    "cascadeDeletePerformed": False,
+                },
+            )
         was_active = project.active_calibration_uuid == calibration.calibration_uuid
         updated = _project_update(
             project,
@@ -1342,7 +1358,14 @@ def _finite_number(value: object, field: str) -> float:
             f"{field} must be a finite number and not a boolean.",
             details={"field": field},
         )
-    converted = float(value)
+    try:
+        converted = float(value)
+    except (OverflowError, ValueError) as error:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            f"{field} must be a finite number.",
+            details={"field": field},
+        ) from error
     if not math.isfinite(converted):
         raise BridgeError(
             "INVALID_PARAMS",

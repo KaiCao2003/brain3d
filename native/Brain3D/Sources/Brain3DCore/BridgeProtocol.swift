@@ -113,6 +113,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
     public let subjectVascularImport: Bool
     public let subjectVascularOverlay: Bool
     public let subjectVascularRegistration: Bool
+    public let subjectAtlasCalibration: Bool?
+    public let calibratedTargetProjection: Bool?
 
     public init(
         atlas25Micrometre: Bool,
@@ -122,7 +124,9 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         projectPersistence: Bool = false,
         subjectVascularImport: Bool = false,
         subjectVascularOverlay: Bool = false,
-        subjectVascularRegistration: Bool = false
+        subjectVascularRegistration: Bool = false,
+        subjectAtlasCalibration: Bool? = nil,
+        calibratedTargetProjection: Bool? = nil
     ) {
         self.atlas25Micrometre = atlas25Micrometre
         self.atlasDownload = atlasDownload
@@ -132,6 +136,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         self.subjectVascularImport = subjectVascularImport
         self.subjectVascularOverlay = subjectVascularOverlay
         self.subjectVascularRegistration = subjectVascularRegistration
+        self.subjectAtlasCalibration = subjectAtlasCalibration
+        self.calibratedTargetProjection = calibratedTargetProjection
     }
 }
 
@@ -285,6 +291,8 @@ public struct ProjectBridgeState: Codable, Equatable, Sendable {
     public let revision: Int
     public let isDirty: Bool
     public let animalResearchOnlyAcknowledged: Bool
+    public let calibrationCount: Int?
+    public let activeCalibrationId: String?
 }
 
 public struct AtlasOpenParameters: Codable, Equatable, Sendable {

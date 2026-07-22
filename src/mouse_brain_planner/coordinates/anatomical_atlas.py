@@ -62,8 +62,15 @@ def brainglobe_physical_to_canonical_anatomical(
 def canonical_anatomical_to_brainglobe_physical(
     point: AnatomicalPoint,
     metadata: AtlasMetadata,
+    *,
+    require_inside: bool = True,
 ) -> BrainGlobePhysicalPoint:
-    """Convert canonical ``AP,ML,DV`` data to bounded BrainGlobe physical ASR data."""
+    """Convert canonical ``AP,ML,DV`` data to BrainGlobe physical ASR data.
+
+    Calibrated targets use the default bounded mode.  A finite probe segment
+    may begin above/outside the atlas and is clipped later by the exact DDA;
+    that caller must explicitly pass ``require_inside=False``.
+    """
 
     expected_frame = canonical_atlas_frame(metadata).frame_id
     if point.frame_id != expected_frame:
@@ -77,5 +84,6 @@ def canonical_anatomical_to_brainglobe_physical(
         dv_um=-point.dv_um,
         ml_um=-point.ml_um,
     )
-    BrainGlobeAtlasSpace(metadata).physical_to_voxel(physical)
+    if require_inside:
+        BrainGlobeAtlasSpace(metadata).physical_to_voxel(physical)
     return physical

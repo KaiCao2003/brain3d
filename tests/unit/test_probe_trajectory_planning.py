@@ -36,6 +36,7 @@ from mouse_brain_planner.surgery.trajectory import (
     attach_surface_entries,
     direction_from_angles,
     placed_recording_sites,
+    placed_shank_centerlines,
     placement_from_bregma_relative_mm,
     placement_from_entry_angles_depth,
     placement_from_entry_target,
@@ -283,6 +284,63 @@ def test_recording_sites_map_from_tip_toward_base_and_custom_export_is_acknowled
     assert not placement_permits_final_export(model, placement)
     acknowledged = placement.model_copy(update={"custom_geometry_acknowledged": True})
     assert placement_permits_final_export(model, acknowledged)
+
+
+def test_all_shank_centerlines_apply_lateral_offsets_and_keep_envelopes() -> None:
+    first = _custom_model().shanks[0]
+    second_payload = first.model_dump(mode="python")
+    second_payload.update(
+        {
+            "shank_id": "B",
+            "center_lateral_um": 250,
+            "center_normal_um": 40,
+            "sites": (),
+        }
+    )
+    second = ProbeShankDefinition.model_validate(second_payload)
+    model_payload = _custom_model().model_dump(mode="python")
+    model_payload.update(
+        {
+            "model_id": "user:test-two-shank",
+            "declared_shank_count": 2,
+            "expected_site_count": 2,
+            "shanks": (first, second),
+        }
+    )
+    model = ProbeModelDefinition.model_validate(model_payload)
+    placement = placement_from_entry_angles_depth(
+        context=AnimalSurgeryContext(),
+        model=model,
+        name="two shanks",
+        entry=_point("F", 0, 0, 0),
+        azimuth_deg=0,
+        elevation_deg=-90,
+        insertion_depth_um=2000,
+    )
+
+    shanks = placed_shank_centerlines(model, placement)
+
+    assert [shank.shank_id for shank in shanks] == ["A", "B"]
+    assert shanks[0].entry.as_ap_ml_dv() == pytest.approx((0, 0, 0))
+    assert shanks[0].tip.as_ap_ml_dv() == pytest.approx((0, 0, -2000))
+    assert shanks[1].entry.as_ap_ml_dv() == pytest.approx((-40, 250, 0))
+    assert shanks[1].tip.as_ap_ml_dv() == pytest.approx((-40, 250, -2000))
+    assert shanks[1].conservative_envelope_radius_um == pytest.approx(
+        (70**2 + 24**2) ** 0.5 / 2
+    )
+
+
+def test_insertion_depth_cannot_exceed_any_declared_shank_length() -> None:
+    with pytest.raises(ProbePlacementError, match="exceeds declared shank length"):
+        placement_from_entry_angles_depth(
+            context=AnimalSurgeryContext(),
+            model=_custom_model(),
+            name="too deep",
+            entry=_point("F", 0, 0, 0),
+            azimuth_deg=0,
+            elevation_deg=-90,
+            insertion_depth_um=4000.1,
+        )
 
 
 def test_surface_intersections_must_be_collinear_and_ordered() -> None:

@@ -10,6 +10,7 @@ from numpy.typing import NDArray
 
 from mouse_brain_planner.domain.probe_models import (
     NormalizedProbePlacement,
+    PlacedProbeShank,
     PlacedRecordingSite,
     PlacementMethod,
     ProbeModelDefinition,
@@ -349,6 +350,45 @@ def placed_recording_sites(
     return tuple(placed)
 
 
+def placed_shank_centerlines(
+    model: ProbeModelDefinition,
+    placement: NormalizedProbePlacement,
+) -> tuple[PlacedProbeShank, ...]:
+    """Map every source-defined shank offset into the anatomical frame."""
+
+    _validate_model_placement_pair(model, placement)
+    inward = np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64)
+    lateral, normal = _local_cross_section_axes(
+        inward,
+        axial_rotation_deg=placement.axial_rotation_deg,
+    )
+    entry = _array(placement.entry)
+    tip = _array(placement.tip)
+    return tuple(
+        PlacedProbeShank(
+            placement_uuid=placement.placement_uuid,
+            probe_model_id=model.model_id,
+            probe_model_version=model.model_version,
+            shank_id=shank.shank_id,
+            entry=_point(
+                placement.entry.frame_id,
+                entry
+                + lateral * shank.center_lateral_um
+                + normal * shank.center_normal_um,
+            ),
+            tip=_point(
+                placement.entry.frame_id,
+                tip
+                + lateral * shank.center_lateral_um
+                + normal * shank.center_normal_um,
+            ),
+            width_um=shank.width_um,
+            thickness_um=shank.thickness_um,
+        )
+        for shank in model.shanks
+    )
+
+
 def placement_permits_final_export(
     model: ProbeModelDefinition,
     placement: NormalizedProbePlacement,
@@ -379,6 +419,15 @@ def _placement(
     depth = float(np.linalg.norm(vector))
     if depth <= 0:
         raise ProbePlacementError("normalized entry and tip must be distinct")
+    too_short = tuple(
+        shank.shank_id
+        for shank in model.shanks
+        if depth > shank.length_um + max(1e-6, shank.length_um * 1e-10)
+    )
+    if too_short:
+        raise ProbePlacementError(
+            "insertion depth exceeds declared shank length for: " + ", ".join(too_short)
+        )
     direction_values = vector / depth
     direction = UnitDirectionAPMLDV(
         frame_id=entry.frame_id,

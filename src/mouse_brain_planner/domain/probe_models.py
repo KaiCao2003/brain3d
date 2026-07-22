@@ -378,6 +378,38 @@ class PlacedRecordingSite(BaseModel):
     point: AnatomicalPoint
 
 
+class PlacedProbeShank(BaseModel):
+    """One finite implanted shank centerline with its conservative envelope."""
+
+    model_config = ConfigDict(frozen=True)
+
+    placement_uuid: UUID
+    probe_model_id: str = Field(min_length=1, max_length=200)
+    probe_model_version: str = Field(min_length=1, max_length=100)
+    shank_id: str = Field(min_length=1, max_length=200)
+    entry: AnatomicalPoint
+    tip: AnatomicalPoint
+    width_um: PositiveFiniteFloat
+    thickness_um: PositiveFiniteFloat
+    envelope_definition: Literal["circumscribed-radius-of-rectangular-cross-section"] = (
+        "circumscribed-radius-of-rectangular-cross-section"
+    )
+
+    @model_validator(mode="after")
+    def validate_shank(self) -> Self:
+        if self.entry.frame_id != self.tip.frame_id:
+            raise ValueError("placed shank entry and tip must use one explicit frame")
+        if self.entry.as_ap_ml_dv() == self.tip.as_ap_ml_dv():
+            raise ValueError("placed shank entry and tip must be distinct")
+        return self
+
+    @property
+    def conservative_envelope_radius_um(self) -> float:
+        """Return the circumscribed radius used by conservative clearance."""
+
+        return math.hypot(self.width_um / 2.0, self.thickness_um / 2.0)
+
+
 def _angles_from_direction(direction: tuple[float, float, float]) -> tuple[float, float]:
     ap, ml, dv = direction
     horizontal = math.hypot(ap, ml)

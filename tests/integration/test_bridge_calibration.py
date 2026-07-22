@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID, uuid4
 
 import numpy as np
 import pytest
@@ -13,6 +14,7 @@ from mouse_brain_planner.bridge.planning import PlanningBridgeSession, register_
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
 from mouse_brain_planner.domain.atlas_models import AtlasAxis, AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
+from mouse_brain_planner.domain.probe_plan_models import ProbePlanRecord
 
 
 @dataclass(slots=True)
@@ -350,6 +352,43 @@ def test_calibration_mutation_rejects_stale_revision_without_state_change() -> N
     assert session.project.calibrations == []
 
 
+def test_calibration_remove_rejects_persisted_probe_plan_reference() -> None:
+    dispatcher, session = _dispatcher()
+    created = _create(dispatcher, session)
+    calibration = created["calibration"]
+    assert isinstance(calibration, dict)
+    calibration_id = calibration["calibrationId"]
+    assert isinstance(calibration_id, str)
+    assert session.project is not None
+    plan_id = uuid4()
+    session.project.probe_plans.append(
+        ProbePlanRecord.model_construct(
+            plan_uuid=plan_id,
+            calibration_uuid=UUID(calibration_id),
+        )
+    )
+
+    with pytest.raises(BridgeError) as caught:
+        _call(
+            dispatcher,
+            "calibration.remove",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=session.project_revision,
+            calibrationId=calibration_id,
+        )
+
+    assert caught.value.code == "CALIBRATION_IN_USE"
+    assert caught.value.details == {
+        "calibrationId": calibration_id,
+        "probePlanCount": 1,
+        "probePlanIds": [str(plan_id)],
+        "cascadeDeletePerformed": False,
+    }
+    assert session.project_revision == 2
+    assert len(session.project.calibrations) == 1
+    assert len(session.project.probe_plans) == 1
+
+
 @pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), float("-inf")])
 def test_calibration_rejects_boolean_or_nonfinite_landmarks(invalid: object) -> None:
     dispatcher, session = _dispatcher()
@@ -359,6 +398,22 @@ def test_calibration_rejects_boolean_or_nonfinite_landmarks(invalid: object) -> 
     bregma = skull["bregma"]
     assert isinstance(bregma, dict)
     bregma["apMicrometres"] = invalid
+
+    with pytest.raises(BridgeError) as caught:
+        _call(dispatcher, "calibration.create", **params)
+
+    assert caught.value.code == "INVALID_PARAMS"
+    assert session.project_revision == 1
+
+
+def test_calibration_rejects_integer_too_large_for_a_finite_float() -> None:
+    dispatcher, session = _dispatcher()
+    params = _create_params(session)
+    skull = params["skullLandmarks"]
+    assert isinstance(skull, dict)
+    bregma = skull["bregma"]
+    assert isinstance(bregma, dict)
+    bregma["apMicrometres"] = 10**10_000
 
     with pytest.raises(BridgeError) as caught:
         _call(dispatcher, "calibration.create", **params)

@@ -452,7 +452,7 @@ def test_schema_one_package_load_migrates_midline_and_renderer_anchor(tmp_path: 
 
     migrated = load_project(path)
 
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.atlas is not None
     assert migrated.atlas.midline_ml_um == 5700.0
     assert migrated.renderer_anchor == anchor
@@ -481,7 +481,7 @@ def test_schema_two_package_without_vasculature_member_migrates_to_empty_state(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.subject_vascular_images == []
     assert migrated.dorsal_vascular_registrations == []
     assert migrated.subject_vascular_overlays == []
@@ -533,7 +533,7 @@ def test_schema_three_package_migration_preserves_vascular_target_and_viewer_sta
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 4
+    assert migrated.schema_version == 5
     assert migrated.viewer_slice_depths == project.viewer_slice_depths
     assert migrated.unprojected_bregma_targets == project.unprojected_bregma_targets
     assert migrated.subject_vascular_images == project.subject_vascular_images

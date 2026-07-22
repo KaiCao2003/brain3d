@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
 from mouse_brain_planner.bridge.calibration import register_calibration_handlers
 from mouse_brain_planner.bridge.implant_targets import register_implant_target_handlers
+from mouse_brain_planner.bridge.probe_planning import register_probe_planning_handlers
 from mouse_brain_planner.bridge.server import (
     SUPPORTED_ATLAS_IDENTIFIER,
     SUPPORTED_ATLAS_VERSION,
@@ -145,6 +146,13 @@ class PlanningBridgeSession:
             get_project=self._require_project,
             get_revision=lambda: self.project_revision,
             replace_project=self._replace_project_after_calibration_mutation,
+        )
+        register_probe_planning_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_probe_mutation,
+            get_atlas=self._require_loaded_atlas,
         )
         self.dispatcher.declare_capability("populationReferenceDensityPrepare")
         self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
@@ -305,6 +313,8 @@ class PlanningBridgeSession:
                         if project.active_calibration_uuid is None
                         else str(project.active_calibration_uuid)
                     ),
+                    "probePlanCount": len(project.probe_plans),
+                    "probeRegionAnalysisCount": len(project.probe_region_analyses),
                 }
             ),
             "viewer": viewer,
@@ -1075,6 +1085,13 @@ class PlanningBridgeSession:
 
     def _replace_project_after_calibration_mutation(self, project: PlannerProject) -> int:
         """Publish one validated calibration mutation and return its revision."""
+
+        self.project = project
+        self.project_revision += 1
+        return self.project_revision
+
+    def _replace_project_after_probe_mutation(self, project: PlannerProject) -> int:
+        """Publish one validated probe/analysis mutation and return its revision."""
 
         self.project = project
         self.project_revision += 1

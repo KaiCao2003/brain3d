@@ -19,7 +19,8 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     Schema 1 omitted the explicit atlas midline and renderer anchor. Schema 2
     records both. Schema 3 adds bounded vascular state and unprojected
     coordinate-entry targets. Schema 4 adds versioned subject calibrations and
-    an explicit active-calibration UUID. Earlier projects default new state to
+    an explicit active-calibration UUID. Schema 5 adds persisted probe plans
+    and exact region-analysis bundles. Earlier projects default new state to
     empty without altering any legacy AP/ML/DV target.
     """
 
@@ -31,11 +32,15 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if version == PROJECT_SCHEMA_VERSION:
         return payload
     if version == 1:
-        return _migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload)))
+        return _migrate_v4_to_v5(
+            _migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload)))
+        )
     if version == 2:
-        return _migrate_v3_to_v4(_migrate_v2_to_v3(payload))
+        return _migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload)))
     if version == 3:
-        return _migrate_v3_to_v4(payload)
+        return _migrate_v4_to_v5(_migrate_v3_to_v4(payload))
+    if version == 4:
+        return _migrate_v4_to_v5(payload)
     raise UnsupportedProjectSchemaError(
         f"project schema {version!r} cannot be migrated to {PROJECT_SCHEMA_VERSION}"
     )
@@ -127,6 +132,26 @@ def _migrate_v3_to_v4(payload: dict[str, Any]) -> dict[str, Any]:
             )
         migrated[field] = copy.deepcopy(default)
     migrated["schema_version"] = 4
+    return migrated
+
+
+_SCHEMA_5_ADDED_DEFAULTS: dict[str, object] = {
+    "probe_plans": [],
+    "probe_region_analyses": [],
+}
+
+
+def _migrate_v4_to_v5(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add empty probe state without inventing a placement or analysis."""
+
+    migrated = copy.deepcopy(payload)
+    for field, default in _SCHEMA_5_ADDED_DEFAULTS.items():
+        if field in migrated and migrated[field] != default:
+            raise UnsupportedProjectSchemaError(
+                f"schema 4 {field} must be the schema 5 migration default {default!r}"
+            )
+        migrated[field] = copy.deepcopy(default)
+    migrated["schema_version"] = 5
     return migrated
 
 
