@@ -266,3 +266,41 @@ def test_bregma_builder_rejects_unmeasured_surface_dv_reference() -> None:
             quality_limits=_limits(),
             limits_source="test fixture thresholds",
         )
+
+
+@pytest.mark.parametrize("invalid", [True, float("nan"), float("inf"), float("-inf")])
+def test_calibration_domain_rejects_boolean_or_nonfinite_scientific_numbers(
+    invalid: object,
+) -> None:
+    with pytest.raises(ValidationError):
+        AnatomicalPoint(
+            frame_id="explicit",
+            ap_um=invalid,
+            ml_um=0,
+            dv_um=0,
+        )
+    with pytest.raises(ValidationError):
+        CalibrationQualityLimits(
+            minimum_axis_baseline_um=invalid,
+            distance_warning_um=100,
+            distance_failure_um=300,
+            lateral_ap_warning_um=100,
+            lateral_ap_failure_um=300,
+            transform_rms_warning_um=100,
+            transform_rms_failure_um=300,
+        )
+
+
+def test_calibrated_target_domain_rejects_boolean_coordinate() -> None:
+    calibration = _calibration()
+
+    with pytest.raises(ValidationError, match="must not be booleans"):
+        BregmaRelativeTargetMM(
+            context_uuid=calibration.context.context_uuid,
+            calibration_uuid=calibration.calibration_uuid,
+            profile_id=calibration.profile_id,
+            stereotaxic_frame_id=calibration.stereotaxic_frame.frame_id,
+            ap_mm=True,
+            ml_mm=0,
+            dv_mm=-1,
+        )

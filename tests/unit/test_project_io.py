@@ -15,7 +15,12 @@ from pydantic import ValidationError
 from tests.fixtures.atlas_factory import make_allen_metadata_test_double
 
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
-from mouse_brain_planner.domain.project_models import MAX_SUBJECT_VASCULAR_IMAGES, PlannerProject
+from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.project_models import (
+    MAX_SUBJECT_VASCULAR_IMAGES,
+    PlannerProject,
+    ViewerSliceDepths,
+)
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
     DorsalVascularLandmark,
@@ -447,7 +452,7 @@ def test_schema_one_package_load_migrates_midline_and_renderer_anchor(tmp_path: 
 
     migrated = load_project(path)
 
-    assert migrated.schema_version == 3
+    assert migrated.schema_version == 4
     assert migrated.atlas is not None
     assert migrated.atlas.midline_ml_um == 5700.0
     assert migrated.renderer_anchor == anchor
@@ -476,11 +481,67 @@ def test_schema_two_package_without_vasculature_member_migrates_to_empty_state(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 3
+    assert migrated.schema_version == 4
     assert migrated.subject_vascular_images == []
     assert migrated.dorsal_vascular_registrations == []
     assert migrated.subject_vascular_overlays == []
     assert migrated.reference_vascular_density is None
+
+
+def test_schema_three_package_migration_preserves_vascular_target_and_viewer_state(
+    tmp_path: Path,
+) -> None:
+    project, source, _ = _vascular_project_and_source(tmp_path)
+    project = project.model_copy(
+        update={
+            "viewer_slice_depths": ViewerSliceDepths(
+                coronal=10,
+                sagittal=20,
+                horizontal=30,
+            ),
+            "unprojected_bregma_targets": [
+                UnprojectedBregmaTarget(
+                    label="legacy site",
+                    ap_mm=-1.25,
+                    ml_mm=-0.7,
+                    dv_mm=-2.4,
+                    notes="preserve exactly",
+                )
+            ],
+        }
+    )
+    path = save_project(
+        project,
+        tmp_path / "schema-three.mouseplan",
+        asset_source_package=source,
+    )
+    project_path = path / PROJECT_FILENAME
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    payload.pop("calibrations")
+    payload.pop("active_calibration_uuid")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    project_path.write_bytes(encoded)
+    checksums_path = path / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[PROJECT_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(
+        json.dumps(checksums, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    migrated = load_project(path, recover_backup=False)
+
+    assert migrated.schema_version == 4
+    assert migrated.viewer_slice_depths == project.viewer_slice_depths
+    assert migrated.unprojected_bregma_targets == project.unprojected_bregma_targets
+    assert migrated.subject_vascular_images == project.subject_vascular_images
+    assert migrated.dorsal_vascular_registrations == project.dorsal_vascular_registrations
+    assert migrated.subject_vascular_overlays == project.subject_vascular_overlays
+    assert migrated.reference_vascular_density == project.reference_vascular_density
+    assert migrated.calibrations == []
+    assert migrated.active_calibration_uuid is None
 
 
 def test_legacy_schema_rejects_hidden_unchecksummed_vasculature_member(tmp_path: Path) -> None:

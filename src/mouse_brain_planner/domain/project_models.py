@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
 from mouse_brain_planner.domain.vessel_models import (
     DorsalVascularRegistration,
     ReferenceVascularDensityProjectState,
@@ -24,6 +25,7 @@ MAX_PROJECT_EVENTS = 1_000
 MAX_SUBJECT_VASCULAR_IMAGES = 128
 MAX_DORSAL_VASCULAR_REGISTRATIONS = 1_024
 MAX_UNPROJECTED_BREGMA_TARGETS = 256
+MAX_CALIBRATIONS = 32
 
 
 class ViewerSliceDepths(BaseModel):
@@ -120,6 +122,11 @@ class PlannerProject(BaseModel):
         default_factory=list,
         max_length=MAX_UNPROJECTED_BREGMA_TARGETS,
     )
+    calibrations: list[AtlasRegisteredCalibration] = Field(
+        default_factory=list,
+        max_length=MAX_CALIBRATIONS,
+    )
+    active_calibration_uuid: UUID | None = None
     coordinate_convention: str = "BrainGlobe ASR: [AP,DV,ML], origin A/S/R, increasing P/I/L, µm"
     scientific_disclaimer_acknowledged: bool = False
     user_notes: str = ""
@@ -144,6 +151,25 @@ class PlannerProject(BaseModel):
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("unprojected bregma targets contain duplicate UUIDs")
 
+        calibration_ids = [item.calibration_uuid for item in self.calibrations]
+        if len(calibration_ids) != len(set(calibration_ids)):
+            raise ValueError("calibrations contain duplicate UUIDs")
+        calibration_versions = [
+            (item.profile_id, item.calibration_version) for item in self.calibrations
+        ]
+        if len(calibration_versions) != len(set(calibration_versions)):
+            raise ValueError("each calibration profile version must be unique")
+        calibrations_by_id = {item.calibration_uuid: item for item in self.calibrations}
+        active_calibration = (
+            None
+            if self.active_calibration_uuid is None
+            else calibrations_by_id.get(self.active_calibration_uuid)
+        )
+        if self.active_calibration_uuid is not None and active_calibration is None:
+            raise ValueError("active calibration UUID does not identify a persisted calibration")
+        if active_calibration is not None and not active_calibration.permits_planning:
+            raise ValueError("a failed calibration cannot be active")
+
         if self.atlas is None:
             if self.linked_cursor is not None:
                 raise ValueError("a linked atlas cursor requires atlas metadata")
@@ -153,6 +179,8 @@ class PlannerProject(BaseModel):
                 raise ValueError("viewer slice state requires atlas metadata")
             if self.selected_region_id is not None or self.region_display:
                 raise ValueError("atlas region state requires atlas metadata")
+            if self.calibrations or self.active_calibration_uuid is not None:
+                raise ValueError("atlas-registered calibration state requires atlas metadata")
             if (
                 self.subject_vascular_images
                 or self.dorsal_vascular_registrations
@@ -196,6 +224,27 @@ class PlannerProject(BaseModel):
 
         if self.renderer_anchor is None:
             raise ValueError("an atlas-bound project requires a renderer anchor")
+
+        expected_atlas_identity = (
+            self.atlas.atlas_key,
+            self.atlas.atlas_package_version,
+        )
+        for calibration in self.calibrations:
+            destination = calibration.atlas_transform.destination_frame
+            calibration_identity = (destination.atlas_key, destination.atlas_version)
+            if calibration_identity != expected_atlas_identity:
+                raise ValueError(
+                    "calibration atlas identity "
+                    f"{calibration_identity} does not match project atlas "
+                    f"{expected_atlas_identity}"
+                )
+            if calibration.atlas_metadata_sha256 != self.atlas.metadata_sha256:
+                raise ValueError("calibration atlas metadata digest does not match project atlas")
+            calibration_subject = calibration.skull_calibration.context.subject_id
+            if calibration_subject != self.subject_id:
+                raise ValueError(
+                    "calibration animal subject ID does not match the current project subject"
+                )
 
         if self.viewer_slice_depths is not None:
             depth_limits = {
@@ -279,10 +328,6 @@ class PlannerProject(BaseModel):
             registration.registration_uuid: registration
             for registration in self.dorsal_vascular_registrations
         }
-        expected_atlas_identity = (
-            self.atlas.atlas_key,
-            self.atlas.atlas_package_version,
-        )
         for registration in self.dorsal_vascular_registrations:
             if registration.image_uuid not in images_by_id:
                 raise ValueError("dorsal vascular registration references an unknown image UUID")

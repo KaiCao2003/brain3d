@@ -10,14 +10,26 @@ input.
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
-NonNegativeFiniteFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
-PositiveFiniteFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+from mouse_brain_planner.domain.numeric_types import (
+    FiniteFloat,
+    NonNegativeFiniteFloat,
+    PositiveFiniteFloat,
+)
+
+__all__ = [
+    "ANIMAL_RESEARCH_WARNING",
+    "AnimalSurgeryContext",
+    "FinalPlanConfirmation",
+    "FiniteFloat",
+    "NonNegativeFiniteFloat",
+    "PositiveFiniteFloat",
+    "UnitDirectionAPMLDV",
+]
 
 
 class AnimalSurgeryContext(BaseModel):

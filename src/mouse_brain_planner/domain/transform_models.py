@@ -11,13 +11,14 @@ from __future__ import annotations
 import math
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
+from mouse_brain_planner.domain.numeric_types import FiniteFloat, NonNegativeFiniteFloat
+
 type AnatomicalComponentOrder = tuple[Literal["AP"], Literal["ML"], Literal["DV"]]
 
 
@@ -133,7 +134,7 @@ class TransformLandmarkResidual(BaseModel):
     ap_error_um: FiniteFloat
     ml_error_um: FiniteFloat
     dv_error_um: FiniteFloat
-    radial_error_um: Annotated[float, Field(ge=0, allow_inf_nan=False)]
+    radial_error_um: NonNegativeFiniteFloat
 
 
 class AnatomicalTransform(BaseModel):
@@ -166,8 +167,8 @@ class AnatomicalTransform(BaseModel):
     ]
     landmarks: tuple[LandmarkCorrespondence3D, ...] = ()
     residuals: tuple[TransformLandmarkResidual, ...] = ()
-    rms_residual_um: Annotated[float, Field(default=0, ge=0, allow_inf_nan=False)]
-    max_residual_um: Annotated[float, Field(default=0, ge=0, allow_inf_nan=False)]
+    rms_residual_um: NonNegativeFiniteFloat = 0
+    max_residual_um: NonNegativeFiniteFloat = 0
     affine_distortion_acknowledged: bool = False
     derived_from_transform_uuids: tuple[UUID, ...] = ()
     created_at: datetime = Field(default_factory=utc_now)
@@ -188,6 +189,15 @@ class AnatomicalTransform(BaseModel):
         determinant = float(np.linalg.det(matrix[:3, :3]))
         if not math.isfinite(determinant) or abs(determinant) <= 1e-12:
             raise ValueError("transform linear component must be invertible")
+        return value
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def reject_boolean_version(cls, value: object) -> object:
+        """Do not let a JSON boolean silently become transform version one."""
+
+        if isinstance(value, bool):
+            raise ValueError("transform version must be an integer, not a boolean")
         return value
 
     @model_validator(mode="after")

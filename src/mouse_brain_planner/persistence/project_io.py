@@ -453,7 +453,7 @@ def _load_verified(path: Path) -> PlannerProject:
         project_payload["atlas"] = atlas_payload
         project_payload["region_display"] = regions_payload
 
-        if raw_schema_version == PROJECT_SCHEMA_VERSION:
+        if raw_schema_version in {3, PROJECT_SCHEMA_VERSION}:
             vascular_encoded = _read_bounded_member(
                 package,
                 directory_fd,
@@ -478,7 +478,7 @@ def _load_verified(path: Path) -> PlannerProject:
 
         migrated = migrate_project_payload(project_payload)
         project = PlannerProject.model_validate(migrated)
-        if raw_schema_version == PROJECT_SCHEMA_VERSION:
+        if raw_schema_version in {3, PROJECT_SCHEMA_VERSION}:
             expected_names = set(CHECKSUMMED_FILENAMES) | {
                 image.project_relative_path for image in project.subject_vascular_images
             }

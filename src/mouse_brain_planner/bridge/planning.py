@@ -17,6 +17,7 @@ from PIL import Image
 from pydantic import ValidationError
 
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
+from mouse_brain_planner.bridge.calibration import register_calibration_handlers
 from mouse_brain_planner.bridge.implant_targets import register_implant_target_handlers
 from mouse_brain_planner.bridge.server import (
     SUPPORTED_ATLAS_IDENTIFIER,
@@ -138,6 +139,12 @@ class PlanningBridgeSession:
             get_project=self._require_project,
             get_revision=lambda: self.project_revision,
             replace_project=self._replace_project_after_viewer_mutation,
+        )
+        register_calibration_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_calibration_mutation,
         )
         self.dispatcher.declare_capability("populationReferenceDensityPrepare")
         self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
@@ -292,6 +299,12 @@ class PlanningBridgeSession:
                     "revision": self.project_revision,
                     "isDirty": self.saved_revision != self.project_revision,
                     "animalResearchOnlyAcknowledged": (project.scientific_disclaimer_acknowledged),
+                    "calibrationCount": len(project.calibrations),
+                    "activeCalibrationId": (
+                        None
+                        if project.active_calibration_uuid is None
+                        else str(project.active_calibration_uuid)
+                    ),
                 }
             ),
             "viewer": viewer,
@@ -1055,6 +1068,13 @@ class PlanningBridgeSession:
 
     def _replace_project_after_viewer_mutation(self, project: PlannerProject) -> int:
         """Publish one independent viewer mutation and return its new revision."""
+
+        self.project = project
+        self.project_revision += 1
+        return self.project_revision
+
+    def _replace_project_after_calibration_mutation(self, project: PlannerProject) -> int:
+        """Publish one validated calibration mutation and return its revision."""
 
         self.project = project
         self.project_revision += 1

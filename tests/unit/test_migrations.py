@@ -30,7 +30,7 @@ def test_schema_one_migrates_explicit_midline_and_previous_renderer_anchor() -> 
 
     assert payload["schema_version"] == 1
     assert "renderer_anchor" not in payload
-    assert migrated["schema_version"] == 3
+    assert migrated["schema_version"] == 4
     assert project.atlas is not None
     assert project.atlas.midline_ml_um == 5700.0
     assert project.renderer_anchor is not None
@@ -39,6 +39,8 @@ def test_schema_one_migrates_explicit_midline_and_previous_renderer_anchor() -> 
     assert project.dorsal_vascular_registrations == []
     assert project.subject_vascular_overlays == []
     assert project.reference_vascular_density is None
+    assert project.calibrations == []
+    assert project.active_calibration_uuid is None
 
 
 def test_schema_one_without_atlas_migrates_to_explicit_null_anchor() -> None:
@@ -48,7 +50,7 @@ def test_schema_one_without_atlas_migrates_to_explicit_null_anchor() -> None:
 
     migrated = migrate_project_payload(payload)
 
-    assert migrated["schema_version"] == 3
+    assert migrated["schema_version"] == 4
     assert migrated["renderer_anchor"] is None
     assert PlannerProject.model_validate(migrated).renderer_anchor is None
 
@@ -67,11 +69,37 @@ def test_schema_two_migrates_only_exact_empty_vascular_defaults() -> None:
     migrated = migrate_project_payload(payload)
 
     assert payload["schema_version"] == 2
-    assert migrated["schema_version"] == 3
+    assert migrated["schema_version"] == 4
     assert migrated["subject_vascular_images"] == []
     assert migrated["dorsal_vascular_registrations"] == []
     assert migrated["subject_vascular_overlays"] == []
     assert migrated["reference_vascular_density"] is None
+    assert migrated["calibrations"] == []
+    assert migrated["active_calibration_uuid"] is None
+
+
+def test_schema_three_migrates_calibration_defaults_without_changing_targets() -> None:
+    payload = PlannerProject().model_dump(mode="json")
+    payload["schema_version"] = 3
+    payload.pop("calibrations")
+    payload.pop("active_calibration_uuid")
+    original_targets = payload["unprojected_bregma_targets"]
+
+    migrated = migrate_project_payload(payload)
+
+    assert migrated["schema_version"] == 4
+    assert migrated["calibrations"] == []
+    assert migrated["active_calibration_uuid"] is None
+    assert migrated["unprojected_bregma_targets"] == original_targets
+
+
+def test_schema_three_rejects_unversioned_calibration_state() -> None:
+    payload = PlannerProject().model_dump(mode="json")
+    payload["schema_version"] = 3
+    payload["calibrations"] = [{"untrusted": True}]
+
+    with pytest.raises(UnsupportedProjectSchemaError, match="schema 4 migration default"):
+        migrate_project_payload(payload)
 
 
 def test_schema_two_rejects_unversioned_nonempty_vascular_state() -> None:
@@ -111,3 +139,9 @@ def test_schema_one_migration_bounds_legacy_event_history() -> None:
 def test_unknown_project_schema_is_rejected() -> None:
     with pytest.raises(UnsupportedProjectSchemaError, match="schema 99"):
         migrate_project_payload({"schema_version": 99})
+
+
+@pytest.mark.parametrize("invalid", [True, False, 3.0, "3", None])
+def test_noninteger_or_boolean_project_schema_is_rejected(invalid: object) -> None:
+    with pytest.raises(UnsupportedProjectSchemaError, match="cannot be migrated"):
+        migrate_project_payload({"schema_version": invalid})
