@@ -62,6 +62,7 @@ class MajorVesselSourceProvenance(BaseModel):
     source_version: str = Field(min_length=1, max_length=200)
     source_license: str = Field(min_length=1, max_length=300)
     dataset_title: str = Field(min_length=1, max_length=500)
+    # Schema 6 originally bounded the containing project member, not author count/text.
     authors: tuple[str, ...] = Field(min_length=1)
     specimen_id: str = Field(min_length=1, max_length=200)
     source_archive_digest: str = Field(min_length=1, max_length=300)
@@ -153,6 +154,7 @@ class ProbeVesselConflict(BaseModel):
     insertion_depth_um: NonNegativeFiniteFloat
     source_kind: Literal["reference-individual-vessel-graph"] = "reference-individual-vessel-graph"
     subject_specific: Literal[False] = False
+    # Preserve the original schema-6 record contract; project I/O supplies the byte cap.
     warnings: tuple[str, ...]
 
 
@@ -176,6 +178,7 @@ class ProbeVesselAnalysis(BaseModel):
     risk_profile: VesselRiskProfile
     provenance: MajorVesselSourceProvenance
     statement: str = Field(min_length=1, max_length=2_000)
+    # Preserve the original schema-6 record contract; project I/O supplies the byte cap.
     warnings: tuple[str, ...]
     usable_for_navigation: Literal[False] = False
 

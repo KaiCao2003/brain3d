@@ -2,6 +2,9 @@ import Foundation
 
 public enum SafetyPolicy {
     public static let animalResearchOnly = "Animal research only — not for human or clinical use"
+    public static let planningOnlyNotice =
+        "Animal research planning only. Not validated for surgical navigation. "
+            + "Verify coordinates, probe geometry, vessel data, registration, and trajectory independently."
     public static let supportedAtlasIdentifier = "allen_mouse_25um"
     public static let supportedAtlasVersion = "1.2"
     public static let supportedAtlasDisplayName = "allen_mouse_25um v1.2"

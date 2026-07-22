@@ -56,7 +56,7 @@ class AtlasPhysicalPointAPMLDV(BaseModel):
     directly in this declared atlas frame (for example, synthetic tests).
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     atlas_key: str = Field(min_length=1, max_length=200)
     atlas_version: str = Field(min_length=1, max_length=200)
@@ -97,7 +97,7 @@ class AtlasPhysicalPointAPMLDV(BaseModel):
 class CalibratedProbeShankSegment(BaseModel):
     """One finite shank centerline already transformed into the atlas frame."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID
     probe_model_id: str = Field(min_length=1, max_length=200)
@@ -132,7 +132,7 @@ class CalibratedProbeShankSegment(BaseModel):
 class AtlasRecordingSitePoint(BaseModel):
     """One placed recording site already transformed into the atlas frame."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID
     probe_model_id: str = Field(min_length=1, max_length=200)
@@ -145,7 +145,7 @@ class AtlasRecordingSitePoint(BaseModel):
 class RegionTraversalVoxelInterval(BaseModel):
     """Positive-length parametric interval owned by one annotation voxel."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     voxel: BrainGlobeVoxelIndex
     structure_id: int = Field(ge=0)
@@ -177,7 +177,7 @@ class RegionTraversalVoxelInterval(BaseModel):
 class RegionTraversalSegment(BaseModel):
     """Run-length encoded adjacent annotation voxels with one structure ID."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     shank_id: str = Field(min_length=1, max_length=200)
     structure_id: int = Field(ge=0)
@@ -222,7 +222,7 @@ class RegionTraversalSegment(BaseModel):
 class RecordingSiteRegionAssignment(BaseModel):
     """Half-open annotation lookup for one placed recording site."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     shank_id: str = Field(min_length=1, max_length=200)
     site_id: str = Field(min_length=1, max_length=200)
@@ -258,7 +258,7 @@ class RecordingSiteRegionAssignment(BaseModel):
 class ProbeRegionAnalysis(BaseModel):
     """Complete deterministic geometry result for one finite probe shank."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     analysis_uuid: UUID = Field(default_factory=uuid4)
     placement_uuid: UUID

@@ -52,6 +52,7 @@ from mouse_brain_planner.domain.stereotaxy_models import (
     CalibrationQualityLimits,
     DorsoventralReference,
     SkullLandmarkSet,
+    atlas_registered_calibration_sha256,
 )
 from mouse_brain_planner.domain.surgery_common import AnimalSurgeryContext
 from mouse_brain_planner.domain.transform_models import (
@@ -1197,13 +1198,7 @@ def _require_same_fit(
 
 
 def _calibration_digest(calibration: AtlasRegisteredCalibration) -> str:
-    encoded = json.dumps(
-        calibration.model_dump(mode="json"),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return atlas_registered_calibration_sha256(calibration)
 
 
 def _projection_digest(

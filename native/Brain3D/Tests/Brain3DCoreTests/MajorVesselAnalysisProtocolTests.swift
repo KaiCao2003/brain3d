@@ -4,18 +4,15 @@ import Testing
 
 @Suite("Bounded major-vessel analysis protocol")
 struct MajorVesselAnalysisProtocolTests {
-    @Test("Reviewed no-conflict wording and acknowledged assumptions decode")
-    func validNoConflict() throws {
-        let result = try decode(payload())
+    @Test("Pinned unbounded reference cannot publish a no-conflict result")
+    func rejectsUnboundedNoConflict() throws {
+        var object = payload()
+        var analysis = try #require(object["analysis"] as? [String: Any])
+        analysis["resultStatus"] = "noConflictDetected"
+        analysis["statement"] = MajorVesselAnalysisContract.noConflictStatement
+        object["analysis"] = analysis
 
-        #expect(result.analysis.resultStatus == .noConflictDetected)
-        #expect(result.analysis.statement == MajorVesselAnalysisContract.noConflictStatement)
-        #expect(result.analysis.minimumAdjustedClearanceMicrometres == 125)
-        #expect(result.analysis.conflicts.isEmpty)
-        #expect(result.analysis.usableForNavigation == false)
-        #expect(result.analysis.algorithmVersion == "major-vessel-aabb-tapered-surface-v3")
-        #expect(result.analysis.provenance.registrationTransformId == nil)
-        #expect(result.analysis.provenance.uncertaintyBoundsReviewed == false)
+        #expect(throws: (any Error).self) { try decode(object) }
     }
 
     @Test("Current project and plan identity gates restored analysis")
@@ -43,17 +40,39 @@ struct MajorVesselAnalysisProtocolTests {
 
     @Test("Reviewed inputs may still produce an unclassifiable result")
     func reviewedButUnclassifiable() throws {
-        var object = payload()
-        var analysis = try #require(object["analysis"] as? [String: Any])
-        analysis["resultStatus"] = "insufficientGeometry"
-        analysis["statement"] =
-            "The source does not provide reviewed registration and tissue-distortion bounds."
-        object["analysis"] = analysis
-
-        let result = try decode(object)
+        let result = try decode(payload())
         #expect(result.analysis.riskProfile.confirmedByUser)
         #expect(result.analysis.riskProfile.referenceOnlyCoverageAcknowledged)
         #expect(result.analysis.resultStatus == .insufficientGeometry)
+    }
+
+    @Test("A numerically consistent positive intersection decodes")
+    func validIntersection() throws {
+        var object = payload()
+        var analysis = try #require(object["analysis"] as? [String: Any])
+        analysis["resultStatus"] = "intersection"
+        analysis["statement"] = "Intersection detected within the loaded reference vessel geometry."
+        analysis["nearestCenterlineDistanceMicrometres"] = 50.0
+        analysis["minimumGeometricClearanceMicrometres"] = 0.0
+        analysis["minimumAdjustedClearanceMicrometres"] = -175.0
+        analysis["candidateSegmentCount"] = 1
+        analysis["measuredSegmentCount"] = 1
+        analysis["conflicts"] = [intersectionConflict]
+        object["analysis"] = analysis
+
+        let result = try decode(object)
+        #expect(result.analysis.resultStatus == .intersection)
+        #expect(result.analysis.conflicts.count == 1)
+    }
+
+    @Test("Candidate and measured counts must identify the same narrow-phase set")
+    func rejectsMeasuredCountMismatch() throws {
+        var object = payload()
+        var analysis = try #require(object["analysis"] as? [String: Any])
+        analysis["measuredSegmentCount"] = 2
+        object["analysis"] = analysis
+
+        #expect(throws: (any Error).self) { try decode(object) }
     }
 
     @Test("Unbounded result wording is rejected")
@@ -111,12 +130,13 @@ struct MajorVesselAnalysisProtocolTests {
             "analysis": [
                 "algorithmVersion": MajorVesselAnalysisContract.algorithmVersion,
                 "inputSha256": String(repeating: "b", count: 64),
-                "resultStatus": "noConflictDetected",
-                "statement": MajorVesselAnalysisContract.noConflictStatement,
+                "resultStatus": "insufficientGeometry",
+                "statement":
+                    "The source does not provide reviewed registration and tissue-distortion bounds.",
                 "nearestCenterlineDistanceMicrometres": 300,
                 "minimumGeometricClearanceMicrometres": 300,
                 "minimumAdjustedClearanceMicrometres": 125,
-                "candidateSegmentCount": 0,
+                "candidateSegmentCount": MajorVesselContract.expectedSegmentCount,
                 "measuredSegmentCount": MajorVesselContract.expectedSegmentCount,
                 "conflicts": [],
                 "conflictsTruncated": false,
@@ -170,6 +190,39 @@ struct MajorVesselAnalysisProtocolTests {
             "registrationUncertaintyBoundMicrometres": NSNull(),
             "tissueDistortionUncertaintyBoundMicrometres": NSNull(),
             "uncertaintyBoundsReviewed": false,
+        ]
+    }
+
+    private var intersectionConflict: [String: Any] {
+        [
+            "conflictId": "shank-0:edge-1:run-2:segment-3",
+            "shankId": "shank-0",
+            "vesselSourceEdgeIndex": 1,
+            "vesselRunIndex": 2,
+            "vesselSegmentIndexInRun": 3,
+            "classification": "intersection",
+            "vesselDiameterMicrometres": 30.0,
+            "probeEnvelopeRadiusMicrometres": 35.0,
+            "centerlineDistanceMicrometres": 50.0,
+            "geometricSurfaceClearanceMicrometres": 0.0,
+            "requiredMarginMicrometres": 100.0,
+            "registrationUncertaintyMicrometres": 75.0,
+            "adjustedClearanceMicrometres": -175.0,
+            "probePoint": physicalPoint(ap: 0, dv: 0, ml: 0),
+            "vesselPoint": physicalPoint(ap: 50, dv: 0, ml: 0),
+            "insertionDepthMicrometres": 100.0,
+            "sourceKind": "reference-individual-vessel-graph",
+            "subjectSpecific": false,
+            "warnings": ["Single-specimen reference only."],
+        ]
+    }
+
+    private func physicalPoint(ap: Double, dv: Double, ml: Double) -> [String: Any] {
+        [
+            "frameId": AtlasPhysicalCoordinateFrame.expectedFrameId,
+            "apMicrometres": ap,
+            "dvMicrometres": dv,
+            "mlMicrometres": ml,
         ]
     }
 }

@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 class AtlasAxis(BaseModel):
     """Meaning of one BrainGlobe array axis."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     array_axis: Literal[0, 1, 2]
     anatomical_axis: Literal["AP", "DV", "ML"]
@@ -23,7 +23,7 @@ class AtlasAxis(BaseModel):
 class AtlasMetadata(BaseModel):
     """Normalized metadata for one exact atlas package."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     atlas_key: str = Field(min_length=1)
     atlas_package_version: str = Field(min_length=1)
@@ -125,7 +125,7 @@ class AtlasMetadata(BaseModel):
 class RegionRecord(BaseModel):
     """One atlas structure with hierarchy and source display color."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     structure_id: int = Field(gt=0)
     acronym: str = Field(min_length=1)

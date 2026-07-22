@@ -179,17 +179,22 @@ clearance. The workflow remains archived in the backend and is absent from the p
 50 µm prepared grid does not acquire 25 µm vascular resolution merely because it is composited
 over a 25 µm atlas image.
 
-## LAMBADA major-vessel reference
+## Archived LAMBADA major-vessel evidence
 
-The primary major-vessel layer is a bundled derivative of Renier, de Launoit, and Skriabine's
+The repository retains a derivative of Renier, de Launoit, and Skriabine's
 P60_606 graph, [Zenodo record 18876865](https://zenodo.org/records/18876865), DOI
 `10.5281/zenodo.18876865`, CC BY 4.0. It is bound to the accepted Allen 25 µm array shape and
 contains maximal consecutive in-bounds runs whose point radius is at least 15 µm (diameter at
-least 30 µm). It is overlaid on intersecting slices, Dorsal, and the SceneKit 3D brain.
+least 30 µm). Those deterministic extraction facts do not qualify it as a display layer.
 
-The graph is one fixed cleared P60 reference, not subject-specific vasculature. The source omits
-pial and choroidal vessels, and the derivative omits smaller vessels. Full identity, extraction,
-coordinate conversion, checks, counts, and limitations are in
+AP and DV orientation evidence passed, but the source describes hemisphere specimens and the
+exact graph has no persisted biological hemisphere/laterality binding. Whole-brain coverage and
+ML polarity are unqualified, and the application does not mirror the source. Runtime reference
+metadata, geometry, and analysis requests return `VESSEL_GEOMETRY_UNAVAILABLE`; nothing is
+overlaid in slices, Dorsal, or 3D.
+
+The source also omits pial and choroidal vessels, and the derivative omits smaller vessels. Full
+identity, extraction, coordinate qualification, checks, counts, and limitations are in
 [LAMBADA Major Vessels](docs/LAMBADA_MAJOR_VESSELS.md) and
 [Third-Party Software and Data](THIRD_PARTY.md).
 

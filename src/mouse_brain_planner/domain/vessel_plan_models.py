@@ -57,6 +57,10 @@ class ProbeVesselAnalysisBundle(BaseModel):
 
     @model_validator(mode="after")
     def validate_bundle_digest(self) -> Self:
+        if len(self.analysis.conflicts) > self.maximum_conflicts:
+            raise ValueError(
+                "vessel-analysis conflicts exceed the persisted maximum-conflicts request"
+            )
         expected = probe_vessel_bundle_digest(
             plan_uuid=self.plan_uuid,
             plan_version=self.plan_version,

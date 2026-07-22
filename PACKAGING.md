@@ -11,8 +11,9 @@ open native/Brain3D/build/Brain3D.app
 
 `Scripts/build-app.sh` builds the Swift executable, creates the bundle layout, installs the
 reviewed `Info.plist`, and applies an ad-hoc signature. It does not bundle `.venv`, Python, atlas
-data, or project files. The LAMBADA derivative currently resolves from the repository's Python
-package beside the source checkout; it is not copied into the development `.app` by this script.
+data, or project files. The archived LAMBADA derivative currently resolves from the repository's
+Python package beside the source checkout; it is not copied into the development `.app` by this
+script and the runtime gate never loads or serves it.
 
 ## Current release blockers
 
@@ -31,14 +32,16 @@ The removed Qt/PyVista/VTK stack is not a packaging fallback and is not part of 
 Brain3D.app/
   Contents/
     MacOS/Brain3D                 native SwiftUI executable
-    Resources/                   reviewed UI resources, notices, LAMBADA asset + manifest
+    Resources/                   reviewed UI resources, notices, qualification evidence
     Frameworks/ or Resources/    deterministic Python runtime and scientific service
 ```
 
 Atlas archives, the optional archived population-density source, subject images, original vessel
-graphs, and `.mouseplan` projects remain outside the signed bundle. A future qualified build must
-bundle the compact CC BY 4.0 LAMBADA P60_606 derivative with its adjacent manifest, attribution,
-and limitations because it is a reviewed application asset. The app records immutable source
+graphs, and `.mouseplan` projects remain outside the signed bundle. The P60_606 derivative is not
+a reviewed application asset: its hemisphere/laterality and whole-brain qualification is
+rejected. A build may retain its manifest, attribution, and canonical rejection report as
+evidence, but must not package or advertise it as runtime vessel geometry. Any future vessel
+source requires a new qualification and release decision. The app records immutable source
 identities and manages user-owned caches.
 
 ## Release process still to implement

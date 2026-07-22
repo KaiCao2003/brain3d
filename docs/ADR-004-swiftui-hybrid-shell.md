@@ -44,17 +44,17 @@ SwiftUI owns:
 
 - windows, menus, native file panels, keyboard focus, accessibility, and presentation;
 - asynchronous bridge lifecycle and explicit disconnected/loading/error states;
-- rendering bridge-produced atlas PNGs and verified mesh assets;
-- SceneKit camera interaction, ray construction, and display of verified brain/probe/vessel
-  geometry; and
-- calibration, target, probe, and vessel controls that send declared typed inputs.
+- rendering bridge-produced atlas PNGs and backend-validated mesh assets;
+- SceneKit camera interaction, ray construction, and display of schema-checked brain/probe
+  geometry payloads; and
+- calibration, target, and probe controls that send declared typed inputs.
 
 Python owns:
 
 - BrainGlobe atlas acquisition, validation, metadata, hierarchy, arrays, and mesh provenance;
 - coordinate systems and transforms;
-- subject calibration, AP/ML/DV target projection, probe geometry, voxel traversal, and
-  tapered-radius major-vessel analysis;
+- subject calibration, AP/ML/DV target projection, probe geometry, and voxel traversal;
+- digest-bound major-vessel qualification and fail-closed rejection;
 - subject dorsal-image byte preservation, landmark fitting, residuals, and atlas-grid resampling;
 - population reference-density validation and its non-subject-specific limitation;
 - project models, migrations, checksums, atomic save, backup recovery, and exports.
@@ -70,16 +70,30 @@ process decision, is:
 - exactly `allen_mouse_25um` v1.2; 10 µm is not offered during testing;
 - exactly one selected `Dorsal / Coronal / Sagittal / Horizontal / 3D` view, with independent
   slice depths and click-to-replace region labels;
-- a SceneKit brain/probe/reference-vessel scene with camera control and atlas ray picking;
+- a SceneKit brain/probe scene with camera control and atlas ray picking;
 - signed bregma AP/ML/DV targets, versioned subject calibration, QC-gated projection, and probe
   planning/region export;
-- a radius-bearing LAMBADA P60_606 reference filtered to diameter ≥30 µm, shown in 2D,
-  Dorsal, and 3D; and
-- V3 AABB-candidate/tapered-surface reference analysis with explicit margin, uncertainty, risk-input, and
-  incomplete-coverage acknowledgements.
+- an archived LAMBADA P60_606 diameter-≥30 µm derivative that is not shown or served because
+  coordinate and coverage qualification is rejected; and
+- no reference-vessel analysis capability.
 
-Population density and subject-image registration remain archived backend capabilities and are
-not exposed in the primary planning UI.
+Region export uses a two-phase boundary: Python generates and hashes content without mutation,
+the native client performs an atomic file write, and only a matching confirmation records the
+`exported` audit event. Cancelling the save panel or a failed write leaves the project unchanged.
+
+AP and DV orientation evidence passed, but the source describes hemisphere specimens and the
+exact graph has no persisted biological hemisphere/laterality binding. Whole-brain coverage and
+ML polarity are therefore unqualified, and the service must not infer a side or mirror the
+derivative. It omits `auditedReferenceMajorVessels` and
+`radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.get`,
+`vessel.major.reference.geometry`, and `vessel.major.reference.analyze` fail with
+`VESSEL_GEOMETRY_UNAVAILABLE`. The gate is bound to
+[`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+
+Population density and subject-image registration remain archived compatibility code and
+persisted data. The primary bridge does not register their methods or capabilities, and the
+planning UI does not expose them.
 
 The persistent application warning is:
 
@@ -89,6 +103,9 @@ Creating a project requires an explicit acknowledgement. Disconnects and unsuppo
 remain visible failures; the shell must never substitute demo anatomy or fake successful state.
 
 ## First native qualification gate
+
+This is the retained historical Phase 1 gate. Steps 5–8 document the archived subject-image
+workflow; the current primary bridge does not register that workflow or expose it in the UI.
 
 Before expanding the hybrid shell, a real user journey must pass repeatedly without a terminal:
 

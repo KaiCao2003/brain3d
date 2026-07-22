@@ -11,7 +11,7 @@ import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from pydantic import ValidationError
 
@@ -37,9 +37,14 @@ VASCULAR_PROJECT_FIELDS = (
     "reference_vascular_density",
 )
 MAX_PROJECT_IMAGE_BYTES = 512 * 1024 * 1024
+# A product-valid maximum project (32 NP1 plans, 32 region bundles with 960
+# recording sites each, and 32 vessel bundles with 250 conflicts each) is about
+# 66 MiB as the intentionally human-readable JSON emitted here.  Keep bounded
+# reads/writes while leaving conservative headroom for metadata and schema growth.
+MAX_PROJECT_JSON_BYTES: Final = 128 * 1024 * 1024
 PROJECT_MEMBER_MAX_BYTES: dict[str, int] = {
     CHECKSUMS_FILENAME: 256 * 1024,
-    PROJECT_FILENAME: 4 * 1024 * 1024,
+    PROJECT_FILENAME: MAX_PROJECT_JSON_BYTES,
     ATLAS_FILENAME: 2 * 1024 * 1024,
     REGIONS_FILENAME: 64 * 1024 * 1024,
     VASCULATURE_FILENAME: 16 * 1024 * 1024,
@@ -453,7 +458,12 @@ def _load_verified(path: Path) -> PlannerProject:
         project_payload["atlas"] = atlas_payload
         project_payload["region_display"] = regions_payload
 
-        if raw_schema_version in {3, PROJECT_SCHEMA_VERSION}:
+        has_split_vasculature = (
+            isinstance(raw_schema_version, int)
+            and not isinstance(raw_schema_version, bool)
+            and 3 <= raw_schema_version <= PROJECT_SCHEMA_VERSION
+        )
+        if has_split_vasculature:
             vascular_encoded = _read_bounded_member(
                 package,
                 directory_fd,
@@ -478,7 +488,7 @@ def _load_verified(path: Path) -> PlannerProject:
 
         migrated = migrate_project_payload(project_payload)
         project = PlannerProject.model_validate(migrated)
-        if raw_schema_version in {3, PROJECT_SCHEMA_VERSION}:
+        if has_split_vasculature:
             expected_names = set(CHECKSUMMED_FILENAMES) | {
                 image.project_relative_path for image in project.subject_vascular_images
             }

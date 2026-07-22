@@ -72,12 +72,12 @@ struct SceneKitRenderSmokeTests {
         #expect(vesselNode.geometry?.name == "radius-bearing-reference-major-vessels")
         #expect(vesselNode.geometry?.elements.first?.primitiveType == .triangles)
         #expect(vesselNode.geometry?.elements.first?.primitiveCount == 24)
-        #expect(vesselNode.renderingOrder == 10_000)
+        #expect(vesselNode.renderingOrder == 20)
         #expect(vesselNode.opacity == 1)
         let vesselMaterial = try #require(vesselNode.geometry?.firstMaterial)
         #expect(vesselMaterial.lightingModel == .constant)
-        #expect(!vesselMaterial.readsFromDepthBuffer)
-        #expect(!vesselMaterial.writesToDepthBuffer)
+        #expect(vesselMaterial.readsFromDepthBuffer)
+        #expect(vesselMaterial.writesToDepthBuffer)
         let importedBrainRoot = try #require(
             view.scene?.rootNode.childNode(withName: "verified-atlas-obj", recursively: true)
         )
@@ -97,6 +97,59 @@ struct SceneKitRenderSmokeTests {
         #expect(bytes.min() != bytes.max())
         #expect(visibleVesselPixelCount(brainOnlyBitmap) == 0)
         #expect(visibleVesselPixelCount(bitmap) >= 20)
+    }
+
+    @Test("Snapshot requires current vessel geometry before accepting a selected conflict")
+    func selectedConflictSnapshotContract() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let meshResult = try decodeMeshResult(fixture: fixture)
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let conflict = try decodeConflict()
+        let withoutConflict = try AnimalSceneSnapshot(
+            projectId: "render-smoke-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: meshResult,
+            selectedProbePlan: nil
+        )
+        #expect(throws: AtlasSceneContractError.self) {
+            _ = try AnimalSceneSnapshot(
+                projectId: "render-smoke-project",
+                projectRevision: 1,
+                rendererAnchor: anchor,
+                meshResult: meshResult,
+                selectedProbePlan: nil,
+                selectedVesselConflict: conflict
+            )
+        }
+        #expect(withoutConflict.selectedVesselConflict == nil)
+        try AnimalSceneSnapshot.validateSelectedVesselConflict(
+            conflict,
+            bounds: meshResult.sourceCoordinateFrame.bounds,
+            selectedProbeShankIds: ["shank-1"]
+        )
+        #expect(throws: AtlasSceneContractError.self) {
+            try AnimalSceneSnapshot.validateSelectedVesselConflict(
+                conflict,
+                bounds: meshResult.sourceCoordinateFrame.bounds,
+                selectedProbeShankIds: ["another-shank"]
+            )
+        }
+
+        let outOfBounds = try decodeConflict(overrides: [
+            "vesselPoint": physicalPoint(ap: 13_200, dv: 4_000, ml: 5_700),
+        ])
+        #expect(throws: AtlasSceneContractError.self) {
+            try AnimalSceneSnapshot.validateSelectedVesselConflict(
+                outOfBounds,
+                bounds: meshResult.sourceCoordinateFrame.bounds,
+                selectedProbeShankIds: ["shank-1"]
+            )
+        }
     }
 
     private func bitmap(from image: NSImage) throws -> NSBitmapImageRep {
@@ -135,6 +188,43 @@ struct SceneKitRenderSmokeTests {
             }
         }
         return count
+    }
+
+    private func decodeConflict(
+        overrides: [String: Any] = [:]
+    ) throws -> MajorVesselConflict {
+        var object: [String: Any] = [
+            "conflictId": "shank-1:edge-7:run-0:segment-0",
+            "shankId": "shank-1",
+            "vesselSourceEdgeIndex": 7,
+            "vesselRunIndex": 0,
+            "vesselSegmentIndexInRun": 0,
+            "classification": "intersection",
+            "vesselDiameterMicrometres": 30.0,
+            "probeEnvelopeRadiusMicrometres": 35.0,
+            "centerlineDistanceMicrometres": 200.0,
+            "geometricSurfaceClearanceMicrometres": 150.0,
+            "requiredMarginMicrometres": 100.0,
+            "registrationUncertaintyMicrometres": 75.0,
+            "adjustedClearanceMicrometres": -25.0,
+            "probePoint": physicalPoint(ap: 6_600, dv: 3_900, ml: 5_700),
+            "vesselPoint": physicalPoint(ap: 6_600, dv: 4_100, ml: 5_700),
+            "insertionDepthMicrometres": 100.0,
+            "sourceKind": "reference-individual-vessel-graph",
+            "subjectSpecific": false,
+            "warnings": ["Single-specimen reference only."],
+        ]
+        overrides.forEach { object[$0.key] = $0.value }
+        return try decode(MajorVesselConflict.self, object: object)
+    }
+
+    private func physicalPoint(ap: Double, dv: Double, ml: Double) -> [String: Any] {
+        [
+            "frameId": AtlasPhysicalCoordinateFrame.expectedFrameId,
+            "apMicrometres": ap,
+            "dvMicrometres": dv,
+            "mlMicrometres": ml,
+        ]
     }
 
     private func makeFixture() throws -> (

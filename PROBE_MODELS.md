@@ -57,7 +57,9 @@ basis and uniform scale; they are not reconstructed from atlas-global ML after r
 
 Full affine calibration is rejected for probe planning because shear would turn a physical
 rectangular cross-section into a different envelope. Legacy v1 plans must be explicitly updated
-before region or vessel analysis; their previously derived geometry is never treated as current.
+before region analysis or any future qualified vessel analysis; their previously derived geometry
+is never treated as current. Archived synthetic vessel tests do not make that analysis available
+in the product.
 
 ## Adding another hardware model
 

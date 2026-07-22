@@ -1,4 +1,4 @@
-"""Project and subject-vasculature methods for the native hybrid bridge."""
+"""Project bridge methods and archived legacy vasculature implementations."""
 
 from __future__ import annotations
 
@@ -134,16 +134,13 @@ class PlanningBridgeSession:
         self.dispatcher.register("project.new", self.project_new)
         self.dispatcher.register("project.open", self.project_open)
         self.dispatcher.register("project.save", self.project_save)
-        self.dispatcher.register("vascular.import", self.vascular_import)
-        self.dispatcher.register("vascular.preview", self.vascular_preview)
-        self.dispatcher.register("vascular.register", self.vascular_register)
-        self.dispatcher.register("vascular.overlay", self.vascular_overlay)
-        self.dispatcher.register("vascular.reference.prepare", self.vascular_reference_prepare)
-        self.dispatcher.register("vascular.reference.display", self.vascular_reference_display)
-        self.dispatcher.register("vascular.reference.overlay", self.vascular_reference_overlay)
+        # The legacy subject-image and population-density implementations remain
+        # below for package compatibility and archive verification, but are not
+        # reachable through the primary surgery-planning bridge.
         register_implant_target_handlers(
             self.dispatcher,
             get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
             replace_project=self._replace_project_after_implant_mutation,
         )
         self._viewer_state = register_viewer_state_handlers(
@@ -171,9 +168,6 @@ class PlanningBridgeSession:
             get_revision=lambda: self.project_revision,
             replace_project=self._replace_project_after_probe_mutation,
         )
-        self.dispatcher.declare_capability("populationReferenceDensityPrepare")
-        self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
-        self.dispatcher.declare_capability("populationReferenceDensityOverlay")
         self.dispatcher.declare_capability("atlasDorsalRegionPick")
 
     def atlas_dorsal(self, params: Mapping[str, object]) -> JsonObject:
@@ -425,6 +419,7 @@ class PlanningBridgeSession:
                     ),
                     "probePlanCount": len(project.probe_plans),
                     "probeRegionAnalysisCount": len(project.probe_region_analyses),
+                    "eventLog": [event.model_dump(mode="json") for event in project.event_log],
                     "rendererAnchor": (
                         None
                         if project.renderer_anchor is None
@@ -491,6 +486,12 @@ class PlanningBridgeSession:
         atlas = self._require_loaded_atlas()
         title = _optional_text(params.get("title"), field_name="title", maximum=200)
         subject_id = _optional_text(params.get("subjectId"), field_name="subjectId", maximum=200)
+        if subject_id is None:
+            raise BridgeError(
+                "ANIMAL_SUBJECT_ID_REQUIRED",
+                "Creating an animal surgery plan requires a nonempty animal subject ID.",
+                details={"field": "subjectId"},
+            )
         space = BrainGlobeAtlasSpace(atlas.metadata)
         shape = atlas.metadata.shape_voxels
         centre_index = BrainGlobeVoxelIndex(
@@ -556,6 +557,17 @@ class PlanningBridgeSession:
                 details={"exceptionType": type(error).__name__},
             ) from error
         project = result.project
+        if project.subject_id is None or not project.subject_id.strip():
+            raise BridgeError(
+                "ANIMAL_SUBJECT_ID_REQUIRED",
+                "This legacy project has no animal subject ID and cannot be opened for "
+                "surgery planning. Create a new animal plan with an explicit subject ID, "
+                "then review and recreate the required planning records.",
+                details={
+                    "projectOpened": False,
+                    "suggestedAction": "Create a new animal plan with an explicit subject ID.",
+                },
+            )
         if project.atlas is None:
             raise BridgeError(
                 "PROJECT_ATLAS_REQUIRED",
@@ -615,9 +627,36 @@ class PlanningBridgeSession:
         }
 
     def project_save(self, params: Mapping[str, object]) -> JsonObject:
-        _validate_params(params, required={"protocolVersion"}, optional={"path"})
+        _validate_params(
+            params,
+            required={"protocolVersion", "projectId", "expectedProjectRevision"},
+            optional={"path"},
+        )
         _require_protocol(params)
         project = self._require_project()
+        requested_project_id = _uuid(params["projectId"], field_name="projectId")
+        if requested_project_id != project.project_uuid:
+            raise BridgeError(
+                "PROJECT_ID_MISMATCH",
+                "The save request does not belong to the current project.",
+                details={
+                    "requestedProjectId": str(requested_project_id),
+                    "currentProjectId": str(project.project_uuid),
+                },
+            )
+        expected_revision = _nonnegative_integer(
+            params["expectedProjectRevision"],
+            field_name="expectedProjectRevision",
+        )
+        if expected_revision != self.project_revision:
+            raise BridgeError(
+                "PROJECT_REVISION_CONFLICT",
+                "The save request was based on a stale project revision.",
+                details={
+                    "expectedProjectRevision": expected_revision,
+                    "actualProjectRevision": self.project_revision,
+                },
+            )
         raw_path = params.get("path")
         destination = (
             self.project_path if raw_path is None else _absolute_path(raw_path, field_name="path")
@@ -628,13 +667,9 @@ class PlanningBridgeSession:
                 "This project has no writable path; choose a Save As destination.",
             )
         destination = normalize_project_path(destination)
-        previous = project.model_copy(deep=True)
-        previous_revision = self.project_revision
         candidate = project.model_copy(deep=True)
         candidate.touch("project-saved")
-        candidate = self._project_at_revision(candidate, previous_revision + 1)
-        self.project = candidate
-        self.project_revision = candidate.project_revision
+        candidate = self._project_at_revision(candidate, expected_revision + 1)
         try:
             saved = save_project(
                 candidate,
@@ -642,13 +677,16 @@ class PlanningBridgeSession:
                 asset_source_package=self.asset_source_package,
             )
         except (OSError, ValueError, ValidationError, ProjectIntegrityError) as error:
-            self.project = previous
-            self.project_revision = previous_revision
             raise BridgeError(
                 "PROJECT_SAVE_FAILED",
                 "The project was left unchanged because its atomic save failed.",
                 details={"exceptionType": type(error).__name__},
             ) from error
+        # Publish only after the exact candidate snapshot is durably saved. The
+        # package and the live session therefore expose the same single new
+        # revision, while a failed save leaves both live references untouched.
+        self.project = candidate
+        self.project_revision = candidate.project_revision
         self.project_path = saved
         self.asset_source_package = saved
         self.recovered_from_backup = False
@@ -658,6 +696,7 @@ class PlanningBridgeSession:
             "status": "saved",
             "path": str(saved),
             "projectId": str(candidate.project_uuid),
+            "projectRevision": candidate.project_revision,
         }
 
     def vascular_import(self, params: Mapping[str, object]) -> JsonObject:
@@ -1192,10 +1231,10 @@ class PlanningBridgeSession:
             raise RuntimeError("session and persisted project revisions diverged")
         return self.project
 
-    def _replace_project_after_implant_mutation(self, project: PlannerProject) -> None:
-        """Publish one validated implant mutation and mark the session dirty."""
+    def _replace_project_after_implant_mutation(self, project: PlannerProject) -> int:
+        """Publish one validated implant mutation and return its new revision."""
 
-        self._publish_project_mutation(project)
+        return self._publish_project_mutation(project)
 
     def _replace_project_after_viewer_mutation(self, project: PlannerProject) -> int:
         """Publish one independent viewer mutation and return its new revision."""

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mouse-brain-planner"
 version = "0.1.0"
-description = "Animal-only mouse stereotaxy, atlas, probe, and reference-vessel planning."
+description = "Animal-only mouse stereotaxy, atlas, and probe planning with fail-closed data qualification."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12,<3.13"
@@ -44,6 +44,17 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mouse_brain_planner"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"THIRD_PARTY.md" = "mouse_brain_planner/THIRD_PARTY.md"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.venv",
+  "/dist",
+  "/native/Brain3D/.build",
+  "/native/Brain3D/build",
+]
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers -ra"

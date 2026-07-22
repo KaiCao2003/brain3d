@@ -197,9 +197,6 @@ class BridgeDispatcher:
             "atlasDownload": True,
             "atlasSlicePng": True,
             "projectPersistence": True,
-            "subjectVascularImport": True,
-            "subjectVascularOverlay": True,
-            "subjectVascularRegistration": True,
         }
         self._register_builtins()
 

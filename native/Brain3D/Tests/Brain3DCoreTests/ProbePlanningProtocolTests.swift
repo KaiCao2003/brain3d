@@ -27,8 +27,8 @@ struct ProbePlanningProtocolTests {
         )
         #expect(try keys(create) == [
             "protocolVersion", "projectId", "expectedProjectRevision", "targetId",
-            "modelId", "modelVersion", "name", "azimuthDegrees", "elevationDegrees",
-            "insertionDepthMicrometres", "axialRotationDegrees",
+            "modelId", "modelVersion", "name", "placementMode", "azimuthDegrees",
+            "elevationDegrees", "insertionDepthMicrometres", "axialRotationDegrees",
             "customGeometryAcknowledged",
         ])
 
@@ -50,8 +50,9 @@ struct ProbePlanningProtocolTests {
         #expect(try keys(update) == [
             "protocolVersion", "projectId", "expectedProjectRevision", "planId",
             "expectedPlanInputSha256", "targetId", "modelId", "modelVersion", "name",
-            "azimuthDegrees", "elevationDegrees", "insertionDepthMicrometres",
-            "axialRotationDegrees", "customGeometryAcknowledged",
+            "placementMode", "azimuthDegrees", "elevationDegrees",
+            "insertionDepthMicrometres", "axialRotationDegrees",
+            "customGeometryAcknowledged",
         ])
         #expect(try keys(ProbePlanRemoveParameters(
             projectId: projectId,
@@ -73,12 +74,245 @@ struct ProbePlanningProtocolTests {
         ])
         #expect(try keys(ProbeRegionExportParameters(
             projectId: projectId,
+            expectedProjectRevision: 9,
             planId: planId,
             expectedPlanInputSha256: hex("b"),
             format: .csv
         )) == [
-            "protocolVersion", "projectId", "planId", "expectedPlanInputSha256", "format",
+            "protocolVersion", "projectId", "expectedProjectRevision", "planId",
+            "expectedPlanInputSha256", "format",
         ])
+        #expect(try keys(ProbeRegionExportConfirmParameters(
+            projectId: projectId,
+            expectedProjectRevision: 9,
+            planId: planId,
+            expectedPlanInputSha256: hex("b"),
+            analysisSha256: hex("e"),
+            format: .csv,
+            contentSha256: hex("c")
+        )) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "planId",
+            "expectedPlanInputSha256", "analysisSha256", "format", "contentSha256",
+        ])
+    }
+
+    @Test("Mutation responses must acknowledge the submitted plan and placement")
+    func mutationResponseBindsRequest() throws {
+        let create = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Left VISp",
+            azimuthDegrees: -12.5,
+            elevationDegrees: -80,
+            insertionDepthMicrometres: 3_200,
+            axialRotationDegrees: 5,
+            customGeometryAcknowledged: true
+        )
+        let created = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(status: "created", revision: 8, plan: planDetail())
+        )
+        try ProbePlanningValidator.validateCreatedMutation(created, request: create)
+
+        let differentPlacement = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Left VISp",
+            azimuthDegrees: -11,
+            elevationDegrees: -80,
+            insertionDepthMicrometres: 3_200,
+            axialRotationDegrees: 5,
+            customGeometryAcknowledged: true
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreatedMutation(
+                created,
+                request: differentPlacement
+            )
+        }
+
+        let update = ProbePlanUpdateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            planId: planId,
+            expectedPlanInputSha256: hex("f"),
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Left VISp",
+            azimuthDegrees: -12.5,
+            elevationDegrees: -80,
+            insertionDepthMicrometres: 3_200,
+            axialRotationDegrees: 5,
+            customGeometryAcknowledged: true
+        )
+        var wrongPlan = planDetail()
+        wrongPlan["planId"] = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        let wrongUpdate = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(
+                status: "updated",
+                revision: 8,
+                plan: wrongPlan,
+                priorAnalysisCleared: true
+            )
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateUpdatedMutation(wrongUpdate, request: update)
+        }
+    }
+
+    @Test("Placement modes encode only their exact input fields")
+    func placementModeRequestShapes() throws {
+        let entryAndTarget = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Entry and target",
+            placementMode: .entryAndTarget,
+            entryAPMillimetres: -2.1,
+            entryMLMillimetres: -0.8,
+            entryDVMillimetres: -0.2,
+            axialRotationDegrees: 0,
+            customGeometryAcknowledged: true
+        )
+        try ProbePlanningValidator.validateCreate(entryAndTarget)
+        #expect(try keys(entryAndTarget) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "targetId",
+            "modelId", "modelVersion", "name", "placementMode",
+            "entryAPMillimetres", "entryMLMillimetres", "entryDVMillimetres",
+            "axialRotationDegrees", "customGeometryAcknowledged",
+        ])
+
+        let entryAnglesDepth = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Entry angles depth",
+            placementMode: .entryAnglesDepth,
+            entryAPMillimetres: -2.1,
+            entryMLMillimetres: -0.8,
+            entryDVMillimetres: -0.2,
+            azimuthDegrees: -12,
+            elevationDegrees: -80,
+            insertionDepthMicrometres: 3_200,
+            axialRotationDegrees: 5,
+            customGeometryAcknowledged: true
+        )
+        try ProbePlanningValidator.validateCreate(entryAnglesDepth)
+        #expect(try keys(entryAnglesDepth) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "targetId",
+            "modelId", "modelVersion", "name", "placementMode",
+            "entryAPMillimetres", "entryMLMillimetres", "entryDVMillimetres",
+            "azimuthDegrees", "elevationDegrees", "insertionDepthMicrometres",
+            "axialRotationDegrees", "customGeometryAcknowledged",
+        ])
+
+        for mode in [
+            ProbePlacementMode.targetAnglesDepth,
+            .stereotaxicTargetManipulator,
+        ] {
+            let request = ProbePlanCreateParameters(
+                projectId: projectId,
+                expectedProjectRevision: 7,
+                targetId: targetId,
+                modelId: ProbePlanningContract.genericModelId,
+                modelVersion: ProbePlanningContract.genericModelVersion,
+                name: mode.displayName,
+                placementMode: mode,
+                azimuthDegrees: -12,
+                elevationDegrees: -80,
+                insertionDepthMicrometres: 3_200,
+                axialRotationDegrees: 5,
+                customGeometryAcknowledged: true
+            )
+            try ProbePlanningValidator.validateCreate(request)
+            #expect(try keys(request) == [
+                "protocolVersion", "projectId", "expectedProjectRevision", "targetId",
+                "modelId", "modelVersion", "name", "placementMode", "azimuthDegrees",
+                "elevationDegrees", "insertionDepthMicrometres", "axialRotationDegrees",
+                "customGeometryAcknowledged",
+            ])
+        }
+    }
+
+    @Test("Placement mode metadata and validator reject mixed field shapes")
+    func placementModeValidation() throws {
+        #expect(ProbePlacementMode.allCases.map(\.rawValue) == [
+            "ENTRY_AND_TARGET",
+            "ENTRY_ANGLES_DEPTH",
+            "TARGET_ANGLES_DEPTH",
+            "STEREOTAXIC_TARGET_MANIPULATOR",
+        ])
+        #expect(ProbePlacementMode.entryAndTarget.requiresEntryCoordinates)
+        #expect(!ProbePlacementMode.entryAndTarget.requiresAnglesAndDepth)
+        #expect(ProbePlacementMode.entryAnglesDepth.requiresEntryCoordinates)
+        #expect(ProbePlacementMode.entryAnglesDepth.requiresAnglesAndDepth)
+        #expect(!ProbePlacementMode.targetAnglesDepth.requiresEntryCoordinates)
+        #expect(ProbePlacementMode.targetAnglesDepth.requiresAnglesAndDepth)
+
+        let missingEntry = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Missing entry",
+            placementMode: .entryAndTarget,
+            axialRotationDegrees: 0,
+            customGeometryAcknowledged: true
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreate(missingEntry)
+        }
+
+        let extraEntry = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Extra entry",
+            placementMode: .targetAnglesDepth,
+            entryAPMillimetres: 0,
+            entryMLMillimetres: 0,
+            entryDVMillimetres: 0,
+            azimuthDegrees: 0,
+            elevationDegrees: -90,
+            insertionDepthMicrometres: 1_000,
+            axialRotationDegrees: 0,
+            customGeometryAcknowledged: true
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreate(extraEntry)
+        }
+
+        let missingDepth = ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: ProbePlanningContract.genericModelId,
+            modelVersion: ProbePlanningContract.genericModelVersion,
+            name: "Missing depth",
+            placementMode: .targetAnglesDepth,
+            azimuthDegrees: 0,
+            elevationDegrees: -90,
+            axialRotationDegrees: 0,
+            customGeometryAcknowledged: true
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreate(missingDepth)
+        }
     }
 
     @Test("Catalog keeps NP1 first, test fixture second, and selects by exact identity")
@@ -257,6 +491,8 @@ struct ProbePlanningProtocolTests {
         #expect(result.plan.hasCurrentPlanningGeometry)
         #expect(!result.plan.requiresPlanningGeometryUpdate)
         #expect(result.majorVesselAnalysis == nil)
+        #expect(result.plan.placementDraft.mode == .stereotaxicTargetManipulator)
+        #expect(result.plan.placementDraft.azimuthDegrees == -12.5)
 
         var missingVesselAnalysisKey = planGetPayload(regionAnalysis: nil)
         missingVesselAnalysisKey.removeValue(forKey: "majorVesselAnalysis")
@@ -313,11 +549,193 @@ struct ProbePlanningProtocolTests {
         }
     }
 
+    @Test("V3 restores explicit entry coordinates and mode-specific draft fields")
+    func explicitPlacementDraftRoundTrip() throws {
+        var payload = planGetPayload(regionAnalysis: nil)
+        var plan = try #require(payload["plan"] as? [String: Any])
+        plan["manipulatorInput"] = NSNull()
+        plan["placementInput"] = [
+            "mode": ProbePlacementMode.entryAndTarget.rawValue,
+            "entry": [
+                "frameId": ProbePlanningContract.bregmaEntryFrameId,
+                "origin": "bregma",
+                "componentOrder": ["AP", "ML", "DV"],
+                "units": "millimetre",
+                "apPositiveDirection": "anterior",
+                "apNegativeDirection": "posterior/back",
+                "mlPositiveDirection": "right",
+                "mlNegativeDirection": "left",
+                "dvPositiveDirection": "dorsal/up",
+                "dvNegativeDirection": "deep/ventral",
+                "apMillimetres": -2.1,
+                "mlMillimetres": -0.8,
+                "dvMillimetres": -0.2,
+            ],
+            "angleFrameId": NSNull(),
+            "azimuthDegrees": NSNull(),
+            "elevationDegrees": NSNull(),
+            "insertionDepthMicrometres": NSNull(),
+            "axialRotationDegrees": 5.0,
+            "angleConvention": NSNull(),
+        ]
+        var placement = try #require(plan["placement"] as? [String: Any])
+        placement["method"] = ProbePlacementMode.entryAndTarget.normalizedPlacementMethod
+        plan["placement"] = placement
+        payload["plan"] = plan
+
+        let result = try decode(ProbePlanGetResult.self, payload)
+        try ProbePlanningValidator.validatePlanGet(
+            result,
+            projectId: projectId,
+            projectRevision: 7,
+            planId: planId
+        )
+        let draft = result.plan.placementDraft
+        #expect(draft.mode == .entryAndTarget)
+        #expect(draft.entryAPMillimetres == -2.1)
+        #expect(draft.entryMLMillimetres == -0.8)
+        #expect(draft.entryDVMillimetres == -0.2)
+        #expect(draft.azimuthDegrees == nil)
+        #expect(draft.elevationDegrees == nil)
+        #expect(draft.insertionDepthMicrometres == nil)
+        #expect(draft.axialRotationDegrees == 5)
+    }
+
+    @Test("V3 angle inputs stay bound to the frame in which their geometry was solved")
+    func placementAngleFrameBinding() throws {
+        var targetPayload = planGetPayload(regionAnalysis: nil)
+        var targetPlan = try #require(targetPayload["plan"] as? [String: Any])
+        targetPlan["manipulatorInput"] = NSNull()
+        var targetPlacement = try #require(targetPlan["placement"] as? [String: Any])
+        targetPlacement["method"] = ProbePlacementMode.targetAnglesDepth
+            .normalizedPlacementMethod
+        targetPlan["placement"] = targetPlacement
+        targetPlan["placementInput"] = [
+            "mode": ProbePlacementMode.targetAnglesDepth.rawValue,
+            "entry": NSNull(),
+            "angleFrameId": "SUBJECT_SKULL_AP_ML_DV_UM",
+            "azimuthDegrees": -12.5,
+            "elevationDegrees": -80.0,
+            "insertionDepthMicrometres": 3_200.0,
+            "axialRotationDegrees": 5.0,
+            "angleConvention": ProbePlanningContract.angleConvention,
+        ]
+        targetPayload["plan"] = targetPlan
+        let validTarget = try decode(ProbePlanGetResult.self, targetPayload)
+        try ProbePlanningValidator.validatePlanGet(
+            validTarget,
+            projectId: projectId,
+            projectRevision: 7,
+            planId: planId
+        )
+
+        var wrongTargetPlan = targetPlan
+        var wrongTargetInput = try #require(
+            wrongTargetPlan["placementInput"] as? [String: Any]
+        )
+        wrongTargetInput["angleFrameId"] = "ANOTHER_FRAME"
+        wrongTargetPlan["placementInput"] = wrongTargetInput
+        var wrongTargetPayload = targetPayload
+        wrongTargetPayload["plan"] = wrongTargetPlan
+        let wrongTarget = try decode(ProbePlanGetResult.self, wrongTargetPayload)
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validatePlanGet(
+                wrongTarget,
+                projectId: projectId,
+                projectRevision: 7,
+                planId: planId
+            )
+        }
+
+        var entryPayload = targetPayload
+        var entryPlan = targetPlan
+        var entryPlacement = targetPlacement
+        entryPlacement["method"] = ProbePlacementMode.entryAnglesDepth
+            .normalizedPlacementMethod
+        entryPlan["placement"] = entryPlacement
+        entryPlan["placementInput"] = [
+            "mode": ProbePlacementMode.entryAnglesDepth.rawValue,
+            "entry": [
+                "frameId": ProbePlanningContract.bregmaEntryFrameId,
+                "origin": "bregma",
+                "componentOrder": ["AP", "ML", "DV"],
+                "units": "millimetre",
+                "apPositiveDirection": "anterior",
+                "apNegativeDirection": "posterior/back",
+                "mlPositiveDirection": "right",
+                "mlNegativeDirection": "left",
+                "dvPositiveDirection": "dorsal/up",
+                "dvNegativeDirection": "deep/ventral",
+                "apMillimetres": -2.1,
+                "mlMillimetres": -0.8,
+                "dvMillimetres": -0.2,
+            ],
+            "angleFrameId": "STEREOTAXIC:fixture",
+            "azimuthDegrees": -12.5,
+            "elevationDegrees": -80.0,
+            "insertionDepthMicrometres": 3_200.0,
+            "axialRotationDegrees": 5.0,
+            "angleConvention": ProbePlanningContract.angleConvention,
+        ]
+        entryPayload["plan"] = entryPlan
+        let validEntry = try decode(ProbePlanGetResult.self, entryPayload)
+        try ProbePlanningValidator.validatePlanGet(
+            validEntry,
+            projectId: projectId,
+            projectRevision: 7,
+            planId: planId
+        )
+
+        var wrongEntryPlan = entryPlan
+        var wrongEntryInput = try #require(
+            wrongEntryPlan["placementInput"] as? [String: Any]
+        )
+        wrongEntryInput["angleFrameId"] = "SUBJECT_SKULL_AP_ML_DV_UM"
+        wrongEntryPlan["placementInput"] = wrongEntryInput
+        var wrongEntryPayload = entryPayload
+        wrongEntryPayload["plan"] = wrongEntryPlan
+        let wrongEntry = try decode(ProbePlanGetResult.self, wrongEntryPayload)
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validatePlanGet(
+                wrongEntry,
+                projectId: projectId,
+                projectRevision: 7,
+                planId: planId
+            )
+        }
+    }
+
+    @Test("V2 stereotaxic plans remain current and restore their manipulator draft")
+    func v2PlanRemainsCurrent() throws {
+        var payload = planGetPayload(regionAnalysis: nil)
+        var plan = try #require(payload["plan"] as? [String: Any])
+        plan["placementInput"] = NSNull()
+        var provenance = try #require(plan["provenance"] as? [String: Any])
+        provenance["planningAlgorithmVersion"] =
+            ProbePlanningContract.stereotaxicPlanningAlgorithmVersion
+        plan["provenance"] = provenance
+        payload["plan"] = plan
+
+        let result = try decode(ProbePlanGetResult.self, payload)
+        try ProbePlanningValidator.validatePlanGet(
+            result,
+            projectId: projectId,
+            projectRevision: 7,
+            planId: planId
+        )
+        #expect(result.plan.hasCurrentPlanningGeometry)
+        #expect(!result.plan.requiresPlanningGeometryUpdate)
+        #expect(result.plan.placementInput == nil)
+        #expect(result.plan.placementDraft.mode == .stereotaxicTargetManipulator)
+        #expect(result.plan.placementDraft.insertionDepthMicrometres == 3_200)
+    }
+
     @Test("Legacy v1 plan is selectable only as an explicit update draft")
     func legacyPlanIsUpdateReadyButNotCurrent() throws {
         var legacyPayload = planGetPayload(regionAnalysis: nil)
         var legacyPlan = try #require(legacyPayload["plan"] as? [String: Any])
         legacyPlan["manipulatorInput"] = NSNull()
+        legacyPlan["placementInput"] = NSNull()
         var placement = try #require(legacyPlan["placement"] as? [String: Any])
         placement["method"] = ProbePlanningContract.legacyPlacementMethod
         legacyPlan["placement"] = placement
@@ -467,7 +885,7 @@ struct ProbePlanningProtocolTests {
         }
     }
 
-    @Test("Read-only export verifies identity, MIME type, and content digest")
+    @Test("Export generation is read-only and confirmation publishes its exact audit identity")
     func exportValidation() throws {
         let plan = try decode(ProbePlanGetResult.self, planGetPayload(regionAnalysis: nil)).plan
         let analysis = try decode(
@@ -484,9 +902,16 @@ struct ProbePlanningProtocolTests {
         let digest = SHA256.hash(data: Data(content.utf8)).map {
             String(format: "%02x", $0)
         }.joined()
+        let generationRequest = ProbeRegionExportParameters(
+            projectId: projectId,
+            expectedProjectRevision: 8,
+            planId: planId,
+            expectedPlanInputSha256: hex("a"),
+            format: .csv
+        )
         let payload: [String: Any] = [
             "protocolVersion": 1,
-            "status": "exportedReadOnly",
+            "status": "generated",
             "projectId": projectId,
             "projectRevision": 8,
             "planId": planId,
@@ -500,27 +925,92 @@ struct ProbePlanningProtocolTests {
             "projectMutated": false,
         ]
         let result = try decode(ProbeRegionExportResult.self, payload)
-        try ProbePlanningValidator.validateExport(
+        try ProbePlanningValidator.validateExportGeneration(
             result,
-            projectId: projectId,
+            request: generationRequest,
             plan: plan,
-            analysis: analysis,
-            format: .csv,
-            projectRevision: 8
+            analysis: analysis
         )
 
         var changed = payload
         changed["contentSha256"] = hex("f")
         let corrupt = try decode(ProbeRegionExportResult.self, changed)
         #expect(throws: ProbePlanningValidationError.self) {
-            try ProbePlanningValidator.validateExport(
+            try ProbePlanningValidator.validateExportGeneration(
                 corrupt,
-                projectId: projectId,
+                request: generationRequest,
                 plan: plan,
-                analysis: analysis,
-                format: .csv,
-                projectRevision: 8
+                analysis: analysis
             )
+        }
+
+        for (field, invalidValue): (String, Any) in [
+            ("status", "exported"),
+            ("projectRevision", 9),
+            ("projectMutated", true),
+        ] {
+            var invalidPayload = payload
+            invalidPayload[field] = invalidValue
+            let invalid = try decode(ProbeRegionExportResult.self, invalidPayload)
+            #expect(throws: ProbePlanningValidationError.self) {
+                try ProbePlanningValidator.validateExportGeneration(
+                    invalid,
+                    request: generationRequest,
+                    plan: plan,
+                    analysis: analysis
+                )
+            }
+        }
+
+        let confirmRequest = ProbeRegionExportConfirmParameters(
+            projectId: projectId,
+            expectedProjectRevision: 8,
+            planId: planId,
+            expectedPlanInputSha256: hex("a"),
+            analysisSha256: hex("e"),
+            format: .csv,
+            contentSha256: digest
+        )
+        let confirmationPayload: [String: Any] = [
+            "protocolVersion": 1,
+            "status": "exported",
+            "projectId": projectId,
+            "projectRevision": 9,
+            "planId": planId,
+            "planInputSha256": hex("a"),
+            "analysisSha256": hex("e"),
+            "format": "csv",
+            "contentSha256": digest,
+            "projectMutated": true,
+        ]
+        let confirmation = try decode(
+            ProbeRegionExportConfirmationResult.self,
+            confirmationPayload
+        )
+        try ProbePlanningValidator.validateExportConfirmation(
+            confirmation,
+            request: confirmRequest
+        )
+
+        for (field, invalidValue): (String, Any) in [
+            ("status", "generated"),
+            ("projectRevision", 8),
+            ("analysisSha256", hex("f")),
+            ("contentSha256", hex("f")),
+            ("projectMutated", false),
+        ] {
+            var invalidPayload = confirmationPayload
+            invalidPayload[field] = invalidValue
+            let invalid = try decode(
+                ProbeRegionExportConfirmationResult.self,
+                invalidPayload
+            )
+            #expect(throws: ProbePlanningValidationError.self) {
+                try ProbePlanningValidator.validateExportConfirmation(
+                    invalid,
+                    request: confirmRequest
+                )
+            }
         }
     }
 
@@ -533,6 +1023,22 @@ struct ProbePlanningProtocolTests {
             "plan": planDetail(),
             "regionAnalysis": regionAnalysis ?? NSNull(),
             "majorVesselAnalysis": NSNull(),
+        ]
+    }
+
+    private func mutationPayload(
+        status: String,
+        revision: Int,
+        plan: [String: Any],
+        priorAnalysisCleared: Bool? = nil
+    ) -> [String: Any] {
+        [
+            "protocolVersion": 1,
+            "status": status,
+            "projectId": projectId,
+            "projectRevision": revision,
+            "plan": plan,
+            "priorAnalysisCleared": priorAnalysisCleared ?? NSNull(),
         ]
     }
 
@@ -566,6 +1072,16 @@ struct ProbePlanningProtocolTests {
             ],
             "manipulatorInput": [
                 "frameId": "SUBJECT_STEREOTAXIC_AP_ML_DV_UM",
+                "azimuthDegrees": -12.5,
+                "elevationDegrees": -80.0,
+                "insertionDepthMicrometres": 3_200.0,
+                "axialRotationDegrees": 5.0,
+                "angleConvention": ProbePlanningContract.angleConvention,
+            ],
+            "placementInput": [
+                "mode": ProbePlacementMode.stereotaxicTargetManipulator.rawValue,
+                "entry": NSNull(),
+                "angleFrameId": "SUBJECT_STEREOTAXIC_AP_ML_DV_UM",
                 "azimuthDegrees": -12.5,
                 "elevationDegrees": -80.0,
                 "insertionDepthMicrometres": 3_200.0,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from enum import StrEnum
 from typing import Literal, Self
 from uuid import UUID, uuid4
@@ -42,7 +44,7 @@ class CalibrationQuality(StrEnum):
 class SkullLandmarkSet(BaseModel):
     """Four measured landmarks sufficient to define a full rigid skull frame."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     bregma: AnatomicalPoint
     lambda_point: AnatomicalPoint
@@ -68,7 +70,7 @@ class SkullLandmarkSet(BaseModel):
 class CalibrationQualityLimits(BaseModel):
     """User/lab-selected QC limits; no surgical threshold is silently invented."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     minimum_axis_baseline_um: PositiveFiniteFloat
     distance_warning_um: PositiveFiniteFloat
@@ -100,7 +102,7 @@ class CalibrationQualityLimits(BaseModel):
 class SkullLevelingAngles(BaseModel):
     """Euler angles of the source-to-stereotaxic rigid rotation."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     pitch_deg: FiniteFloat = Field(ge=-90, le=90)
     roll_deg: FiniteFloat = Field(ge=-180, le=180)
@@ -113,7 +115,7 @@ class SkullLevelingAngles(BaseModel):
 class CalibrationQCResult(BaseModel):
     """Exact residual metrics and messages for a fitted calibration."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     quality: CalibrationQuality
     geometric_bregma_lambda_distance_um: PositiveFiniteFloat
@@ -130,7 +132,7 @@ class CalibrationQCResult(BaseModel):
 class StereotaxicCalibration(BaseModel):
     """Versioned animal skull calibration with an explicit rigid transform."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     calibration_uuid: UUID = Field(default_factory=uuid4)
     schema_version: Literal[1] = 1
@@ -281,6 +283,19 @@ class AtlasRegisteredCalibration(BaseModel):
         return self.permits_planning and self.atlas_transform.permits_final_export
 
 
+def atlas_registered_calibration_sha256(calibration: AtlasRegisteredCalibration) -> str:
+    """Hash the complete canonical calibration snapshot used by every consumer."""
+
+    encoded = json.dumps(
+        calibration.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class BregmaRelativeTargetMM(BaseModel):
     """Canonical direct implant target in calibrated bregma-relative millimetres.
 
@@ -289,7 +304,7 @@ class BregmaRelativeTargetMM(BaseModel):
     an atlas anchor or a remembered bregma constant cannot be substituted.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context_uuid: UUID
     calibration_uuid: UUID

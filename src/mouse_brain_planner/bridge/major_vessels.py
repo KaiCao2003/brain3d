@@ -1,13 +1,15 @@
-"""Audited major-vessel geometry and revision-safe persisted probe analysis."""
+"""Archived major-vessel contract behind a digest-bound fail-closed gate."""
 
 from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Final
+from pathlib import Path
+from typing import Final, NoReturn
 from uuid import UUID
 
 import numpy as np
@@ -37,6 +39,7 @@ from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.probe_models import PlacedProbeShank
 from mouse_brain_planner.domain.probe_plan_models import (
     PROBE_PLANNING_ALGORITHM_VERSION,
+    STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
     ProbePlanRecord,
 )
 from mouse_brain_planner.domain.project_models import PlannerProject
@@ -62,6 +65,7 @@ from mouse_brain_planner.vasculature.lambada_major_vessels import (
     SOURCE_PAPER_DOI,
     SOURCE_RECORD_DOI,
     SOURCE_RECORD_URL,
+    SOURCE_SHA256,
     LambadaMajorVesselError,
     LambadaMajorVesselGraph,
     load_lambada_major_vessels,
@@ -74,6 +78,16 @@ REFERENCE_POLICY: Final = (
     "Analyze only the bundled pointwise diameter >= 30 micrometre reference runs. "
     "Required margin and registration uncertainty are explicit user-reviewed inputs."
 )
+COORDINATE_QUALIFICATION_REPORT_FILENAME: Final = (
+    "lambada_p60_606_coordinate_qualification_rejected_v1.json"
+)
+COORDINATE_QUALIFICATION_REPORT_SHA256: Final = (
+    "0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a"
+)
+COORDINATE_QUALIFICATION_BLOCKING_REASONS: Final = (
+    "SOURCE_HEMISPHERE_PROPERTY_MISSING",
+    "SOURCE_SPECIMEN_COVERAGE_IS_HEMISPHERE",
+)
 
 ProjectGetter = Callable[[], PlannerProject]
 RevisionGetter = Callable[[], int]
@@ -83,7 +97,7 @@ GraphLoader = Callable[[], LambadaMajorVesselGraph]
 
 @dataclass(slots=True)
 class MajorVesselReferenceBridge:
-    """Expose one pinned graph and persist plan-linked analysis results."""
+    """Retain the legacy contract while rejecting the unqualified reference."""
 
     dispatcher: BridgeDispatcher
     get_project: ProjectGetter
@@ -97,10 +111,9 @@ class MajorVesselReferenceBridge:
         self.dispatcher.register("vessel.major.reference.get", self.reference_get)
         self.dispatcher.register("vessel.major.reference.geometry", self.reference_geometry)
         self.dispatcher.register("vessel.major.reference.analyze", self.reference_analyze)
-        self.dispatcher.declare_capability("auditedReferenceMajorVessels")
-        self.dispatcher.declare_capability("radiusAwareReferenceVesselAnalysis")
 
     def reference_get(self, params: Mapping[str, object]) -> JsonObject:
+        self._reject_unqualified_reference()
         _validate_params(params, required={"protocolVersion"})
         _require_protocol(params)
         atlas = self._require_loaded_atlas()
@@ -128,8 +141,9 @@ class MajorVesselReferenceBridge:
         }
 
     def reference_geometry(self, params: Mapping[str, object]) -> JsonObject:
-        """Return compact typed buffers suitable for both 2-D and 3-D display."""
+        """Reject production access before the archived geometry contract can run."""
 
+        self._reject_unqualified_reference()
         _validate_params(params, required={"protocolVersion"})
         _require_protocol(params)
         atlas = self._require_loaded_atlas()
@@ -158,6 +172,7 @@ class MajorVesselReferenceBridge:
         }
 
     def reference_analyze(self, params: Mapping[str, object]) -> JsonObject:
+        self._reject_unqualified_reference()
         _validate_params(
             params,
             required={
@@ -194,7 +209,10 @@ class MajorVesselReferenceBridge:
                 "The project and loaded atlas provenance do not match.",
             )
         plan = _find_plan(project, params["planId"])
-        if plan.planning_algorithm_version != PROBE_PLANNING_ALGORITHM_VERSION:
+        if plan.planning_algorithm_version not in {
+            STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+            PROBE_PLANNING_ALGORITHM_VERSION,
+        }:
             raise BridgeError(
                 "PROBE_PLAN_RECOMPUTE_REQUIRED",
                 "This legacy probe plan must be updated through its subject calibration "
@@ -315,8 +333,26 @@ class MajorVesselReferenceBridge:
             ) from error
         updated.touch(
             "probe-major-vessel-analysis-run",
-            f"plan={plan.plan_uuid}; planInputSha256={plan.input_sha256}; "
-            f"analysisSha256={bundle.analysis_sha256}",
+            json.dumps(
+                {
+                    "analysisSha256": bundle.analysis_sha256,
+                    "planId": str(plan.plan_uuid),
+                    "planInputSha256": plan.input_sha256,
+                    "riskProfile": {
+                        "confirmedByUser": profile.confirmed_by_user,
+                        "minimumVesselDiameterMicrometres": (profile.minimum_vessel_diameter_um),
+                        "profileId": profile.profile_id,
+                        "referenceOnlyCoverageAcknowledged": (
+                            profile.reference_only_coverage_acknowledged
+                        ),
+                        "registrationUncertaintyMicrometres": (profile.registration_uncertainty_um),
+                        "requiredMarginMicrometres": profile.required_margin_um,
+                        "sourceOrLabPolicy": profile.source_or_lab_policy,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
         )
         stored_revision = self.replace_project(updated)
         if stored_revision != expected_revision + 1:
@@ -325,6 +361,21 @@ class MajorVesselReferenceBridge:
             bundle,
             project_uuid=updated.project_uuid,
             project_revision=stored_revision,
+        )
+
+    def _reject_unqualified_reference(self) -> NoReturn:
+        report_verified = _qualification_report_is_verified_rejection()
+        raise BridgeError(
+            "VESSEL_GEOMETRY_UNAVAILABLE",
+            (
+                "The archived P60_606 vessel derivative is unavailable because its "
+                "coordinate laterality and whole-brain coverage are not qualified."
+            ),
+            details={
+                "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
+                "qualificationReportVerified": report_verified,
+                "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
+            },
         )
 
     def _require_loaded_atlas(self) -> LoadedAtlasProtocol:
@@ -387,6 +438,38 @@ def register_major_vessel_handlers(
     )
     extension.register()
     return extension
+
+
+def _qualification_report_is_verified_rejection() -> bool:
+    report_path = (
+        Path(__file__).parent.parent
+        / "assets"
+        / "vasculature"
+        / COORDINATE_QUALIFICATION_REPORT_FILENAME
+    )
+    if report_path.is_symlink() or not report_path.is_file():
+        return False
+    try:
+        payload = report_path.read_bytes()
+    except OSError:
+        return False
+    if hashlib.sha256(payload).hexdigest() != COORDINATE_QUALIFICATION_REPORT_SHA256:
+        return False
+    try:
+        value = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(value, dict) or value.get("status") != "rejected":
+        return False
+    source = value.get("source")
+    decision = value.get("decision")
+    return (
+        isinstance(source, dict)
+        and source.get("sha256") == SOURCE_SHA256
+        and isinstance(decision, dict)
+        and decision.get("blockingReasons") == list(COORDINATE_QUALIFICATION_BLOCKING_REASONS)
+        and decision.get("qualifiedMapping") is None
+    )
 
 
 def _physical_shank(shank: PlacedProbeShank, atlas: AtlasMetadata) -> ProbeShankASR:

@@ -83,8 +83,26 @@ struct MajorVesselProtocolTests {
 
         #expect(overlay.segments.count == 1)
         #expect(overlay.segments[0].sourceEdgeIndex == 11)
+        #expect(overlay.segments[0].runIndex == 0)
+        #expect(overlay.segments[0].segmentIndexInRun == 0)
         #expect(overlay.segments[0].start == ProbeSliceImagePoint(column: 1, row: 1))
         #expect(overlay.segments[0].end == ProbeSliceImagePoint(column: 1, row: 3))
+
+        let index = MajorVesselSliceSpatialIndex(
+            graph: graph,
+            atlas: atlas,
+            assetSHA256: MajorVesselContract.derivedAssetSHA256
+        )
+        let indexed = MajorVesselSliceOverlayGeometry.make(
+            graph: graph,
+            atlas: atlas,
+            assetSHA256: MajorVesselContract.derivedAssetSHA256,
+            orientation: .coronal,
+            sliceIndex: 1,
+            spatialIndex: index
+        )
+        #expect(indexed == overlay)
+        #expect(index.references(for: .coronal, sliceIndex: 1)?.count == 1)
     }
 
     @Test("Dorsal projection preserves every path and physical radius")

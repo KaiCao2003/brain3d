@@ -256,6 +256,8 @@ def test_calibration_crud_projection_and_persistence_round_trip(tmp_path: Path) 
     target_added = _call(
         dispatcher,
         "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
         label="negative signs",
         apMillimetres=-0.001,
         mlMillimetres=-0.001,
@@ -302,7 +304,13 @@ def test_calibration_crud_projection_and_persistence_round_trip(tmp_path: Path) 
     assert session.project.unprojected_bregma_targets[0].projected is False
 
     destination = tmp_path / "calibrated.mouseplan"
-    _call(dispatcher, "project.save", path=str(destination))
+    _call(
+        dispatcher,
+        "project.save",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        path=str(destination),
+    )
     reopened_dispatcher, reopened_session = _dispatcher()
     _call(reopened_dispatcher, "project.open", path=str(destination))
     assert reopened_session.project is not None
@@ -560,6 +568,8 @@ def test_projection_requires_active_calibration_and_rejects_outside_atlas() -> N
     target_added = _call(
         dispatcher,
         "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
         label="outside",
         apMillimetres=-1.0,
         mlMillimetres=0.0,

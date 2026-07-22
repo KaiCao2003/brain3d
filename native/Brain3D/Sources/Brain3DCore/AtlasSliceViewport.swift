@@ -272,6 +272,7 @@ public struct AtlasSliceScrollAccumulator: Equatable, Sendable {
     public private(set) var remainder: CGFloat
     private var lastTimestamp: TimeInterval?
     private var lastEventWasPrecise: Bool?
+    private var lastEventWasMomentum: Bool?
 
     public init(preciseThreshold: CGFloat = Self.defaultPreciseThreshold) {
         self.preciseThreshold = preciseThreshold.isFinite && preciseThreshold > 0
@@ -280,12 +281,14 @@ public struct AtlasSliceScrollAccumulator: Equatable, Sendable {
         remainder = 0
         lastTimestamp = nil
         lastEventWasPrecise = nil
+        lastEventWasMomentum = nil
     }
 
     public mutating func reset() {
         remainder = 0
         lastTimestamp = nil
         lastEventWasPrecise = nil
+        lastEventWasMomentum = nil
     }
 
     /// Consume one vertical scroll event and return a signed slice-index delta.
@@ -297,13 +300,15 @@ public struct AtlasSliceScrollAccumulator: Equatable, Sendable {
         phase: AtlasSliceScrollPhase = .none,
         timestamp: TimeInterval = 0
     ) -> Int {
-        if phase == .began {
+        // A fresh direct gesture must be able to interrupt inertial scrolling
+        // immediately. Momentum itself remains useful input, but it never lends
+        // a stale fractional remainder to the next physical gesture.
+        if phase == .began || (lastEventWasMomentum == true && !isMomentum) {
             reset()
         }
         guard
             deltaY.isFinite,
             timestamp.isFinite,
-            !isMomentum,
             phase != .cancelled
         else {
             reset()
@@ -323,6 +328,7 @@ public struct AtlasSliceScrollAccumulator: Equatable, Sendable {
         }
         lastTimestamp = timestamp
         lastEventWasPrecise = isPrecise
+        lastEventWasMomentum = isMomentum
 
         let shouldResetAfterEvent = phase == .ended
         guard deltaY != 0 else {

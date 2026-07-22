@@ -28,6 +28,31 @@ struct BridgeProtocolTests {
         #expect(params["client"] as? String == "Brain3DSwiftUI")
     }
 
+    @Test("Project save is scoped to one project revision")
+    func projectSaveShape() throws {
+        let parameters = ProjectSaveParameters(
+            projectId: "10000000-0000-0000-0000-000000000001",
+            expectedProjectRevision: 14,
+            path: "/tmp/animal.brain3d"
+        )
+        let data = try JSONEncoder().encode(parameters)
+        let object = try #require(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(Set(object.keys) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "path",
+        ])
+        #expect(object["expectedProjectRevision"] as? Int == 14)
+
+        let result = try JSONDecoder().decode(
+            ProjectSaveResult.self,
+            from: Data(
+                #"{"protocolVersion":1,"status":"saved","path":"/tmp/animal.brain3d","projectId":"10000000-0000-0000-0000-000000000001","projectRevision":15}"#.utf8
+            )
+        )
+        #expect(result.projectRevision == 15)
+    }
+
     @Test("Typed success response returns the requested result")
     func successResponse() async throws {
         let transport = ScriptedTransport { request in
@@ -35,7 +60,7 @@ struct BridgeProtocolTests {
             let id = object?["id"] as? String ?? "missing"
             return Data(
                 """
-                {"id":"\(id)","result":{"protocolVersion":1,"service":"mouse-brain-planner","applicationVersion":"0.1.0","capabilities":{"atlas25Micrometre":true,"atlasDownload":true,"atlasSlicePng":true,"animalOnly":true,"projectPersistence":true,"subjectVascularImport":true,"subjectVascularOverlay":true,"subjectVascularRegistration":true}}}
+                {"id":"\(id)","result":{"protocolVersion":1,"service":"mouse-brain-planner","applicationVersion":"0.1.0","capabilities":{"atlas25Micrometre":true,"atlasDownload":true,"atlasSlicePng":true,"animalOnly":true,"projectPersistence":true,"subjectVascularImport":true,"subjectVascularOverlay":true,"subjectVascularRegistration":true,"atomicAtlasPointNavigation":true}}}
                 """.utf8
             )
         }
@@ -50,6 +75,21 @@ struct BridgeProtocolTests {
         #expect(result.protocolVersion == 1)
         #expect(result.service == "mouse-brain-planner")
         #expect(result.capabilities.animalOnly)
+        #expect(result.capabilities.atomicAtlasPointNavigation == true)
+    }
+
+    @Test("Archived vascular capability keys may be omitted")
+    func archivedCapabilitiesDefaultToFalse() throws {
+        let result = try JSONDecoder().decode(
+            HelloResult.self,
+            from: Data(
+                #"{"protocolVersion":1,"service":"mouse-brain-planner","applicationVersion":"0.1.0","capabilities":{"atlas25Micrometre":true,"atlasDownload":true,"atlasSlicePng":true,"animalOnly":true,"projectPersistence":true}}"#.utf8
+            )
+        )
+
+        #expect(!result.capabilities.subjectVascularImport)
+        #expect(!result.capabilities.subjectVascularOverlay)
+        #expect(!result.capabilities.subjectVascularRegistration)
     }
 
     @Test("Typed remote errors remain errors and preserve details")

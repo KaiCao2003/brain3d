@@ -46,6 +46,7 @@ final class AnimalSceneController {
     private let brainLayer = SCNNode()
     private let probeLayer = SCNNode()
     private let majorVesselLayer = SCNNode()
+    private let selectedVesselConflictLayer = SCNNode()
     private let cameraNode = SCNNode()
     private var currentMeshSHA256: String?
     private var currentMajorVesselDigest: String?
@@ -91,9 +92,11 @@ final class AnimalSceneController {
                 brainLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
             }
             try replaceProbe(for: snapshot)
+            selectedVesselConflictLayer.childNodes.forEach { $0.removeFromParentNode() }
             try await replaceMajorVessels(for: snapshot, generation: generation)
             try Task.checkCancellation()
             guard generation == loadGeneration else { return }
+            try replaceSelectedVesselConflict(for: snapshot)
             currentSnapshotIdentity = snapshot.identity
             phaseChanged(.ready)
         } catch is CancellationError {
@@ -137,12 +140,16 @@ final class AnimalSceneController {
         brainLayer.name = "allen-mouse-root-mesh"
         probeLayer.name = "selected-probe-layer"
         majorVesselLayer.name = "reviewed-major-vessel-layer"
+        selectedVesselConflictLayer.name = "selected-vessel-conflict-layer"
         brainLayer.categoryBitMask = SceneCategory.brain.rawValue
         probeLayer.categoryBitMask = SceneCategory.probe.rawValue
         majorVesselLayer.categoryBitMask = SceneCategory.majorVessel.rawValue
+        selectedVesselConflictLayer.categoryBitMask =
+            SceneCategory.selectedVesselConflict.rawValue
         scene.rootNode.addChildNode(brainLayer)
         scene.rootNode.addChildNode(probeLayer)
         scene.rootNode.addChildNode(majorVesselLayer)
+        scene.rootNode.addChildNode(selectedVesselConflictLayer)
 
         let camera = SCNCamera()
         camera.fieldOfView = 38
@@ -278,6 +285,24 @@ final class AnimalSceneController {
         )
         majorVesselLayer.addChildNode(node)
         currentMajorVesselDigest = digest
+    }
+
+    private func replaceSelectedVesselConflict(
+        for snapshot: AnimalSceneSnapshot
+    ) throws {
+        selectedVesselConflictLayer.childNodes.forEach { $0.removeFromParentNode() }
+        guard let conflict = snapshot.selectedVesselConflict else { return }
+        guard let graph = snapshot.majorVessels?.graph else {
+            throw AtlasSceneContractError.invalid(
+                "A selected vessel conflict requires its current reviewed vessel graph."
+            )
+        }
+        let node = try MajorVesselConflictNodeFactory.makeNode(
+            for: conflict,
+            graph: graph,
+            transform: snapshot.transform
+        )
+        selectedVesselConflictLayer.addChildNode(node)
     }
 
     private func setCameraHome(for snapshot: AnimalSceneSnapshot) {

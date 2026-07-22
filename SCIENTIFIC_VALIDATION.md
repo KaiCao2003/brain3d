@@ -16,9 +16,9 @@ claimed.
 | Calibration | Typed CRUD, matched-landmark fits, residual/QC gates, transform round trips, hash/revision binding | Accuracy of user measurements and biological registration |
 | Target/probe | AP/ML/DV sign tests, projection provenance, versioned placement, overlays, exact voxel traversal/export | Insertion deformation and histological endpoint |
 | NP1 geometry | All 960 sites derived from pinned source snapshots; schema/count/pattern tests | Independent full-table review and physical-probe conformance |
-| LAMBADA asset | Reproducible extraction, source/asset hashes, schema/bounds/radius/run checks | Subject-specific vasculature and omitted-vessel coverage |
-| Vessel V3 | Sound AABB-candidate and tapered-surface tests, conservative probe envelopes, threshold classes, stale-input checks | Empirical registration uncertainty and biological decision thresholds |
-| SceneKit | Coordinate-transform, mesh, tube, probe-envelope, picking, and off-screen render tests | Anatomical truth beyond supplied geometry |
+| LAMBADA evidence | Reproducible extraction, source/asset hashes, schema/bounds/radius/run checks, and digest-bound rejected qualification | Biological laterality, whole-brain coverage, and subject-specific vasculature |
+| Vessel V3 | Legacy synthetic AABB-candidate and tapered-surface tests; production capability is absent | A qualified vessel source, empirical uncertainty, and biological decision thresholds |
+| SceneKit | Coordinate-transform, brain/probe mesh, picking, and off-screen render tests; archived tube tests are not product reachability | Anatomical truth beyond supplied geometry |
 | Persistence | Project revisions, checksums, migrations, backup recovery, source/input digests | Long-term regulated record requirements |
 
 The macOS application is built and ad-hoc signed as a development bundle and exercised as a real
@@ -95,36 +95,43 @@ The extraction threshold is point radius ≥15 µm, equivalent to diameter ≥30
 select whole edges by mean or maximum radius. Coordinates are converted from ClearMap to
 BrainGlobe `[AP,DV,ML]` and then to physical micrometres without a half-voxel shift. The loader
 checks the adjacent manifest, asset identity, arrays, dtypes, shapes, bounds, thresholds, ordering,
-and run lengths before exposing immutable geometry.
+and run lengths in the archived evidence path.
 
-This evidence supports the claim that the displayed paths and radii came from that declared
-reference under the documented extraction rule. It does not support a claim about the current
-animal. The source excludes pial and choroidal vessels; the derivative filters smaller vessels;
-and sex/side, artery/vein identity, biological variation, tissue distortion, and registration
-error are not resolved. See [the derivation record](docs/LAMBADA_MAJOR_VESSELS.md).
+This evidence supports deterministic extraction from the declared reference. It does not support
+display or analysis. The exact qualification found supporting AP and DV orientation evidence but
+rejected the asset because the primary source describes hemisphere specimens and the exact graph
+has no persisted biological hemisphere/laterality binding. Whole-brain coverage and ML polarity
+are unqualified; numeric points on both sides of the array midpoint do not resolve either issue,
+and no mirroring is permitted.
 
-## V3 reference analysis semantics
+The runtime omits both reference-vessel capabilities and returns
+`VESSEL_GEOMETRY_UNAVAILABLE` from all reference metadata, geometry, and analysis methods. The
+canonical rejection report is
+[`docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json`](docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+The source also excludes pial and choroidal vessels; the derivative filters smaller vessels; and
+artery/vein identity, biological variation, tissue distortion, and registration error are not
+resolved. See [the derivation record](docs/LAMBADA_MAJOR_VESSELS.md).
+
+## Archived V3 algorithm evidence
 
 Algorithm `major-vessel-aabb-tapered-surface-v3` computes conservative AABB lower bounds and
 feasible upper bounds before running exact finite-segment and tapered-surface minimization only on
-the sound candidate set. It
-reports centerline/surface geometry, interpolated radius, probe envelope, required margin,
+the sound candidate set. In isolated synthetic tests it reports centerline/surface geometry,
+interpolated radius, probe envelope, required margin,
 registration uncertainty, adjusted clearance, closest points, insertion depth, conflict class,
 source identity, algorithm version, and input hashes.
 
-The UI requires separate confirmation of the lab-defined margin/uncertainty inputs and
-acknowledgement of incomplete reference coverage. The bundled provenance does not bound
-registration error or tissue distortion, so absence of a conflict is classified
-`insufficientGeometry` even after acknowledgement; user input cannot replace missing source
-evidence. Positive loaded-geometry conflicts remain reportable. The zero-conflict wording below is
-reserved for a future source with reviewed bounds covered by the stated uncertainty:
-
-> No conflict detected within the loaded geometry and stated uncertainty assumptions.
+This algorithm is not a production capability for P60_606. The gate runs before project, atlas,
+asset, or analysis access, so the application produces neither positive conflicts nor absence
+results from this derivative. User-supplied margins or uncertainty cannot override failed source
+qualification.
 
 ### Reproducible performance evidence
 
-The offline [major-vessel benchmark](scripts/benchmark_major_vessel_analysis.py) loads only the
-bundled, SHA-256-verified asset and uses a fixed probe/profile input. Run it with:
+The offline, non-product [major-vessel benchmark](scripts/benchmark_major_vessel_analysis.py)
+loads the SHA-256-verified archived asset and uses a fixed synthetic probe/profile input. Run it
+with:
 
 ```console
 uv run python scripts/benchmark_major_vessel_analysis.py --iterations 20
@@ -133,7 +140,7 @@ uv run python scripts/benchmark_major_vessel_analysis.py --iterations 20
 One run on 2026-07-22 used an Apple M4 (`Mac16,13`, arm64), macOS 26.5.2, and CPython
 3.12.13. The asset contained 71,313 points, 11,818 runs, and 59,495 segments. V3 selected
 243 candidates, performed exactly 243 narrow-phase measurements, and reported 153 loaded-geometry
-conflicts. Timings were:
+algorithmic conflicts in that offline fixture. Timings were:
 
 | Measurement | Milliseconds |
 | --- | ---: |
@@ -145,13 +152,14 @@ conflicts. Timings were:
 Python/module startup is excluded. The benchmark enforces `--iterations` in `[5,100]`, verifies
 the bundled asset counts and digest, rejects changing outputs across identical runs, and emits the
 machine, Python, geometry, result counts, and timings as JSON. These measurements are one-machine
-engineering evidence, not a cross-hardware latency guarantee or scientific/surgical validation.
+engineering evidence for archived code, not runtime availability, a cross-hardware latency
+guarantee, or scientific/surgical validation.
 
 ## Archived evidence paths
 
 The Kim 2022 population vascular-length-density field and user subject-image registration remain
 in the Python backend for reproducibility of older work. They are absent from the primary UI and
-do not feed the LAMBADA geometry or V3 analysis. A scalar density projection contains no
+do not bypass the LAMBADA rejection gate. A scalar density projection contains no
 individual vessel path/radius; a registered image is not automatically a vessel segmentation.
 
 ## Required evidence before qualification
@@ -159,8 +167,10 @@ individual vessel path/radius; a registered image is not automatically a vessel 
 1. Independent review of every NP1 source-derived dimension and site coordinate.
 2. Repeated-observer subject calibration studies with declared ground truth.
 3. Phantom and histology studies for planned versus achieved probe paths and sites.
-4. Subject-specific vascular ground truth and a study of reference-graph failure modes.
-5. Prospectively defined margin/uncertainty criteria and sensitivity analyses.
+4. A trustworthy whole-brain vessel source with independently verified Allen orientation,
+   biological laterality, and bregma/subject-registration evidence.
+5. Subject-specific vascular ground truth, reference-graph failure-mode studies, and prospectively
+   defined margin/uncertainty criteria.
 6. Formal animal-workflow usability, accessibility, interruption, and recovery studies.
 7. Deterministic runtime packaging, SBOM, signing/notarization, and clean-Mac qualification.
 

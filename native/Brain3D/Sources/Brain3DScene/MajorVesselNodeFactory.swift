@@ -41,10 +41,10 @@ enum MajorVesselNodeFactory {
         node.name = "reference-major-vessel-tubes"
         node.categoryBitMask = SceneCategory.majorVessel.rawValue
         node.simdTransform = transform.sourceToSceneMatrix
-        // The atlas shell deliberately does not write depth. Rendering the
-        // actual radius-bearing tubes after it makes interior vessels legible
-        // without altering, inflating, mirroring, or synthesizing geometry.
-        node.renderingOrder = 10_000
+        // The contextual brain shell deliberately does not write depth. The
+        // vessel and probe overlays share this depth-tested pass so their
+        // front/back relationship follows calibrated geometry, not draw order.
+        node.renderingOrder = 20
         node.opacity = 1
         node.castsShadow = false
         return node
@@ -69,11 +69,8 @@ enum MajorVesselNodeFactory {
         material.transparency = 1
         material.blendMode = .replace
         material.isDoubleSided = true
-        // This is an X-ray planning overlay. It must not disappear behind the
-        // contextual brain shell (or any stale depth written by an imported
-        // asset), so it neither reads nor mutates the scene depth buffer.
-        material.readsFromDepthBuffer = false
-        material.writesToDepthBuffer = false
+        material.readsFromDepthBuffer = true
+        material.writesToDepthBuffer = true
         return material
     }
 }

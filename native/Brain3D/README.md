@@ -1,8 +1,8 @@
 # Brain3D native macOS app
 
 This Swift package is the native half of the Brain3D animal-research planner. SwiftUI owns the
-single-view workspace and controls; SceneKit renders verified 3D brain, probe, and reference-vessel
-geometry; a typed NDJSON subprocess boundary delegates scientific state and analysis to Python.
+single-view workspace and controls; SceneKit renders backend-validated 3D brain and probe geometry
+payloads; a typed NDJSON subprocess boundary delegates scientific state and analysis to Python.
 
 > **Animal research only — non-human and non-clinical.** This development app is not an
 > installable production release or a qualified navigation device.
@@ -16,17 +16,17 @@ geometry; a typed NDJSON subprocess boundary delegates scientific state and anal
 - QC-gated subject calibration and AP/ML/DV target projection from bregma; negative values mean
   posterior, left, and deep/ventral.
 - Probe placement, 2D/3D overlays, region traversal, inspection, and CSV/JSON export.
-- LAMBADA P60_606 reference vessels at diameter ≥30 µm on slices, Dorsal, and 3D.
-- V3 broad-phase/tapered-vessel reference analysis with explicit margin, uncertainty, and two
-  acknowledgements. P60_606 has no reviewed registration/tissue-distortion uncertainty bound, so
-  absence of loaded-geometry conflicts fails closed. The reserved bounded wording for a future
-  qualified source is:
-
-  > No conflict detected within the loaded geometry and stated uncertainty assumptions.
+- No vessel layer in slices, Dorsal, or 3D. The packaged P60_606 derivative is archived evidence
+  whose hemisphere/laterality and whole-brain qualification is rejected; it is not mirrored.
+- No vessel-analysis capability. Reference metadata, geometry, and analysis requests fail with
+  `VESSEL_GEOMETRY_UNAVAILABLE` without serving points.
 
 The NP1 NP1000 / `PRB_1_4_0480_1` catalog model is a complete source transcription whose
-independent review is still pending; the UI requires acknowledgement. The vessel graph is one
-fixed cleared P60 reference, omits pial/choroidal/smaller vessels, and is not subject-specific.
+independent review is still pending; the UI requires acknowledgement. The archived vessel source
+is a hemisphere specimen and its exact graph lacks a persisted biological laterality binding;
+AP/DV evidence alone cannot qualify it for display or analysis. The canonical rejection report
+is [retained with repository evidence](../../docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 Population density and subject-image registration remain archived in Python and absent from the
 primary UI. Only `allen_mouse_25um` v1.2 is accepted in this 25 µm testing phase.
 

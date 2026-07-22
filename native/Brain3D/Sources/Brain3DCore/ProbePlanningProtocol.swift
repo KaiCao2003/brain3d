@@ -30,7 +30,10 @@ public enum ProbePlanningContract {
     public static let insertionAxisDefinition = "entry-toward-tip"
     public static let atlasFrameId = "BRAINGLOBE_PHYSICAL_ASR_UM"
     public static let regionFrameId = "BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"
+    public static let bregmaEntryFrameId = "BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED"
     public static let planningAlgorithmVersion =
+        "calibrated-explicit-placement-mode-v3"
+    public static let stereotaxicPlanningAlgorithmVersion =
         "calibrated-stereotaxic-probe-transform-v2"
     public static let legacyPlanningAlgorithmVersion = "calibrated-target-angle-depth-v1"
     public static let planningPlacementMethod =
@@ -68,6 +71,40 @@ public enum ProbePlanningValidationError: Error, Equatable, LocalizedError, Send
     public var errorDescription: String? {
         switch self {
         case let .invalid(message): message
+        }
+    }
+}
+
+public enum ProbePlacementMode: String, Codable, CaseIterable, Equatable, Sendable {
+    case entryAndTarget = "ENTRY_AND_TARGET"
+    case entryAnglesDepth = "ENTRY_ANGLES_DEPTH"
+    case targetAnglesDepth = "TARGET_ANGLES_DEPTH"
+    case stereotaxicTargetManipulator = "STEREOTAXIC_TARGET_MANIPULATOR"
+
+    public var displayName: String {
+        switch self {
+        case .entryAndTarget: "Entry + target"
+        case .entryAnglesDepth: "Entry + angles + depth"
+        case .targetAnglesDepth: "Target + angles + depth"
+        case .stereotaxicTargetManipulator: "Stereotaxic target"
+        }
+    }
+
+    public var requiresEntryCoordinates: Bool {
+        self == .entryAndTarget || self == .entryAnglesDepth
+    }
+
+    public var requiresAnglesAndDepth: Bool {
+        self != .entryAndTarget
+    }
+
+    public var normalizedPlacementMethod: String {
+        switch self {
+        case .entryAndTarget: "entry-plus-target"
+        case .entryAnglesDepth: "entry-plus-angles-depth"
+        case .targetAnglesDepth: "target-plus-angles-depth"
+        case .stereotaxicTargetManipulator:
+            ProbePlanningContract.planningPlacementMethod
         }
     }
 }
@@ -120,9 +157,13 @@ public struct ProbePlanCreateParameters: Codable, Equatable, Sendable {
     public let modelId: String
     public let modelVersion: String
     public let name: String
-    public let azimuthDegrees: Double
-    public let elevationDegrees: Double
-    public let insertionDepthMicrometres: Double
+    public let placementMode: ProbePlacementMode
+    public let entryAPMillimetres: Double?
+    public let entryMLMillimetres: Double?
+    public let entryDVMillimetres: Double?
+    public let azimuthDegrees: Double?
+    public let elevationDegrees: Double?
+    public let insertionDepthMicrometres: Double?
     public let axialRotationDegrees: Double
     public let customGeometryAcknowledged: Bool
 
@@ -133,9 +174,13 @@ public struct ProbePlanCreateParameters: Codable, Equatable, Sendable {
         modelId: String,
         modelVersion: String,
         name: String,
-        azimuthDegrees: Double,
-        elevationDegrees: Double,
-        insertionDepthMicrometres: Double,
+        placementMode: ProbePlacementMode = .stereotaxicTargetManipulator,
+        entryAPMillimetres: Double? = nil,
+        entryMLMillimetres: Double? = nil,
+        entryDVMillimetres: Double? = nil,
+        azimuthDegrees: Double? = nil,
+        elevationDegrees: Double? = nil,
+        insertionDepthMicrometres: Double? = nil,
         axialRotationDegrees: Double,
         customGeometryAcknowledged: Bool
     ) {
@@ -146,6 +191,10 @@ public struct ProbePlanCreateParameters: Codable, Equatable, Sendable {
         self.modelId = modelId
         self.modelVersion = modelVersion
         self.name = name
+        self.placementMode = placementMode
+        self.entryAPMillimetres = entryAPMillimetres
+        self.entryMLMillimetres = entryMLMillimetres
+        self.entryDVMillimetres = entryDVMillimetres
         self.azimuthDegrees = azimuthDegrees
         self.elevationDegrees = elevationDegrees
         self.insertionDepthMicrometres = insertionDepthMicrometres
@@ -164,9 +213,13 @@ public struct ProbePlanUpdateParameters: Codable, Equatable, Sendable {
     public let modelId: String
     public let modelVersion: String
     public let name: String
-    public let azimuthDegrees: Double
-    public let elevationDegrees: Double
-    public let insertionDepthMicrometres: Double
+    public let placementMode: ProbePlacementMode
+    public let entryAPMillimetres: Double?
+    public let entryMLMillimetres: Double?
+    public let entryDVMillimetres: Double?
+    public let azimuthDegrees: Double?
+    public let elevationDegrees: Double?
+    public let insertionDepthMicrometres: Double?
     public let axialRotationDegrees: Double
     public let customGeometryAcknowledged: Bool
 
@@ -179,9 +232,13 @@ public struct ProbePlanUpdateParameters: Codable, Equatable, Sendable {
         modelId: String,
         modelVersion: String,
         name: String,
-        azimuthDegrees: Double,
-        elevationDegrees: Double,
-        insertionDepthMicrometres: Double,
+        placementMode: ProbePlacementMode = .stereotaxicTargetManipulator,
+        entryAPMillimetres: Double? = nil,
+        entryMLMillimetres: Double? = nil,
+        entryDVMillimetres: Double? = nil,
+        azimuthDegrees: Double? = nil,
+        elevationDegrees: Double? = nil,
+        insertionDepthMicrometres: Double? = nil,
         axialRotationDegrees: Double,
         customGeometryAcknowledged: Bool
     ) {
@@ -194,6 +251,10 @@ public struct ProbePlanUpdateParameters: Codable, Equatable, Sendable {
         self.modelId = modelId
         self.modelVersion = modelVersion
         self.name = name
+        self.placementMode = placementMode
+        self.entryAPMillimetres = entryAPMillimetres
+        self.entryMLMillimetres = entryMLMillimetres
+        self.entryDVMillimetres = entryDVMillimetres
         self.azimuthDegrees = azimuthDegrees
         self.elevationDegrees = elevationDegrees
         self.insertionDepthMicrometres = insertionDepthMicrometres
@@ -264,21 +325,54 @@ public enum ProbeRegionExportFormat: String, Codable, CaseIterable, Equatable, S
 public struct ProbeRegionExportParameters: Codable, Equatable, Sendable {
     public let protocolVersion: Int
     public let projectId: String
+    public let expectedProjectRevision: Int
     public let planId: String
     public let expectedPlanInputSha256: String
     public let format: ProbeRegionExportFormat
 
     public init(
         projectId: String,
+        expectedProjectRevision: Int,
         planId: String,
         expectedPlanInputSha256: String,
         format: ProbeRegionExportFormat
     ) {
         protocolVersion = BridgeProtocolVersion.current
         self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
         self.planId = planId
         self.expectedPlanInputSha256 = expectedPlanInputSha256
         self.format = format
+    }
+}
+
+public struct ProbeRegionExportConfirmParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let planId: String
+    public let expectedPlanInputSha256: String
+    public let analysisSha256: String
+    public let format: ProbeRegionExportFormat
+    public let contentSha256: String
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        planId: String,
+        expectedPlanInputSha256: String,
+        analysisSha256: String,
+        format: ProbeRegionExportFormat,
+        contentSha256: String
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        self.planId = planId
+        self.expectedPlanInputSha256 = expectedPlanInputSha256
+        self.analysisSha256 = analysisSha256
+        self.format = format
+        self.contentSha256 = contentSha256
     }
 }
 
@@ -468,10 +562,48 @@ public struct ProbeManipulatorInput: Codable, Equatable, Sendable {
     public let angleConvention: String
 }
 
+public struct ProbeBregmaRelativeEntryInput: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let origin: String
+    public let componentOrder: [String]
+    public let units: String
+    public let apPositiveDirection: String
+    public let apNegativeDirection: String
+    public let mlPositiveDirection: String
+    public let mlNegativeDirection: String
+    public let dvPositiveDirection: String
+    public let dvNegativeDirection: String
+    public let apMillimetres: Double
+    public let mlMillimetres: Double
+    public let dvMillimetres: Double
+}
+
+public struct ProbePlacementInput: Codable, Equatable, Sendable {
+    public let mode: ProbePlacementMode
+    public let entry: ProbeBregmaRelativeEntryInput?
+    public let angleFrameId: String?
+    public let azimuthDegrees: Double?
+    public let elevationDegrees: Double?
+    public let insertionDepthMicrometres: Double?
+    public let axialRotationDegrees: Double
+    public let angleConvention: String?
+}
+
 public struct ProbeManipulatorDraft: Equatable, Sendable {
     public let azimuthDegrees: Double
     public let elevationDegrees: Double
     public let insertionDepthMicrometres: Double
+    public let axialRotationDegrees: Double
+}
+
+public struct ProbePlacementDraft: Equatable, Sendable {
+    public let mode: ProbePlacementMode
+    public let entryAPMillimetres: Double?
+    public let entryMLMillimetres: Double?
+    public let entryDVMillimetres: Double?
+    public let azimuthDegrees: Double?
+    public let elevationDegrees: Double?
+    public let insertionDepthMicrometres: Double?
     public let axialRotationDegrees: Double
 }
 
@@ -578,6 +710,7 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
     public let usableForNavigation: Bool
     public let sourceTarget: ProbeSourceTarget
     public let manipulatorInput: ProbeManipulatorInput?
+    public let placementInput: ProbePlacementInput?
     public let placement: ProbePlacement
     public let shanks: [ProbePlacedShank]
     public let recordingSites: [ProbeRecordingSite]
@@ -588,6 +721,8 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
 
     public var hasCurrentPlanningGeometry: Bool {
         provenance.planningAlgorithmVersion == ProbePlanningContract.planningAlgorithmVersion
+            || provenance.planningAlgorithmVersion
+                == ProbePlanningContract.stereotaxicPlanningAlgorithmVersion
     }
 
     public var requiresPlanningGeometryUpdate: Bool {
@@ -612,6 +747,32 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
             elevationDegrees: placement.elevationDegrees,
             insertionDepthMicrometres: placement.insertionDepthMicrometres,
             axialRotationDegrees: placement.axialRotationDegrees
+        )
+    }
+
+    public var placementDraft: ProbePlacementDraft {
+        if let placementInput {
+            return ProbePlacementDraft(
+                mode: placementInput.mode,
+                entryAPMillimetres: placementInput.entry?.apMillimetres,
+                entryMLMillimetres: placementInput.entry?.mlMillimetres,
+                entryDVMillimetres: placementInput.entry?.dvMillimetres,
+                azimuthDegrees: placementInput.azimuthDegrees,
+                elevationDegrees: placementInput.elevationDegrees,
+                insertionDepthMicrometres: placementInput.insertionDepthMicrometres,
+                axialRotationDegrees: placementInput.axialRotationDegrees
+            )
+        }
+        let fallback = manipulatorDraft
+        return ProbePlacementDraft(
+            mode: .stereotaxicTargetManipulator,
+            entryAPMillimetres: nil,
+            entryMLMillimetres: nil,
+            entryDVMillimetres: nil,
+            azimuthDegrees: fallback.azimuthDegrees,
+            elevationDegrees: fallback.elevationDegrees,
+            insertionDepthMicrometres: fallback.insertionDepthMicrometres,
+            axialRotationDegrees: fallback.axialRotationDegrees
         )
     }
 }
@@ -801,6 +962,19 @@ public struct ProbeRegionExportResult: Codable, Equatable, Sendable {
     public let projectMutated: Bool
 }
 
+public struct ProbeRegionExportConfirmationResult: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let status: String
+    public let projectId: String
+    public let projectRevision: Int
+    public let planId: String
+    public let planInputSha256: String
+    public let analysisSha256: String
+    public let format: ProbeRegionExportFormat
+    public let contentSha256: String
+    public let projectMutated: Bool
+}
+
 public enum ProbePlanningValidator {
     private static let acceptedVerificationStatuses: Set<String> = [
         "verified",
@@ -840,6 +1014,10 @@ public enum ProbePlanningValidator {
             modelId: request.modelId,
             modelVersion: request.modelVersion,
             name: request.name,
+            placementMode: request.placementMode,
+            entryAP: request.entryAPMillimetres,
+            entryML: request.entryMLMillimetres,
+            entryDV: request.entryDVMillimetres,
             azimuth: request.azimuthDegrees,
             elevation: request.elevationDegrees,
             depth: request.insertionDepthMicrometres,
@@ -857,6 +1035,10 @@ public enum ProbePlanningValidator {
             modelId: request.modelId,
             modelVersion: request.modelVersion,
             name: request.name,
+            placementMode: request.placementMode,
+            entryAP: request.entryAPMillimetres,
+            entryML: request.entryMLMillimetres,
+            entryDV: request.entryDVMillimetres,
             azimuth: request.azimuthDegrees,
             elevation: request.elevationDegrees,
             depth: request.insertionDepthMicrometres,
@@ -976,6 +1158,62 @@ public enum ProbePlanningValidator {
         }
     }
 
+    public static func validateCreatedMutation(
+        _ result: ProbePlanMutationResult,
+        request: ProbePlanCreateParameters
+    ) throws {
+        try validateMutation(
+            result,
+            projectId: request.projectId,
+            expectedStatus: "created",
+            expectedRevision: request.expectedProjectRevision + 1
+        )
+        try validateMutationPlan(
+            result.plan,
+            expectedPlanId: nil,
+            targetId: request.targetId,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            name: request.name,
+            placementMode: request.placementMode,
+            entryAP: request.entryAPMillimetres,
+            entryML: request.entryMLMillimetres,
+            entryDV: request.entryDVMillimetres,
+            azimuth: request.azimuthDegrees,
+            elevation: request.elevationDegrees,
+            depth: request.insertionDepthMicrometres,
+            rotation: request.axialRotationDegrees
+        )
+    }
+
+    public static func validateUpdatedMutation(
+        _ result: ProbePlanMutationResult,
+        request: ProbePlanUpdateParameters
+    ) throws {
+        try validateMutation(
+            result,
+            projectId: request.projectId,
+            expectedStatus: "updated",
+            expectedRevision: request.expectedProjectRevision + 1
+        )
+        try validateMutationPlan(
+            result.plan,
+            expectedPlanId: request.planId,
+            targetId: request.targetId,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            name: request.name,
+            placementMode: request.placementMode,
+            entryAP: request.entryAPMillimetres,
+            entryML: request.entryMLMillimetres,
+            entryDV: request.entryDVMillimetres,
+            azimuth: request.azimuthDegrees,
+            elevation: request.elevationDegrees,
+            depth: request.insertionDepthMicrometres,
+            rotation: request.axialRotationDegrees
+        )
+    }
+
     public static func validateRemove(
         _ result: ProbePlanRemoveResult,
         projectId: String,
@@ -1003,33 +1241,53 @@ public enum ProbePlanningValidator {
         try validateRegionBundle(result.regionAnalysis, plan: plan)
     }
 
-    public static func validateExport(
+    public static func validateExportGeneration(
         _ result: ProbeRegionExportResult,
-        projectId: String,
+        request: ProbeRegionExportParameters,
         plan: ProbePlanDetail,
-        analysis: ProbeRegionAnalysisBundle,
-        format: ProbeRegionExportFormat,
-        projectRevision: Int
+        analysis: ProbeRegionAnalysisBundle
     ) throws {
-        try requireEnvelope(result.protocolVersion, result.status, "exportedReadOnly")
-        let expectedMime = format == .csv ? "text/csv" : "application/json"
-        let expectedSuffix = ".\(format.rawValue)"
-        guard result.projectId == projectId,
-              result.projectRevision == projectRevision,
+        try requireEnvelope(result.protocolVersion, result.status, "generated")
+        let expectedMime = request.format == .csv ? "text/csv" : "application/json"
+        let expectedSuffix = ".\(request.format.rawValue)"
+        guard request.protocolVersion == BridgeProtocolVersion.current,
+              result.projectId == request.projectId,
+              result.projectRevision == request.expectedProjectRevision,
+              result.planId == request.planId,
               result.planId == plan.planId,
+              result.planInputSha256 == request.expectedPlanInputSha256,
               result.planInputSha256 == plan.inputSha256,
               result.analysisSha256 == analysis.analysisSha256,
-              result.format == format,
+              result.format == request.format,
               result.mimeType == expectedMime,
               result.suggestedFileName.hasSuffix(expectedSuffix),
               !result.content.isEmpty,
-              result.projectMutated == false
-        else { throw invalid("Probe-region export identity, format, or read-only status is invalid.") }
+              !result.projectMutated
+        else { throw invalid("Generated probe-region export identity or format is invalid.") }
         let digest = SHA256.hash(data: Data(result.content.utf8)).map {
             String(format: "%02x", $0)
         }.joined()
         guard result.contentSha256 == digest else {
             throw invalid("Probe-region export content SHA-256 does not match its content.")
+        }
+    }
+
+    public static func validateExportConfirmation(
+        _ result: ProbeRegionExportConfirmationResult,
+        request: ProbeRegionExportConfirmParameters
+    ) throws {
+        try requireEnvelope(result.protocolVersion, result.status, "exported")
+        guard request.protocolVersion == BridgeProtocolVersion.current,
+              result.projectId == request.projectId,
+              result.projectRevision == request.expectedProjectRevision + 1,
+              result.planId == request.planId,
+              result.planInputSha256 == request.expectedPlanInputSha256,
+              result.analysisSha256 == request.analysisSha256,
+              result.format == request.format,
+              result.contentSha256 == request.contentSha256,
+              result.projectMutated
+        else {
+            throw invalid("Probe-region export confirmation is stale or inconsistent.")
         }
     }
 
@@ -1059,7 +1317,42 @@ public enum ProbePlanningValidator {
         try requireUUID(placement.placementId, "placementId")
         switch plan.provenance.planningAlgorithmVersion {
         case ProbePlanningContract.planningAlgorithmVersion:
+            guard let placementInput = plan.placementInput,
+                  placement.method == placementInput.mode.normalizedPlacementMethod
+            else {
+                throw invalid("V3 probe plan does not preserve its explicit placement mode.")
+            }
+            try validatePlacementInput(placementInput)
+            if placementInput.mode == .targetAnglesDepth {
+                guard placementInput.angleFrameId == placement.canonicalFrame.frameId else {
+                    throw invalid(
+                        "Target-angle placement must use the normalized canonical target frame."
+                    )
+                }
+            } else if placementInput.mode == .entryAnglesDepth {
+                guard placementInput.angleFrameId?.hasPrefix("STEREOTAXIC:") == true else {
+                    throw invalid(
+                        "Entry-angle placement must preserve its calibrated stereotaxic source frame."
+                    )
+                }
+            } else if placementInput.mode == .stereotaxicTargetManipulator {
+                guard let manipulator = plan.manipulatorInput,
+                      manipulator.frameId == placementInput.angleFrameId,
+                      manipulator.azimuthDegrees == placementInput.azimuthDegrees,
+                      manipulator.elevationDegrees == placementInput.elevationDegrees,
+                      manipulator.insertionDepthMicrometres
+                        == placementInput.insertionDepthMicrometres,
+                      manipulator.axialRotationDegrees == placementInput.axialRotationDegrees,
+                      manipulator.angleConvention == placementInput.angleConvention
+                else {
+                    throw invalid("V3 stereotaxic placement and manipulator inputs disagree.")
+                }
+            } else if plan.manipulatorInput != nil {
+                throw invalid("V3 non-manipulator placement includes obsolete manipulator input.")
+            }
+        case ProbePlanningContract.stereotaxicPlanningAlgorithmVersion:
             guard let manipulator = plan.manipulatorInput,
+                  plan.placementInput == nil,
                   !manipulator.frameId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   manipulator.azimuthDegrees.isFinite,
                   (-180 ... 180).contains(manipulator.azimuthDegrees),
@@ -1076,6 +1369,7 @@ public enum ProbePlanningValidator {
             }
         case ProbePlanningContract.legacyPlanningAlgorithmVersion:
             guard plan.manipulatorInput == nil,
+                  plan.placementInput == nil,
                   placement.method == ProbePlanningContract.legacyPlacementMethod
             else {
                 throw invalid("Legacy probe plan mixes current and obsolete geometry fields.")
@@ -1499,9 +1793,13 @@ public enum ProbePlanningValidator {
         modelId: String,
         modelVersion: String,
         name: String,
-        azimuth: Double,
-        elevation: Double,
-        depth: Double,
+        placementMode: ProbePlacementMode,
+        entryAP: Double?,
+        entryML: Double?,
+        entryDV: Double?,
+        azimuth: Double?,
+        elevation: Double?,
+        depth: Double?,
         rotation: Double,
         acknowledged: Bool
     ) throws {
@@ -1514,11 +1812,31 @@ public enum ProbePlanningValidator {
               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               name.count <= 200,
               !modelId.isEmpty, !modelVersion.isEmpty,
-              azimuth.isFinite, (-180 ... 180).contains(azimuth),
-              elevation.isFinite, (-90 ... 90).contains(elevation),
-              depth.isFinite, depth > 0,
               rotation.isFinite, (-180 ... 180).contains(rotation)
-        else { throw invalid("Probe-plan name, angles, depth, or revision is invalid.") }
+        else { throw invalid("Probe-plan name, rotation, or revision is invalid.") }
+        let entryValues = [entryAP, entryML, entryDV]
+        let entryShapeIsValid = placementMode.requiresEntryCoordinates
+            ? entryValues.allSatisfy({ $0 != nil })
+            : entryValues.allSatisfy({ $0 == nil })
+        guard entryShapeIsValid,
+              entryValues.compactMap({ $0 }).allSatisfy(\.isFinite)
+        else {
+            throw invalid("Probe placement mode and entry AP/ML/DV fields are inconsistent.")
+        }
+        let angleValues = [azimuth, elevation, depth]
+        let angleShapeIsValid = placementMode.requiresAnglesAndDepth
+            ? angleValues.allSatisfy({ $0 != nil })
+            : angleValues.allSatisfy({ $0 == nil })
+        guard angleShapeIsValid else {
+            throw invalid("Probe placement mode and angle/depth fields are inconsistent.")
+        }
+        if placementMode.requiresAnglesAndDepth {
+            guard let azimuth, let elevation, let depth,
+                  azimuth.isFinite, (-180 ... 180).contains(azimuth),
+                  elevation.isFinite, (-90 ... 90).contains(elevation),
+                  depth.isFinite, depth > 0
+            else { throw invalid("Probe placement angles or insertion depth are invalid.") }
+        }
         let requiresAcknowledgement: Bool
         switch modelId {
         case ProbePlanningContract.neuropixelsModelId:
@@ -1538,6 +1856,91 @@ public enum ProbePlanningValidator {
             throw invalid(
                 "This probe geometry requires explicit acknowledgement before animal planning."
             )
+        }
+    }
+
+    private static func validateMutationPlan(
+        _ plan: ProbePlanDetail,
+        expectedPlanId: String?,
+        targetId: String,
+        modelId: String,
+        modelVersion: String,
+        name: String,
+        placementMode: ProbePlacementMode,
+        entryAP: Double?,
+        entryML: Double?,
+        entryDV: Double?,
+        azimuth: Double?,
+        elevation: Double?,
+        depth: Double?,
+        rotation: Double
+    ) throws {
+        let draft = plan.placementDraft
+        guard expectedPlanId == nil || plan.planId == expectedPlanId,
+              plan.targetId == targetId,
+              plan.modelId == modelId,
+              plan.modelVersion == modelVersion,
+              plan.name == name,
+              draft.mode == placementMode,
+              draft.entryAPMillimetres == entryAP,
+              draft.entryMLMillimetres == entryML,
+              draft.entryDVMillimetres == entryDV,
+              draft.azimuthDegrees == azimuth,
+              draft.elevationDegrees == elevation,
+              draft.insertionDepthMicrometres == depth,
+              draft.axialRotationDegrees == rotation
+        else {
+            throw invalid(
+                "Probe-plan mutation does not acknowledge the submitted plan identity and placement inputs."
+            )
+        }
+    }
+
+    private static func validatePlacementInput(_ input: ProbePlacementInput) throws {
+        guard input.axialRotationDegrees.isFinite,
+              (-180 ... 180).contains(input.axialRotationDegrees)
+        else { throw invalid("Placement input axial rotation is invalid.") }
+
+        if input.mode.requiresEntryCoordinates {
+            guard let entry = input.entry,
+                  entry.frameId == ProbePlanningContract.bregmaEntryFrameId,
+                  entry.origin == "bregma",
+                  entry.componentOrder == ["AP", "ML", "DV"],
+                  entry.units == "millimetre",
+                  entry.apPositiveDirection == "anterior",
+                  entry.apNegativeDirection == "posterior/back",
+                  entry.mlPositiveDirection == "right",
+                  entry.mlNegativeDirection == "left",
+                  entry.dvPositiveDirection == "dorsal/up",
+                  entry.dvNegativeDirection == "deep/ventral",
+                  [entry.apMillimetres, entry.mlMillimetres, entry.dvMillimetres]
+                    .allSatisfy(\.isFinite)
+            else { throw invalid("Placement entry AP/ML/DV semantics are invalid.") }
+        } else if input.entry != nil {
+            throw invalid("Placement mode cannot contain entry coordinates.")
+        }
+
+        let angleValues = [
+            input.azimuthDegrees,
+            input.elevationDegrees,
+            input.insertionDepthMicrometres,
+        ]
+        if input.mode.requiresAnglesAndDepth {
+            guard let frameId = input.angleFrameId,
+                  !frameId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let azimuth = input.azimuthDegrees,
+                  azimuth.isFinite, (-180 ... 180).contains(azimuth),
+                  let elevation = input.elevationDegrees,
+                  elevation.isFinite, (-90 ... 90).contains(elevation),
+                  let depth = input.insertionDepthMicrometres,
+                  depth.isFinite, depth > 0,
+                  input.angleConvention == ProbePlanningContract.angleConvention
+            else { throw invalid("Placement angle frame, angles, depth, or convention is invalid.") }
+        } else {
+            guard input.angleFrameId == nil,
+                  angleValues.allSatisfy({ $0 == nil }),
+                  input.angleConvention == nil
+            else { throw invalid("Entry-and-target mode cannot contain angle or depth inputs.") }
         }
     }
 

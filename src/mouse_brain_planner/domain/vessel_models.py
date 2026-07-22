@@ -55,7 +55,7 @@ class VascularLandmarkKind(StrEnum):
 class SubjectVascularImage(BaseModel):
     """Provenance for one unchanged image copied into a project package."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     image_uuid: UUID = Field(default_factory=uuid4)
     original_name: str = Field(min_length=1, max_length=255)
@@ -127,7 +127,7 @@ class SubjectVascularImage(BaseModel):
 class DorsalVascularLandmark(BaseModel):
     """One image-to-atlas planar landmark correspondence."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     landmark_uuid: UUID = Field(default_factory=uuid4)
     label: str = Field(min_length=1, max_length=200)
@@ -142,7 +142,7 @@ class DorsalVascularLandmark(BaseModel):
 class LandmarkResidual(BaseModel):
     """Residual for one enabled landmark in destination micrometres."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     landmark_uuid: UUID
     ap_error_um: FiniteFloat
@@ -153,7 +153,7 @@ class LandmarkResidual(BaseModel):
 class DorsalVascularRegistration(BaseModel):
     """Versioned planar mapping from image pixels to exact atlas ASR AP/ML."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     registration_uuid: UUID = Field(default_factory=uuid4)
     version: int = Field(default=1, gt=0)
@@ -232,7 +232,7 @@ class DorsalVascularRegistration(BaseModel):
 class SubjectVascularOverlayState(BaseModel):
     """Project-local display state for a registered subject image."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     image_uuid: UUID
     registration_uuid: UUID | None = None
@@ -255,7 +255,7 @@ class ReferenceVascularDensityProjectState(BaseModel):
     representing the scalar field as subject-specific vessel paths.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     target_atlas_key: str = Field(min_length=1)
     target_atlas_version: str = Field(min_length=1)

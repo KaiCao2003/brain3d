@@ -1,41 +1,69 @@
-# LAMBADA P60_606 major-vessel reference
+# LAMBADA P60_606 archived derivative and rejected qualification
 
-The application bundles a compact display derivative of the atlas-registered P60_606 graph
+The repository retains a compact evidence derivative of the atlas-registered P60_606 graph
 from Renier, de Launoit, and Skriabine's *Vascular graphs of the developing post-natal mouse
 brain*. The source is [Zenodo record 18876865](https://zenodo.org/records/18876865), DOI
 `10.5281/zenodo.18876865`, licensed under
 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). The associated Cell paper is DOI
 [`10.1016/j.cell.2026.03.013`](https://doi.org/10.1016/j.cell.2026.03.013).
 
-This is an animal-research reference layer. It is not a medical device, a subject image, or a
-live vascular measurement. It cannot establish subject-specific clearance or trajectory
-suitability.
+This derivative is not an application layer, a medical device, a subject image, or a live
+vascular measurement. It cannot establish subject-specific clearance or trajectory suitability.
 
-## Current application use
+## Runtime status
 
-The integrity-checked runs and radii are shown in three representations of the same reference:
+Coordinate qualification is rejected. The current runtime does not load, serve, display, mirror,
+or analyze the P60_606 derivative:
 
-- only radius-bearing portions intersecting the current coronal, sagittal, or horizontal slab;
-- a Dorsal depth-collapsed reference projection; and
-- tapered SceneKit tubes over the 3D Allen brain mesh.
+- `auditedReferenceMajorVessels` is absent from advertised capabilities;
+- `radiusAwareReferenceVesselAnalysis` is absent from advertised capabilities; and
+- `vessel.major.reference.get`, `vessel.major.reference.geometry`, and
+  `vessel.major.reference.analyze` fail closed with `VESSEL_GEOMETRY_UNAVAILABLE` before the
+  project, atlas, or derivative can be used to produce a payload.
 
-The primary UI does not add capillaries or infer artery/vein identity. Population density and
-subject-image registration remain archived backend paths and are not substituted for these runs.
+No geometry from this derivative may appear in a slice, Dorsal, or 3D view. It cannot support a
+probe/vessel intersection, margin, distance, conflict, no-conflict, or surgical-clearance claim.
 
-For a selected probe, algorithm `major-vessel-aabb-tapered-surface-v3` first applies a sound AABB
-candidate pass, then minimizes separation from the conservative probe envelope to the linearly
-tapered vessel surfaces. It applies the operator's declared required margin and registration
-uncertainty and requires separate acknowledgement of those inputs and incomplete coverage.
+## Coordinate and coverage qualification
 
-The source does not publish reviewed numerical bounds for its atlas-registration error or tissue
-distortion. Consequently the bundled graph can report measured loaded-geometry conflicts, but a
-trajectory with no such conflict is classified `insufficientGeometry`, not zero-conflict. The
-following wording is reserved for a future source with reviewed bounds that are covered by the
-stated uncertainty:
+The reproducible qualification reran the exact extraction against the exact pinned source graph
+and tested coordinate orientation against the exact BrainGlobe `allen_mouse_25um` v1.2
+annotation. AP and DV orientation evidence passed. Qualification still failed for two independent
+reasons:
 
-> No conflict detected within the loaded geometry and stated uncertainty assumptions.
+1. The primary source describes the specimens as mouse brain hemispheres, so the specimen does
+   not establish whole-brain coverage.
+2. The exact P60_606 graph contains no persisted graph, vertex, or edge property that binds the
+   numerical ML axis to biological hemisphere/laterality.
 
-## Bundled derivative
+Points occur numerically on both sides of the atlas-array midpoint, but that is not evidence that
+the source represents both biological hemispheres. No trustworthy source documents a permitted
+mirror transform for this exact specimen. The application therefore does not choose an ML sign,
+infer the sampled side, or mirror the derivative.
+
+The canonical report is
+[`docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+Its blocking reason codes are `SOURCE_HEMISPHERE_PROPERTY_MISSING` and
+`SOURCE_SPECIMEN_COVERAGE_IS_HEMISPHERE`; `qualifiedMapping` is null.
+
+## Rejected replacement sources
+
+No audited source met all five requirements: downloadable major-vessel centerlines/radii, an
+explicit Allen 25 µm transform, biological laterality, a documented CCF-to-bregma relationship,
+and terms that permit the required redistributed derivative.
+
+| Candidate | Why it is not integrated |
+| --- | --- |
+| [Mendeley `mjtyry6v85.1`](https://data.mendeley.com/datasets/mjtyry6v85/1) | The graph coordinates are raw specimen-space XYZ without qualified orientation, laterality, Allen registration, or bregma relationship. |
+| [Mendeley `stxvn5sv44.1`](https://data.mendeley.com/datasets/stxvn5sv44/1) | This is an averaged four-mouse 20 µm population vessel-length-density NIfTI, not major-vessel centerlines/radii; population/capillary-density display is outside the planner's accepted scope. |
+| [Hinz et al. 2021](https://www.biorxiv.org/content/10.1101/2021.10.21.465264v1) | Geometry is in a study-specific 78 µm MRI template with no Allen/bregma transform, and CC BY-NC-ND terms do not permit the required transformed redistribution. |
+| [Xiong et al. 2017](https://www.frontiersin.org/journals/neuroanatomy/articles/10.3389/fnana.2017.00128/full) | Named vessels are documented, but no downloadable graph or CCF transform is provided. |
+
+These are rejected alternatives, not integrated data. A future source must be audited against the
+same five requirements before any geometry or analysis capability can be advertised.
+
+## Archived derivative
 
 The 12.28 GB extracted graph and its 5.05 GB archive are not committed. The bundled NPZ is
 814,393 bytes with SHA-256
@@ -53,11 +81,10 @@ The derivative contains five arrays:
 | `run_offsets_i64 [11819]` | End-exclusive boundaries for 11,818 independent polylines |
 | `source_edge_indices_i32 [11818]` | Serialized source edge index for each polyline |
 
-The loader verifies the manifest and NPZ identities, inventory, dtypes, shapes, bounds, radius
-threshold, run lengths, edge ordering, and total path length. It then exposes immutable physical
-ASR coordinates in micrometres. Rendering and interaction code should obtain region identity
-from the installed Allen annotation at the displayed point rather than treating the source's 65
-coarse annotation IDs as exact leaf labels.
+The archived loader can verify the manifest and NPZ identities, inventory, dtypes, shapes,
+bounds, radius threshold, run lengths, edge ordering, and total path length. Those checks establish
+deterministic bytes and extraction behavior; they do not qualify biological laterality or
+whole-brain coverage and do not authorize runtime geometry access.
 
 ## Extraction rule
 
@@ -78,7 +105,7 @@ always pointwise. Keeping an entire edge whenever any point passes would retain 
 of path, including 632,459.33 µm whose points fail the radius criterion. Selecting edges by
 their mean radius would miss 5,597 edges that contain qualifying segments.
 
-The reviewed output is:
+The reproduced derivative output is:
 
 - 16,156 source edges pass the conservative edge-maximum prefilter.
 - 78,048 source geometry points are finite, in bounds, and at least 15 µm in radius.
@@ -117,9 +144,22 @@ file, validates contiguous source edge ranges, asserts every reviewed extraction
 NPZ members in a fixed order with fixed ZIP metadata, rebuilds the asset in a temporary
 directory, and requires both builds to have identical bytes before writing the manifest.
 
+To reproduce the separate qualification report, provide the exact extracted graph and exact
+BrainGlobe atlas package directory:
+
+```bash
+uv run python scripts/qualify_lambada_coordinates.py \
+  /absolute/path/to/606_graph_2024-12-03.gt \
+  /absolute/path/to/allen_mouse_25um_v1.2 \
+  --output /absolute/path/to/qualification.json
+```
+
+A rejected run exits nonzero by design. Compare its canonical bytes and SHA-256 with the checked-in
+report; do not promote a locally edited or differently sourced report.
+
 ## Mandatory interpretation limits
 
-- Animal research use only; this derivative is not a medical device and is not validated for
+- Evidence use only; this derivative is not displayed or analyzed and is not validated for
   surgery.
 - The source is an atlas-registered fixed and cleared P60 mouse-brain reference, not live or
   subject-specific vasculature.
@@ -127,8 +167,10 @@ directory, and requires both builds to have identical bytes before writing the m
   suppresses points below a 15 µm radius, so missing vessels are expected.
 - Registration error, tissue distortion, biological variation, and omitted vessels are not
   bounded by this graph.
-- The exact sex and sampled side of P60_606 are unpublished. No artery-versus-vein identity is
-  available.
+- The primary record describes hemisphere specimens, while the exact graph has no persisted
+  hemisphere/laterality binding. Whole-brain coverage and biological ML polarity are therefore
+  unqualified, and mirroring is prohibited.
+- No artery-versus-vein identity is available.
 - The source workflow corrected endpoints, linearly reconnected nearby endpoints, and removed
   short terminal offshoots. Some paths are reconstructed rather than directly observed.
 - Radii use the source's mean atlas-resampling scale, not a local Jacobian correction, and fixed

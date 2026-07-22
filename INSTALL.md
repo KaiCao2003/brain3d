@@ -77,12 +77,13 @@ above after reviewing [Atlas Data](ATLAS_DATA.md) and the
 | --- | ---: |
 | 25 µm reference plus annotation arrays | 462,274,560 bytes / 0.43 GiB |
 | Optional pinned population-density archive | 311,493,514 bytes |
-| Bundled LAMBADA P60_606 major-vessel derivative | 814,393 bytes |
+| Packaged archived P60_606 derivative evidence (not loaded or served) | 814,393 bytes |
 
-The population-density workflow is archived and absent from the primary UI. The bundled LAMBADA
-reference is integrity-checked and filtered to diameter ≥30 µm; it is one fixed cleared specimen,
-not subject-specific data. Peak memory and temporary disk use are higher. Existing 10 µm cache
-data is ignored.
+The population-density workflow is archived and absent from the primary UI. The P60_606
+derivative is also archived: although its bytes and diameter-≥30 µm extraction are
+integrity-checked, coordinate qualification rejected biological laterality and whole-brain use.
+The runtime does not load, serve, display, mirror, or analyze it. Peak memory and temporary disk
+use are higher. Existing 10 µm cache data is ignored.
 
 ## Application-owned locations
 
@@ -120,8 +121,8 @@ uncached atlas needs an explicit networked download; a validated cached atlas ca
 ### 3D scene does not load
 
 Confirm the 25 µm atlas is open and the Python bridge remains connected. The SceneKit view requires
-the verified atlas scene descriptor/mesh and rejects malformed or mismatched geometry. The removed
-Qt renderer is not a fallback product.
+the backend-provided, schema-checked atlas scene descriptor and mesh and rejects malformed or
+mismatched geometry. The removed Qt renderer is not a fallback product.
 
 ### Project validation fails
 

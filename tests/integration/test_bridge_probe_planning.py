@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 from pathlib import Path
 
 import numpy as np
@@ -20,6 +23,9 @@ from mouse_brain_planner.bridge.planning import (
     register_planning_handlers,
 )
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
+from mouse_brain_planner.domain.project_models import PlannerProject
+from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
+from mouse_brain_planner.domain.transform_models import AnatomicalTransform, TransformMethod
 from mouse_brain_planner.probes.catalog import (
     GENERIC_TEST_MODEL_ID,
     GENERIC_TEST_MODEL_VERSION,
@@ -65,6 +71,8 @@ def _calibrated_target(
     added = _call(
         dispatcher,
         "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
         label="deep target",
         apMillimetres=-0.001,
         mlMillimetres=-0.001,
@@ -98,6 +106,66 @@ def _create_plan(
         axialRotationDegrees=0,
         customGeometryAcknowledged=True,
     )
+
+
+def _calibration_with_changed_snapshot(
+    calibration: AtlasRegisteredCalibration,
+) -> AtlasRegisteredCalibration:
+    changed_transform = calibration.atlas_transform.model_copy(
+        update={"notes": "same identity, deliberately changed calibration snapshot"}
+    )
+    return calibration.model_copy(update={"atlas_transform": changed_transform})
+
+
+def test_project_rejects_probe_plan_bound_to_different_calibration_snapshot() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+
+    changed = _calibration_with_changed_snapshot(session.project.calibrations[0])
+    payload = session.project.model_dump(mode="python")
+    payload["calibrations"] = [changed.model_dump(mode="python")]
+
+    with pytest.raises(ValueError, match="probe plan calibration digest"):
+        PlannerProject.model_validate(payload)
+
+
+def test_region_export_rejects_changed_calibration_snapshot_without_audit_mutation() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    created = _create_plan(dispatcher, session, target_id)
+    plan = created["plan"]
+    assert isinstance(plan, dict)
+    assert session.project is not None
+    _call(
+        dispatcher,
+        "probe.region.analyze",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        planId=plan["planId"],
+        expectedPlanInputSha256=plan["inputSha256"],
+    )
+    assert session.project is not None
+    changed = _calibration_with_changed_snapshot(session.project.calibrations[0])
+    session.project = session.project.model_copy(update={"calibrations": [changed]})
+    revision_before_export = session.project_revision
+    event_count_before_export = len(session.project.event_log)
+
+    with pytest.raises(BridgeError) as mismatch:
+        _call(
+            dispatcher,
+            "probe.region.export",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=session.project_revision,
+            planId=plan["planId"],
+            expectedPlanInputSha256=plan["inputSha256"],
+            format="json",
+        )
+
+    assert mismatch.value.code == "CALIBRATION_DIGEST_MISMATCH"
+    assert session.project_revision == revision_before_export
+    assert len(session.project.event_log) == event_count_before_export
 
 
 def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path) -> None:
@@ -161,7 +229,12 @@ def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path
     assert manipulator["insertionDepthMicrometres"] == 4
     provenance = plan["provenance"]
     assert isinstance(provenance, dict)
-    assert provenance["planningAlgorithmVersion"] == "calibrated-stereotaxic-probe-transform-v2"
+    assert provenance["planningAlgorithmVersion"] == "calibrated-explicit-placement-mode-v3"
+    placement_input = plan["placementInput"]
+    assert isinstance(placement_input, dict)
+    assert placement_input["mode"] == "STEREOTAXIC_TARGET_MANIPULATOR"
+    assert placement_input["entry"] is None
+    assert placement_input["angleFrameId"].startswith("STEREOTAXIC:")
     atlas_frame = placement["atlasFrame"]
     assert isinstance(atlas_frame, dict)
     target = atlas_frame["target"]
@@ -201,26 +274,151 @@ def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path
 
     revision_before_export = session.project_revision
     assert session.project is not None
+    event_count_before_export = len(session.project.event_log)
     csv_export = _call(
         dispatcher,
         "probe.region.export",
         projectId=str(session.project.project_uuid),
+        expectedProjectRevision=revision_before_export,
         planId=plan_id,
         expectedPlanInputSha256=plan_sha,
         format="csv",
     )
+    assert csv_export["status"] == "generated"
     assert csv_export["projectMutated"] is False
     assert "region_segment" in str(csv_export["content"])
     assert "recording_site" in str(csv_export["content"])
+    csv_rows = list(csv.DictReader(io.StringIO(str(csv_export["content"]))))
+    assert csv_rows
+    csv_provenance = csv_rows[0]
+    assert csv_provenance["export_schema_version"] == "1"
+    assert csv_provenance["atlas_identifier"] == "allen_mouse_25um"
+    assert csv_provenance["atlas_version"] == "1.2"
+    assert csv_provenance["atlas_metadata_sha256"] == "a" * 64
+    assert csv_provenance["coordinate_convention"] == session.project.coordinate_convention
+    assert csv_provenance["calibration_id"] == plan["calibrationId"]
+    assert csv_provenance["calibration_sha256"] == plan["provenance"]["calibrationSha256"]  # type: ignore[index]
+    assert csv_provenance["transform_source_frame_id"].startswith("STEREOTAXIC:")
+    assert csv_provenance["transform_destination_frame_id"].startswith(
+        "ATLAS_CANONICAL_AP_ML_DV_UM:"
+    )
+    assert len(json.loads(csv_provenance["transform_matrix_row_major_ap_ml_dv"])) == 16
     assert session.project_revision == revision_before_export
+    assert csv_export["projectRevision"] == revision_before_export
+    assert len(session.project.event_log) == event_count_before_export
+
+    json_export = _call(
+        dispatcher,
+        "probe.region.export",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=revision_before_export,
+        planId=plan_id,
+        expectedPlanInputSha256=plan_sha,
+        format="json",
+    )
+    json_payload = json.loads(str(json_export["content"]))
+    assert json_payload["exportKind"] == "probe-region-analysis"
+    assert json_payload["exportSchemaVersion"] == 1
+    assert json_payload["coordinateConvention"] == session.project.coordinate_convention
+    assert json_payload["atlas"] == {
+        "identifier": "allen_mouse_25um",
+        "metadataSha256": "a" * 64,
+        "version": "1.2",
+    }
+    assert json_payload["calibration"]["calibrationId"] == plan["calibrationId"]
+    assert (
+        json_payload["calibration"]["calibrationSha256"] == plan["provenance"]["calibrationSha256"]
+    )
+    assert len(json_payload["calibration"]["transform"]["matrixRowMajorAPMLDV"]) == 16
+    assert json_payload["analysis"]["analysis_sha256"] == analysis["analysisSha256"]
+    assert session.project_revision == revision_before_export
+    assert len(session.project.event_log) == event_count_before_export
+
+    # Generation precedes the native save panel. A cancel or failed write must
+    # leave no durable claim that an export occurred.
+    _call(dispatcher, "state.get")
+    assert session.project_revision == revision_before_export
+    assert len(session.project.event_log) == event_count_before_export
+
+    with pytest.raises(BridgeError) as mismatched_confirmation:
+        _call(
+            dispatcher,
+            "probe.region.export.confirm",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before_export,
+            planId=plan_id,
+            expectedPlanInputSha256=plan_sha,
+            analysisSha256=csv_export["analysisSha256"],
+            format="csv",
+            contentSha256="f" * 64,
+        )
+    assert mismatched_confirmation.value.code == "EXPORT_CONTENT_MISMATCH"
+    assert session.project_revision == revision_before_export
+    assert len(session.project.event_log) == event_count_before_export
+
+    confirmed = _call(
+        dispatcher,
+        "probe.region.export.confirm",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=revision_before_export,
+        planId=plan_id,
+        expectedPlanInputSha256=plan_sha,
+        analysisSha256=csv_export["analysisSha256"],
+        format="csv",
+        contentSha256=csv_export["contentSha256"],
+    )
+    assert confirmed["status"] == "exported"
+    assert confirmed["projectMutated"] is True
+    assert session.project_revision == revision_before_export + 1
+    assert confirmed["projectRevision"] == session.project_revision
+    assert session.project is not None
+    export_event = session.project.event_log[-1]
+    assert export_event.action == "probe-region-analysis-exported"
+    export_details = json.loads(export_event.details or "")
+    assert export_details == {
+        "analysisSha256": analysis["analysisSha256"],
+        "contentSha256": csv_export["contentSha256"],
+        "format": "csv",
+        "planId": plan_id,
+        "planInputSha256": plan_sha,
+    }
+    state = _call(dispatcher, "state.get")
+    state_project = state["project"]
+    assert isinstance(state_project, dict)
+    state_events = state_project["eventLog"]
+    assert isinstance(state_events, list)
+    assert state_events[-1]["action"] == "probe-region-analysis-exported"
+    event_count = len(session.project.event_log)
+    with pytest.raises(BridgeError) as stale_export:
+        _call(
+            dispatcher,
+            "probe.region.export",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before_export,
+            planId=plan_id,
+            expectedPlanInputSha256=plan_sha,
+            format="json",
+        )
+    assert stale_export.value.code == "PROJECT_REVISION_CONFLICT"
+    assert len(session.project.event_log) == event_count
 
     destination = tmp_path / "probe.mouseplan"
-    _call(dispatcher, "project.save", path=str(destination))
+    _call(
+        dispatcher,
+        "project.save",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        path=str(destination),
+    )
     reopened_dispatcher, reopened_session = _probe_dispatcher()
     _call(reopened_dispatcher, "project.open", path=str(destination))
     assert reopened_session.project is not None
     assert len(reopened_session.project.probe_plans) == 1
     assert len(reopened_session.project.probe_region_analyses) == 1
+    assert any(
+        event.action == "probe-region-analysis-exported"
+        for event in reopened_session.project.event_log
+    )
     reopened = _call(
         reopened_dispatcher,
         "probe.plan.get",
@@ -253,6 +451,326 @@ def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path
     assert updated["priorAnalysisCleared"] is True
     assert reopened_session.project is not None
     assert reopened_session.project.probe_region_analyses == []
+
+
+@pytest.mark.parametrize(
+    ("mode", "specific", "expected_method", "expects_manipulator"),
+    (
+        (
+            "ENTRY_AND_TARGET",
+            {
+                "entryAPMillimetres": -0.001,
+                "entryMLMillimetres": -0.001,
+                "entryDVMillimetres": 0.003,
+            },
+            "entry-plus-target",
+            False,
+        ),
+        (
+            "ENTRY_ANGLES_DEPTH",
+            {
+                "entryAPMillimetres": -0.001,
+                "entryMLMillimetres": -0.001,
+                "entryDVMillimetres": 0.003,
+                "azimuthDegrees": 0,
+                "elevationDegrees": -90,
+                "insertionDepthMicrometres": 4,
+            },
+            "entry-plus-angles-depth",
+            False,
+        ),
+        (
+            "TARGET_ANGLES_DEPTH",
+            {
+                "azimuthDegrees": 0,
+                "elevationDegrees": -90,
+                "insertionDepthMicrometres": 4,
+            },
+            "target-plus-angles-depth",
+            False,
+        ),
+        (
+            "STEREOTAXIC_TARGET_MANIPULATOR",
+            {
+                "azimuthDegrees": 0,
+                "elevationDegrees": -90,
+                "insertionDepthMicrometres": 4,
+            },
+            "stereotaxic-target-plus-manipulator-angles",
+            True,
+        ),
+    ),
+)
+def test_all_explicit_placement_modes_are_product_reachable_and_persist_exact_inputs(
+    mode: str,
+    specific: dict[str, object],
+    expected_method: str,
+    expects_manipulator: bool,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    assert session.project is not None
+    created = _call(
+        dispatcher,
+        "probe.plan.create",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        targetId=target_id,
+        modelId=GENERIC_TEST_MODEL_ID,
+        modelVersion=GENERIC_TEST_MODEL_VERSION,
+        name=f"{mode} test",
+        placementMode=mode,
+        axialRotationDegrees=12,
+        customGeometryAcknowledged=True,
+        **specific,
+    )
+    plan = created["plan"]
+    assert isinstance(plan, dict)
+    assert plan["placementMode"] == mode
+    assert plan["placement"]["method"] == expected_method  # type: ignore[index]
+    assert (plan["manipulatorInput"] is not None) is expects_manipulator
+    placement_input = plan["placementInput"]
+    assert isinstance(placement_input, dict)
+    assert placement_input["mode"] == mode
+    assert placement_input["axialRotationDegrees"] == 12
+    if mode.startswith("ENTRY_"):
+        entry = placement_input["entry"]
+        assert isinstance(entry, dict)
+        assert entry["frameId"] == "BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED"
+        assert entry["origin"] == "bregma"
+        assert entry["componentOrder"] == ["AP", "ML", "DV"]
+        assert entry["apNegativeDirection"] == "posterior/back"
+        assert entry["mlNegativeDirection"] == "left"
+        assert entry["dvNegativeDirection"] == "deep/ventral"
+    else:
+        assert placement_input["entry"] is None
+    assert session.project.probe_plans[0].placement_input is not None
+
+
+@pytest.mark.parametrize(
+    ("mode", "specific"),
+    (
+        (
+            "ENTRY_AND_TARGET",
+            {
+                "entryAPMillimetres": -0.001,
+                "entryMLMillimetres": -0.001,
+                "entryDVMillimetres": 0.003,
+            },
+        ),
+        (
+            "ENTRY_ANGLES_DEPTH",
+            {
+                "entryAPMillimetres": -0.001,
+                "entryMLMillimetres": -0.001,
+                "entryDVMillimetres": 0.003,
+                "azimuthDegrees": 0,
+                "elevationDegrees": -90,
+                "insertionDepthMicrometres": 4,
+            },
+        ),
+    ),
+)
+def test_entry_modes_transform_the_complete_pose_through_similarity_calibration(
+    mode: str,
+    specific: dict[str, object],
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    params = _create_params(session)
+    params["atlasTransformMethod"] = "similarity"
+    atlas_landmarks = params["atlasLandmarks"]
+    assert isinstance(atlas_landmarks, dict)
+    # The stereotaxic baselines are 2 µm. These 3 µm atlas baselines therefore
+    # produce a proper 1.5x similarity fit without changing handedness.
+    atlas_landmarks["lambdaPoint"] = {
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "atlasIdentifier": "allen_mouse_25um",
+        "atlasVersion": "1.2",
+        "componentOrder": ["AP", "DV", "ML"],
+        "units": "micrometre",
+        "apMicrometres": 6.5,
+        "dvMicrometres": 3.5,
+        "mlMicrometres": 3.5,
+    }
+    atlas_landmarks["leftSkull"] = {
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "atlasIdentifier": "allen_mouse_25um",
+        "atlasVersion": "1.2",
+        "componentOrder": ["AP", "DV", "ML"],
+        "units": "micrometre",
+        "apMicrometres": 3.5,
+        "dvMicrometres": 3.5,
+        "mlMicrometres": 6.5,
+    }
+    atlas_landmarks["rightSkull"] = {
+        "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+        "atlasIdentifier": "allen_mouse_25um",
+        "atlasVersion": "1.2",
+        "componentOrder": ["AP", "DV", "ML"],
+        "units": "micrometre",
+        "apMicrometres": 3.5,
+        "dvMicrometres": 3.5,
+        "mlMicrometres": 0.5,
+    }
+    created_calibration = _call(dispatcher, "calibration.create", **params)
+    calibration = created_calibration["calibration"]
+    assert isinstance(calibration, dict)
+    calibration_id = calibration["calibrationId"]
+    assert isinstance(calibration_id, str)
+    _set_active(dispatcher, session, calibration_id)
+    assert session.project is not None
+    added = _call(
+        dispatcher,
+        "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        label="similarity target",
+        apMillimetres=-0.001,
+        mlMillimetres=-0.001,
+        dvMillimetres=-0.001,
+    )
+    target = added["target"]
+    assert isinstance(target, dict)
+    response = _call(
+        dispatcher,
+        "probe.plan.create",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        targetId=target["targetId"],
+        modelId=GENERIC_TEST_MODEL_ID,
+        modelVersion=GENERIC_TEST_MODEL_VERSION,
+        name=f"{mode} similarity",
+        placementMode=mode,
+        axialRotationDegrees=0,
+        customGeometryAcknowledged=True,
+        **specific,
+    )
+    assert response["status"] == "created"
+    stored = session.project.probe_plans[-1]
+    assert stored.placement.model_to_placement_uniform_scale == pytest.approx(1.5)
+    assert stored.placement.insertion_depth_um == pytest.approx(6.0)
+    if mode == "ENTRY_ANGLES_DEPTH":
+        assert stored.placement_input is not None
+        assert stored.placement_input.angle_frame_id is not None
+        assert stored.placement_input.angle_frame_id.startswith("STEREOTAXIC:")
+
+
+@pytest.mark.parametrize(
+    ("mode", "specific"),
+    (
+        (
+            "ENTRY_AND_TARGET",
+            {
+                "entryAPMillimetres": -0.001,
+                "entryMLMillimetres": -0.001,
+                "entryDVMillimetres": 0.003,
+            },
+        ),
+        (
+            "ENTRY_ANGLES_DEPTH",
+            {
+                "entryAPMillimetres": -0.001,
+                "entryMLMillimetres": -0.001,
+                "entryDVMillimetres": 0.003,
+                "azimuthDegrees": 0,
+                "elevationDegrees": -90,
+                "insertionDepthMicrometres": 4,
+            },
+        ),
+    ),
+)
+def test_entry_modes_reject_affine_calibration_before_projecting_probe_geometry(
+    mode: str,
+    specific: dict[str, object],
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    assert session.project is not None
+    original = session.project.calibrations[0]
+    matrix = list(original.atlas_transform.matrix_row_major)
+    matrix[1] += 0.2
+    affine = AnatomicalTransform.model_validate(
+        {
+            **original.atlas_transform.model_dump(mode="python"),
+            "method": TransformMethod.AFFINE,
+            "matrix_row_major": tuple(matrix),
+        }
+    )
+    modified = AtlasRegisteredCalibration.model_validate(
+        {
+            **original.model_dump(mode="python"),
+            "atlas_transform": affine,
+        }
+    )
+    session.project.calibrations[0] = modified
+    revision = session.project_revision
+    with pytest.raises(BridgeError) as rejected:
+        _call(
+            dispatcher,
+            "probe.plan.create",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision,
+            targetId=target_id,
+            modelId=GENERIC_TEST_MODEL_ID,
+            modelVersion=GENERIC_TEST_MODEL_VERSION,
+            name=f"{mode} affine rejection",
+            placementMode=mode,
+            axialRotationDegrees=0,
+            customGeometryAcknowledged=True,
+            **specific,
+        )
+    assert rejected.value.code == "PLACEMENT_INVALID"
+    assert "affine transform would shear" in rejected.value.details["reason"]
+    assert session.project_revision == revision
+    assert session.project.probe_plans == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"placementMode": "UNKNOWN"},
+        {"placementMode": "ENTRY_AND_TARGET"},
+        {
+            "placementMode": "ENTRY_AND_TARGET",
+            "entryAPMillimetres": 0,
+            "entryMLMillimetres": 0,
+            "entryDVMillimetres": 0,
+            "azimuthDegrees": 0,
+        },
+        {
+            "placementMode": "TARGET_ANGLES_DEPTH",
+            "entryAPMillimetres": 0,
+            "entryMLMillimetres": 0,
+            "entryDVMillimetres": 0,
+        },
+    ),
+)
+def test_explicit_placement_modes_reject_unknown_incomplete_or_irrelevant_inputs(
+    overrides: dict[str, object],
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    assert session.project is not None
+    params: dict[str, object] = {
+        "projectId": str(session.project.project_uuid),
+        "expectedProjectRevision": session.project_revision,
+        "targetId": target_id,
+        "modelId": GENERIC_TEST_MODEL_ID,
+        "modelVersion": GENERIC_TEST_MODEL_VERSION,
+        "name": "invalid placement",
+        "axialRotationDegrees": 0,
+        "customGeometryAcknowledged": True,
+        **overrides,
+    }
+    if overrides.get("placementMode") == "TARGET_ANGLES_DEPTH":
+        params.update(
+            azimuthDegrees=0,
+            elevationDegrees=-90,
+            insertionDepthMicrometres=4,
+        )
+    with pytest.raises(BridgeError) as rejected:
+        _call(dispatcher, "probe.plan.create", **params)
+    assert rejected.value.code in {"INVALID_PARAMS", "PLACEMENT_INVALID"}
 
 
 def test_rotated_calibration_transforms_manipulator_direction_into_atlas_frame() -> None:
@@ -301,6 +819,8 @@ def test_rotated_calibration_transforms_manipulator_direction_into_atlas_frame()
     added = _call(
         dispatcher,
         "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
         label="rotated target",
         apMillimetres=0,
         mlMillimetres=0,

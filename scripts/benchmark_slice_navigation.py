@@ -52,7 +52,11 @@ def main() -> int:
     register_planning_handlers(dispatcher)
     created = dispatcher.dispatch(
         "project.new",
-        {"protocolVersion": 1, "animalResearchOnlyAcknowledged": True},
+        {
+            "protocolVersion": 1,
+            "animalResearchOnlyAcknowledged": True,
+            "subjectId": "slice-navigation-benchmark-mouse",
+        },
     )
     project_id = created["projectId"]
     if not isinstance(project_id, str):

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from typing import get_args
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel
 from tests.fixtures import make_allen_metadata_test_double
 
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
@@ -12,6 +14,7 @@ from mouse_brain_planner.domain.project_models import (
     MAX_PROJECT_EVENTS,
     PlannerProject,
     ProjectEvent,
+    RegionDisplayState,
     ViewerRegionSelection,
     ViewerSliceDepths,
 )
@@ -96,6 +99,50 @@ def test_project_model_rejects_oversized_imported_event_log() -> None:
 
     with pytest.raises(ValueError, match="at most 1000 items"):
         PlannerProject.model_validate(payload)
+
+
+def test_current_project_schema_rejects_unknown_persisted_fields() -> None:
+    payload = PlannerProject().model_dump()
+    payload["misspelled_project_field"] = "must not be discarded"
+
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        PlannerProject.model_validate(payload)
+
+
+def test_every_model_reachable_from_persisted_project_forbids_unknown_fields() -> None:
+    """Keep nested package validation fail-closed as the project graph evolves."""
+
+    reachable: set[type[BaseModel]] = set()
+
+    def visit_annotation(annotation: object) -> None:
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+            visit_model(annotation)
+        for argument in get_args(annotation):
+            visit_annotation(argument)
+
+    def visit_model(model: type[BaseModel]) -> None:
+        if model in reachable:
+            return
+        reachable.add(model)
+        for field in model.model_fields.values():
+            visit_annotation(field.annotation)
+
+    visit_model(PlannerProject)
+
+    permissive = sorted(
+        f"{model.__module__}.{model.__name__}"
+        for model in reachable
+        if model.model_config.get("extra") != "forbid"
+    )
+    assert len(reachable) >= 50
+    assert permissive == []
+
+
+def test_project_event_and_region_display_reject_unknown_fields() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        ProjectEvent.model_validate({"action": "test", "unexpected": True})
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        RegionDisplayState.model_validate({"structure_id": 1, "visible": True, "unexpected": True})
 
 
 def test_renderer_anchor_requires_matching_atlas_identity_and_bounds() -> None:

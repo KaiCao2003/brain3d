@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import json
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -20,7 +21,6 @@ from mouse_brain_planner.analysis.probe_region_service import (
 )
 from mouse_brain_planner.analysis.region_traversal import RegionTraversalInputError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
-from mouse_brain_planner.bridge.major_vessels import major_vessel_analysis_result_payload
 from mouse_brain_planner.bridge.protocol_validation import (
     boolean_value,
     finite_number,
@@ -56,14 +56,18 @@ from mouse_brain_planner.domain.probe_models import (
 )
 from mouse_brain_planner.domain.probe_plan_models import (
     PROBE_PLANNING_ALGORITHM_VERSION,
+    STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+    ProbePlacementMode,
     ProbePlanRecord,
     ProbeRegionAnalysisBundle,
 )
 from mouse_brain_planner.domain.project_models import MAX_PROBE_PLANS, PlannerProject
 from mouse_brain_planner.domain.region_models import AtlasPhysicalPointAPMLDV
-from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
+from mouse_brain_planner.domain.stereotaxy_models import (
+    AtlasRegisteredCalibration,
+    atlas_registered_calibration_sha256,
+)
 from mouse_brain_planner.domain.transform_models import AnatomicalPoint
-from mouse_brain_planner.domain.vessel_plan_models import ProbeVesselAnalysisBundle
 from mouse_brain_planner.probes.catalog import (
     PROBE_CATALOG_VERSION,
     get_probe_model,
@@ -108,6 +112,7 @@ class ProbePlanningBridge:
         self.dispatcher.register("probe.region.get", self.region_get)
         self.dispatcher.register("probe.region.analyze", self.region_analyze)
         self.dispatcher.register("probe.region.export", self.region_export)
+        self.dispatcher.register("probe.region.export.confirm", self.region_export_confirm)
         self.dispatcher.declare_capability("probeCatalog")
         self.dispatcher.declare_capability("calibratedProbePlanning")
         self.dispatcher.declare_capability("exactProbeRegionTraversal")
@@ -163,7 +168,6 @@ class ProbePlanningBridge:
         project = self._validated_project(params["projectId"])
         plan = _find_plan(project, params["planId"])
         analysis = _find_analysis(project, plan.plan_uuid, required=False)
-        vessel_analysis = _find_vessel_analysis(project, plan.plan_uuid)
         project_revision = self.get_revision()
         return {
             "protocolVersion": PROTOCOL_VERSION,
@@ -172,24 +176,19 @@ class ProbePlanningBridge:
             "projectRevision": project_revision,
             "plan": _plan_detail(plan, project.atlas),
             "regionAnalysis": (None if analysis is None else _region_bundle_payload(analysis)),
-            "majorVesselAnalysis": (
-                None
-                if vessel_analysis is None
-                else major_vessel_analysis_result_payload(
-                    vessel_analysis,
-                    project_uuid=project.project_uuid,
-                    project_revision=project_revision,
-                )
-            ),
+            # Legacy bundles stay in the project for byte-preserving audit/history,
+            # but the current source failed coordinate qualification. Never revive
+            # a stale result through the product protocol while geometry is gated.
+            "majorVesselAnalysis": None,
         }
 
     def plan_create(self, params: Mapping[str, object]) -> JsonObject:
-        required = _PLAN_INPUT_FIELDS | {
+        required = _PLAN_COMMON_INPUT_FIELDS | {
             "protocolVersion",
             "projectId",
             "expectedProjectRevision",
         }
-        validate_params(params, required=required)
+        validate_params(params, required=required, optional=_PLAN_MODE_INPUT_FIELDS)
         require_protocol(params)
         project = self._validated_mutation_project(params)
         if len(project.probe_plans) >= MAX_PROBE_PLANS:
@@ -211,14 +210,14 @@ class ProbePlanningBridge:
         )
 
     def plan_update(self, params: Mapping[str, object]) -> JsonObject:
-        required = _PLAN_INPUT_FIELDS | {
+        required = _PLAN_COMMON_INPUT_FIELDS | {
             "protocolVersion",
             "projectId",
             "expectedProjectRevision",
             "planId",
             "expectedPlanInputSha256",
         }
-        validate_params(params, required=required)
+        validate_params(params, required=required, optional=_PLAN_MODE_INPUT_FIELDS)
         require_protocol(params)
         project = self._validated_mutation_project(params)
         existing = _find_plan(project, params["planId"])
@@ -425,39 +424,28 @@ class ProbePlanningBridge:
             required={
                 "protocolVersion",
                 "projectId",
+                "expectedProjectRevision",
                 "planId",
                 "expectedPlanInputSha256",
                 "format",
             },
         )
         require_protocol(params)
-        project = self._validated_project(params["projectId"])
+        project = self._validated_mutation_project(params)
         plan = _find_plan(project, params["planId"])
         _require_plan_hash(plan, params["expectedPlanInputSha256"])
         analysis = _find_analysis(project, plan.plan_uuid, required=True)
         assert analysis is not None
-        export_format = text_value(params["format"], "format", maximum=10).lower()
-        if export_format == "csv":
-            content = _region_csv(plan, analysis)
-            mime_type = "text/csv"
-            file_extension = "csv"
-        elif export_format == "json":
-            content = analysis.model_dump_json(indent=2)
-            mime_type = "application/json"
-            file_extension = "json"
-        else:
-            raise BridgeError(
-                "INVALID_PARAMS",
-                "format must be exactly csv or json.",
-            )
-        if len(content) > MAX_EXPORT_CHARACTERS:
-            raise BridgeError(
-                "EXPORT_TOO_LARGE",
-                "The in-memory region export exceeds the bridge response limit.",
-            )
+        export_format, content, mime_type, file_extension = _region_export_content(
+            project,
+            plan,
+            analysis,
+            params["format"],
+        )
+        content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
         return {
             "protocolVersion": PROTOCOL_VERSION,
-            "status": "exportedReadOnly",
+            "status": "generated",
             "projectId": str(project.project_uuid),
             "projectRevision": self.get_revision(),
             "planId": str(plan.plan_uuid),
@@ -467,9 +455,80 @@ class ProbePlanningBridge:
             "mimeType": mime_type,
             "suggestedFileName": f"probe-regions-{plan.plan_uuid}.{file_extension}",
             "content": content,
-            "contentSha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            "contentSha256": content_sha256,
             "projectMutated": False,
         }
+
+    def region_export_confirm(self, params: Mapping[str, object]) -> JsonObject:
+        """Record a completed client-side atomic write, never an attempted export."""
+
+        validate_params(
+            params,
+            required={
+                "protocolVersion",
+                "projectId",
+                "expectedProjectRevision",
+                "planId",
+                "expectedPlanInputSha256",
+                "analysisSha256",
+                "format",
+                "contentSha256",
+            },
+        )
+        require_protocol(params)
+        project = self._validated_mutation_project(params)
+        plan = _find_plan(project, params["planId"])
+        _require_plan_hash(plan, params["expectedPlanInputSha256"])
+        analysis = _find_analysis(project, plan.plan_uuid, required=True)
+        assert analysis is not None
+        expected_analysis_sha256 = sha256_value(params["analysisSha256"], "analysisSha256")
+        if expected_analysis_sha256 != analysis.analysis_sha256:
+            raise BridgeError(
+                "ANALYSIS_STALE",
+                "The saved export refers to an older probe-region analysis.",
+                details={"actualAnalysisSha256": analysis.analysis_sha256},
+            )
+        export_format, content, _mime_type, _file_extension = _region_export_content(
+            project,
+            plan,
+            analysis,
+            params["format"],
+        )
+        actual_content_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        expected_content_sha256 = sha256_value(params["contentSha256"], "contentSha256")
+        if expected_content_sha256 != actual_content_sha256:
+            raise BridgeError(
+                "EXPORT_CONTENT_MISMATCH",
+                "The saved export digest does not match the current exact analysis export.",
+                details={"actualContentSha256": actual_content_sha256},
+            )
+        updated = project.model_copy(deep=True)
+        updated.touch(
+            "probe-region-analysis-exported",
+            json.dumps(
+                {
+                    "analysisSha256": analysis.analysis_sha256,
+                    "contentSha256": actual_content_sha256,
+                    "format": export_format,
+                    "planId": str(plan.plan_uuid),
+                    "planInputSha256": plan.input_sha256,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+        return self._publish(
+            updated,
+            status="exported",
+            extra={
+                "planId": str(plan.plan_uuid),
+                "planInputSha256": plan.input_sha256,
+                "analysisSha256": analysis.analysis_sha256,
+                "format": export_format,
+                "contentSha256": actual_content_sha256,
+                "projectMutated": True,
+            },
+        )
 
     def _validated_project(self, raw_project_id: object) -> PlannerProject:
         project = self.get_project()
@@ -526,6 +585,7 @@ class ProbePlanningBridge:
                 "The requested bregma target is not in the current project.",
             )
         model = _catalog_model(params)
+        placement_mode = _placement_mode(params)
         try:
             plan, _ = build_calibrated_probe_plan(
                 target=target,
@@ -533,20 +593,23 @@ class ProbePlanningBridge:
                 atlas=project.atlas,
                 model=model,
                 name=text_value(params["name"], "name", maximum=200),
-                azimuth_deg=finite_number(
-                    params["azimuthDegrees"],
+                azimuth_deg=_optional_finite_number(
+                    params,
+                    "azimuthDegrees",
                     "azimuthDegrees",
                     minimum=-180,
                     maximum=180,
                 ),
-                elevation_deg=finite_number(
-                    params["elevationDegrees"],
+                elevation_deg=_optional_finite_number(
+                    params,
+                    "elevationDegrees",
                     "elevationDegrees",
                     minimum=-90,
                     maximum=90,
                 ),
-                insertion_depth_um=finite_number(
-                    params["insertionDepthMicrometres"],
+                insertion_depth_um=_optional_finite_number(
+                    params,
+                    "insertionDepthMicrometres",
                     "insertionDepthMicrometres",
                     minimum=0,
                     minimum_inclusive=False,
@@ -560,6 +623,22 @@ class ProbePlanningBridge:
                 custom_geometry_acknowledged=boolean_value(
                     params["customGeometryAcknowledged"],
                     "customGeometryAcknowledged",
+                ),
+                placement_mode=placement_mode,
+                entry_ap_mm=_optional_finite_number(
+                    params,
+                    "entryAPMillimetres",
+                    "entryAPMillimetres",
+                ),
+                entry_ml_mm=_optional_finite_number(
+                    params,
+                    "entryMLMillimetres",
+                    "entryMLMillimetres",
+                ),
+                entry_dv_mm=_optional_finite_number(
+                    params,
+                    "entryDVMillimetres",
+                    "entryDVMillimetres",
                 ),
                 plan_uuid=plan_uuid,
                 plan_version=plan_version,
@@ -615,16 +694,23 @@ class ProbePlanningBridge:
         }
 
 
-_PLAN_INPUT_FIELDS: Final[set[str]] = {
+_PLAN_COMMON_INPUT_FIELDS: Final[set[str]] = {
     "targetId",
     "modelId",
     "modelVersion",
     "name",
+    "axialRotationDegrees",
+    "customGeometryAcknowledged",
+}
+
+_PLAN_MODE_INPUT_FIELDS: Final[set[str]] = {
+    "placementMode",
+    "entryAPMillimetres",
+    "entryMLMillimetres",
+    "entryDVMillimetres",
     "azimuthDegrees",
     "elevationDegrees",
     "insertionDepthMicrometres",
-    "axialRotationDegrees",
-    "customGeometryAcknowledged",
 }
 
 
@@ -645,6 +731,45 @@ def register_probe_planning_handlers(
     )
     extension.register()
     return extension
+
+
+def _placement_mode(params: Mapping[str, object]) -> ProbePlacementMode:
+    raw = params.get(
+        "placementMode",
+        ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR.value,
+    )
+    value = text_value(raw, "placementMode", maximum=50)
+    try:
+        return ProbePlacementMode(value)
+    except ValueError as error:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            "placementMode must be one of the four explicit supported modes.",
+            details={
+                "received": value,
+                "supported": [mode.value for mode in ProbePlacementMode],
+            },
+        ) from error
+
+
+def _optional_finite_number(
+    params: Mapping[str, object],
+    key: str,
+    field: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    minimum_inclusive: bool = True,
+) -> float | None:
+    if key not in params:
+        return None
+    return finite_number(
+        params[key],
+        field,
+        minimum=minimum,
+        maximum=maximum,
+        minimum_inclusive=minimum_inclusive,
+    )
 
 
 def _catalog_model(params: Mapping[str, object]) -> ProbeModelDefinition:
@@ -707,18 +832,11 @@ def _find_analysis(
     return analysis
 
 
-def _find_vessel_analysis(
-    project: PlannerProject,
-    plan_uuid: UUID,
-) -> ProbeVesselAnalysisBundle | None:
-    return next(
-        (item for item in project.probe_vessel_analyses if item.plan_uuid == plan_uuid),
-        None,
-    )
-
-
 def _require_current_probe_geometry(plan: ProbePlanRecord) -> None:
-    if plan.planning_algorithm_version != PROBE_PLANNING_ALGORITHM_VERSION:
+    if plan.planning_algorithm_version not in {
+        STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+        PROBE_PLANNING_ALGORITHM_VERSION,
+    }:
         raise BridgeError(
             "PROBE_PLAN_RECOMPUTE_REQUIRED",
             "This legacy probe plan must be updated through its subject calibration "
@@ -841,6 +959,15 @@ def _plan_summary(
         "modelVersion": plan.probe_model.model_version,
         "modelDisplayName": plan.probe_model.display_name,
         "verificationStatus": plan.probe_model.verification.status.value,
+        "placementMode": (
+            plan.placement_input.mode.value
+            if plan.placement_input is not None
+            else (
+                ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR.value
+                if plan.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION
+                else ProbePlacementMode.TARGET_ANGLES_DEPTH.value
+            )
+        ),
         "inputSha256": plan.input_sha256,
         "calibrationId": str(plan.calibration_uuid),
         "calibrationVersion": plan.calibration_version,
@@ -878,6 +1005,7 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
                 "angleConvention": plan.manipulator_input.angle_convention,
             }
         ),
+        "placementInput": _placement_input_payload(plan),
         "placement": {
             "placementId": str(plan.placement.placement_uuid),
             "method": plan.placement.method.value,
@@ -932,6 +1060,41 @@ def _anatomical_point_payload(point: AnatomicalPoint) -> JsonObject:
         "apMicrometres": point.ap_um,
         "mlMicrometres": point.ml_um,
         "dvMicrometres": point.dv_um,
+    }
+
+
+def _placement_input_payload(plan: ProbePlanRecord) -> JsonObject | None:
+    placement_input = plan.placement_input
+    if placement_input is None:
+        return None
+    entry = placement_input.entry
+    return {
+        "mode": placement_input.mode.value,
+        "entry": (
+            None
+            if entry is None
+            else {
+                "frameId": entry.frame_id,
+                "origin": entry.origin,
+                "componentOrder": list(entry.component_order),
+                "units": entry.units,
+                "apPositiveDirection": entry.ap_positive_direction,
+                "apNegativeDirection": entry.ap_negative_direction,
+                "mlPositiveDirection": entry.ml_positive_direction,
+                "mlNegativeDirection": entry.ml_negative_direction,
+                "dvPositiveDirection": entry.dv_positive_direction,
+                "dvNegativeDirection": entry.dv_negative_direction,
+                "apMillimetres": entry.ap_mm,
+                "mlMillimetres": entry.ml_mm,
+                "dvMillimetres": entry.dv_mm,
+            }
+        ),
+        "angleFrameId": placement_input.angle_frame_id,
+        "azimuthDegrees": placement_input.azimuth_deg,
+        "elevationDegrees": placement_input.elevation_deg,
+        "insertionDepthMicrometres": placement_input.insertion_depth_um,
+        "axialRotationDegrees": placement_input.axial_rotation_deg,
+        "angleConvention": placement_input.angle_convention,
     }
 
 
@@ -1064,16 +1227,45 @@ def _atlas_analysis_point_payload(point: AtlasPhysicalPointAPMLDV) -> JsonObject
     }
 
 
-def _region_csv(plan: ProbePlanRecord, bundle: ProbeRegionAnalysisBundle) -> str:
+def _region_csv(
+    project: PlannerProject,
+    calibration: AtlasRegisteredCalibration,
+    plan: ProbePlanRecord,
+    bundle: ProbeRegionAnalysisBundle,
+) -> str:
+    if project.atlas is None:
+        raise BridgeError("ATLAS_NOT_OPEN", "Probe-region export requires project atlas metadata.")
+    transform = calibration.atlas_transform
+    transform_matrix = json.dumps(
+        list(transform.matrix_row_major),
+        separators=(",", ":"),
+        allow_nan=False,
+    )
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(
         [
             "record_type",
+            "export_schema_version",
             "plan_id",
             "plan_version",
             "plan_input_sha256",
             "analysis_sha256",
+            "atlas_identifier",
+            "atlas_version",
+            "atlas_metadata_sha256",
+            "coordinate_convention",
+            "calibration_id",
+            "calibration_version",
+            "calibration_sha256",
+            "transform_id",
+            "transform_version",
+            "transform_method",
+            "transform_source_frame_id",
+            "transform_destination_frame_id",
+            "transform_matrix_row_major_ap_ml_dv",
+            "transform_rms_residual_um",
+            "transform_max_residual_um",
             "shank_id",
             "site_id",
             "structure_id",
@@ -1089,10 +1281,26 @@ def _region_csv(plan: ProbePlanRecord, bundle: ProbeRegionAnalysisBundle) -> str
         ]
     )
     common = [
+        1,
         str(plan.plan_uuid),
         plan.plan_version,
         plan.input_sha256,
         bundle.analysis_sha256,
+        project.atlas.atlas_key,
+        project.atlas.atlas_package_version,
+        project.atlas.metadata_sha256,
+        project.coordinate_convention,
+        str(calibration.calibration_uuid),
+        calibration.calibration_version,
+        plan.calibration_sha256,
+        str(transform.transform_uuid),
+        transform.version,
+        transform.method.value,
+        transform.source_frame.frame_id,
+        transform.destination_frame.frame_id,
+        transform_matrix,
+        transform.rms_residual_um,
+        transform.max_residual_um,
     ]
     for analysis in bundle.shank_analyses:
         for segment in analysis.segments:
@@ -1134,3 +1342,85 @@ def _region_csv(plan: ProbePlanRecord, bundle: ProbeRegionAnalysisBundle) -> str
                 ]
             )
     return stream.getvalue()
+
+
+def _region_export_content(
+    project: PlannerProject,
+    plan: ProbePlanRecord,
+    analysis: ProbeRegionAnalysisBundle,
+    raw_format: object,
+) -> tuple[str, str, str, str]:
+    """Build the exact bounded export bytes used by generation and confirmation."""
+
+    if project.atlas is None:
+        raise BridgeError("ATLAS_NOT_OPEN", "Probe-region export requires project atlas metadata.")
+    calibration = _find_calibration(project, plan.calibration_uuid)
+    actual_calibration_sha256 = atlas_registered_calibration_sha256(calibration)
+    if plan.calibration_sha256 != actual_calibration_sha256:
+        raise BridgeError(
+            "CALIBRATION_DIGEST_MISMATCH",
+            "The probe plan no longer matches its exact animal calibration snapshot.",
+            details={
+                "actualCalibrationSha256": actual_calibration_sha256,
+                "planCalibrationSha256": plan.calibration_sha256,
+            },
+        )
+    export_format = text_value(raw_format, "format", maximum=10).lower()
+    if export_format == "csv":
+        content = _region_csv(project, calibration, plan, analysis)
+        mime_type = "text/csv"
+        file_extension = "csv"
+    elif export_format == "json":
+        transform = calibration.atlas_transform
+        content = json.dumps(
+            {
+                "analysis": analysis.model_dump(mode="json"),
+                "atlas": {
+                    "identifier": project.atlas.atlas_key,
+                    "metadataSha256": project.atlas.metadata_sha256,
+                    "version": project.atlas.atlas_package_version,
+                },
+                "calibration": {
+                    "calibrationId": str(calibration.calibration_uuid),
+                    "calibrationSha256": plan.calibration_sha256,
+                    "calibrationVersion": calibration.calibration_version,
+                    "profileId": calibration.profile_id,
+                    "transform": {
+                        "destinationFrame": transform.destination_frame.model_dump(mode="json"),
+                        "matrixRowMajorAPMLDV": list(transform.matrix_row_major),
+                        "maximumResidualMicrometres": transform.max_residual_um,
+                        "method": transform.method.value,
+                        "rmsResidualMicrometres": transform.rms_residual_um,
+                        "sourceFrame": transform.source_frame.model_dump(mode="json"),
+                        "transformId": str(transform.transform_uuid),
+                        "transformVersion": transform.version,
+                    },
+                },
+                "coordinateConvention": project.coordinate_convention,
+                "exportKind": "probe-region-analysis",
+                "exportSchemaVersion": 1,
+                "probePlan": {
+                    "planId": str(plan.plan_uuid),
+                    "planInputSha256": plan.input_sha256,
+                    "planVersion": plan.plan_version,
+                    "sourceTarget": plan.source_target.model_dump(mode="json"),
+                },
+            },
+            sort_keys=True,
+            indent=2,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        mime_type = "application/json"
+        file_extension = "json"
+    else:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            "format must be exactly csv or json.",
+        )
+    if len(content) > MAX_EXPORT_CHARACTERS:
+        raise BridgeError(
+            "EXPORT_TOO_LARGE",
+            "The in-memory region export exceeds the bridge response limit.",
+        )
+    return export_format, content, mime_type, file_extension

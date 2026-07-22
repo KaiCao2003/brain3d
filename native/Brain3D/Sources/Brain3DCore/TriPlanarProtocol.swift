@@ -16,6 +16,7 @@ public enum ViewerBridgeMethod: String, Codable, CaseIterable, Sendable {
     case sliceSet = "viewer.slice.set"
     case sliceRender = "viewer.slice.render"
     case regionPick = "viewer.region.pick"
+    case pointNavigate = "viewer.point.navigate"
 }
 
 public enum AtlasAnatomicalAxis: String, Codable, CaseIterable, Sendable {
@@ -804,6 +805,145 @@ public struct ViewerStateParameters: Codable, Equatable, Sendable {
     }
 }
 
+/// One atlas-native physical point with enough identity on the wire to prevent
+/// silently applying coordinates from a different atlas package.
+public struct ViewerAtlasNavigationPoint: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let atlasIdentifier: String
+    public let atlasVersion: String
+    public let componentOrder: [AtlasAnatomicalAxis]
+    public let units: String
+    public let apMicrometres: Double
+    public let dvMicrometres: Double
+    public let mlMicrometres: Double
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case frameId
+        case atlasIdentifier
+        case atlasVersion
+        case componentOrder
+        case units
+        case apMicrometres
+        case dvMicrometres
+        case mlMicrometres
+    }
+
+    public init(
+        atlas: ViewerAtlasIdentity,
+        apMicrometres: Double,
+        dvMicrometres: Double,
+        mlMicrometres: Double
+    ) throws {
+        frameId = AtlasPhysicalCoordinateFrame.expectedFrameId
+        atlasIdentifier = atlas.identifier
+        atlasVersion = atlas.version
+        componentOrder = [.ap, .dv, .ml]
+        units = "micrometre"
+        self.apMicrometres = apMicrometres
+        self.dvMicrometres = dvMicrometres
+        self.mlMicrometres = mlMicrometres
+        try validate(against: atlas)
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireExactKeys(decoder, CodingKeys.self, label: "viewer navigation point")
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        frameId = try container.decode(String.self, forKey: .frameId)
+        atlasIdentifier = try container.decode(String.self, forKey: .atlasIdentifier)
+        atlasVersion = try container.decode(String.self, forKey: .atlasVersion)
+        componentOrder = try container.decode(
+            [AtlasAnatomicalAxis].self,
+            forKey: .componentOrder
+        )
+        units = try container.decode(String.self, forKey: .units)
+        apMicrometres = try container.decode(Double.self, forKey: .apMicrometres)
+        dvMicrometres = try container.decode(Double.self, forKey: .dvMicrometres)
+        mlMicrometres = try container.decode(Double.self, forKey: .mlMicrometres)
+        guard frameId == AtlasPhysicalCoordinateFrame.expectedFrameId,
+              componentOrder == [.ap, .dv, .ml],
+              units == "micrometre",
+              !atlasIdentifier.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !atlasVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              [apMicrometres, dvMicrometres, mlMicrometres].allSatisfy({
+                  $0.isFinite && $0 >= 0
+              })
+        else {
+            throw ViewerContractError.invalid(
+                "Navigation point must be finite atlas-native [AP,DV,ML] micrometre geometry."
+            )
+        }
+    }
+
+    fileprivate func validate(against atlas: ViewerAtlasIdentity) throws {
+        let coordinates: [AtlasAnatomicalAxis: Double] = [
+            .ap: apMicrometres,
+            .dv: dvMicrometres,
+            .ml: mlMicrometres,
+        ]
+        guard frameId == AtlasPhysicalCoordinateFrame.expectedFrameId,
+              atlasIdentifier == atlas.identifier,
+              atlasVersion == atlas.version,
+              componentOrder == [.ap, .dv, .ml],
+              units == "micrometre"
+        else {
+            throw ViewerContractError.invalid(
+                "Navigation point identity does not match the active atlas."
+            )
+        }
+        for axis in AtlasAnatomicalAxis.allCases {
+            guard let coordinate = coordinates[axis],
+                  coordinate.isFinite,
+                  coordinate >= 0,
+                  coordinate < Double(atlas.shapeVoxels[axis])
+                    * atlas.resolutionMicrometres[axis]
+            else {
+                throw ViewerContractError.invalid(
+                    "Navigation point must lie inside the atlas half-open physical volume."
+                )
+            }
+        }
+    }
+
+    fileprivate subscript(axis: AtlasAnatomicalAxis) -> Double {
+        switch axis {
+        case .ap: apMicrometres
+        case .dv: dvMicrometres
+        case .ml: mlMicrometres
+        }
+    }
+}
+
+public struct ViewerPointNavigationParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let point: ViewerAtlasNavigationPoint
+
+    public init(
+        projectId: UUID,
+        expectedProjectRevision: Int,
+        atlas: ViewerAtlasIdentity,
+        apMicrometres: Double,
+        dvMicrometres: Double,
+        mlMicrometres: Double
+    ) throws {
+        guard expectedProjectRevision >= 0 else {
+            throw ViewerContractError.invalid(
+                "Expected project revision must be nonnegative."
+            )
+        }
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId.uuidString.lowercased()
+        self.expectedProjectRevision = expectedProjectRevision
+        point = try ViewerAtlasNavigationPoint(
+            atlas: atlas,
+            apMicrometres: apMicrometres,
+            dvMicrometres: dvMicrometres,
+            mlMicrometres: mlMicrometres
+        )
+    }
+}
+
 public struct ViewerSliceSetParameters: Codable, Equatable, Sendable {
     public let protocolVersion: Int
     public let projectId: String
@@ -880,6 +1020,7 @@ public struct ViewerStateResult: Decodable, Equatable, Sendable {
 public enum ViewerMutationStatus: String, Decodable, Equatable, Sendable {
     case sliceUpdated
     case regionSelected
+    case pointNavigated
 }
 
 public struct ViewerSliceUpdateResult: Decodable, Equatable, Sendable {
@@ -950,29 +1091,180 @@ public struct ViewerSliceRenderResult: Decodable, Equatable, Sendable {
         guard let orientation = AtlasSliceOrientation(rawValue: renderedSlice.orientation) else {
             throw ViewerContractError.invalid("Rendered slice orientation is unsupported.")
         }
-        let expected = snapshot.slices[orientation]
-        let expectedWidth = snapshot.atlas.shapeVoxels[orientation.columnAxis]
-        let expectedHeight = snapshot.atlas.shapeVoxels[orientation.rowAxis]
-        guard renderedSlice.protocolVersion == BridgeProtocolVersion.current,
-              renderedSlice.mimeType == "image/png",
-              !renderedSlice.pngBase64.isEmpty,
-              renderedSlice.width == expectedWidth,
-              renderedSlice.height == expectedHeight,
-              renderedSlice.index == expected.index,
-              renderedSlice.sliceCount == expected.sliceCount,
-              renderedSlice.fixedAxis == expected.fixedAxis.rawValue,
-              renderedSlice.rowAxis == expected.rowAxis.rawValue,
-              renderedSlice.columnAxis == expected.columnAxis.rawValue,
-              approximatelyEqual(
-                  renderedSlice.sliceCenterMicrometres,
-                  expected.sliceCenterMicrometres
-              ),
-              renderedSlice.atlas.identifier == snapshot.atlas.identifier,
-              renderedSlice.atlas.version == snapshot.atlas.version,
-              renderedSlice.atlas.metadataSha256 == snapshot.atlas.metadataSha256
+        try validateCanonicalRenderedSlice(
+            renderedSlice,
+            orientation: orientation,
+            snapshot: snapshot
+        )
+    }
+}
+
+public struct ViewerNavigationVoxelIndex: Decodable, Equatable, Sendable {
+    public let frameId: String
+    public let atlasIdentifier: String
+    public let atlasVersion: String
+    public let componentOrder: [AtlasAnatomicalAxis]
+    public let ap: Int
+    public let dv: Int
+    public let ml: Int
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case frameId
+        case atlasIdentifier
+        case atlasVersion
+        case componentOrder
+        case ap
+        case dv
+        case ml
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireExactKeys(decoder, CodingKeys.self, label: "navigation voxel index")
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        frameId = try container.decode(String.self, forKey: .frameId)
+        atlasIdentifier = try container.decode(String.self, forKey: .atlasIdentifier)
+        atlasVersion = try container.decode(String.self, forKey: .atlasVersion)
+        componentOrder = try container.decode(
+            [AtlasAnatomicalAxis].self,
+            forKey: .componentOrder
+        )
+        ap = try container.decode(Int.self, forKey: .ap)
+        dv = try container.decode(Int.self, forKey: .dv)
+        ml = try container.decode(Int.self, forKey: .ml)
+        guard frameId == AtlasVoxelIndex.expectedFrameId,
+              componentOrder == [.ap, .dv, .ml],
+              ap >= 0, dv >= 0, ml >= 0
         else {
             throw ViewerContractError.invalid(
-                "Rendered slice does not match the canonical viewer snapshot."
+                "Navigation voxel index must be BrainGlobe [AP,DV,ML]."
+            )
+        }
+    }
+
+    fileprivate subscript(axis: AtlasAnatomicalAxis) -> Int {
+        switch axis {
+        case .ap: ap
+        case .dv: dv
+        case .ml: ml
+        }
+    }
+}
+
+public struct ViewerRenderedSlices: Decodable, Equatable, Sendable {
+    public let coronal: AtlasSliceResult
+    public let sagittal: AtlasSliceResult
+    public let horizontal: AtlasSliceResult
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case coronal
+        case sagittal
+        case horizontal
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireExactKeys(decoder, CodingKeys.self, label: "navigated rendered slices")
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        coronal = try Self.decodeSlice(.coronal, from: container, key: .coronal)
+        sagittal = try Self.decodeSlice(.sagittal, from: container, key: .sagittal)
+        horizontal = try Self.decodeSlice(.horizontal, from: container, key: .horizontal)
+    }
+
+    public subscript(orientation: AtlasSliceOrientation) -> AtlasSliceResult {
+        switch orientation {
+        case .coronal: coronal
+        case .sagittal: sagittal
+        case .horizontal: horizontal
+        }
+    }
+
+    private static func decodeSlice(
+        _ expectedOrientation: AtlasSliceOrientation,
+        from container: KeyedDecodingContainer<CodingKeys>,
+        key: CodingKeys
+    ) throws -> AtlasSliceResult {
+        let decoder = try container.superDecoder(forKey: key)
+        try requireExactAtlasSliceKeys(decoder)
+        let slice = try AtlasSliceResult(from: decoder)
+        guard slice.orientation == expectedOrientation.rawValue else {
+            throw ViewerContractError.invalid(
+                "Rendered navigation slice is stored under the wrong orientation key."
+            )
+        }
+        return slice
+    }
+}
+
+public struct ViewerPointNavigationResult: Decodable, Equatable, Sendable {
+    public let status: ViewerMutationStatus
+    public let navigatedPoint: ViewerAtlasNavigationPoint
+    public let containingVoxelIndex: ViewerNavigationVoxelIndex
+    public let renderedSlices: ViewerRenderedSlices
+    public let snapshot: ViewerCanonicalSnapshot
+
+    public init(from decoder: any Decoder) throws {
+        snapshot = try decodeViewerSnapshot(
+            from: decoder,
+            additionalKeys: [
+                "status",
+                "navigatedPoint",
+                "containingVoxelIndex",
+                "renderedSlices",
+            ]
+        )
+        let container = try decoder.container(keyedBy: AnyCodingKey.self)
+        status = try container.decode(
+            ViewerMutationStatus.self,
+            forKey: AnyCodingKey("status")
+        )
+        navigatedPoint = try container.decode(
+            ViewerAtlasNavigationPoint.self,
+            forKey: AnyCodingKey("navigatedPoint")
+        )
+        containingVoxelIndex = try container.decode(
+            ViewerNavigationVoxelIndex.self,
+            forKey: AnyCodingKey("containingVoxelIndex")
+        )
+        renderedSlices = try container.decode(
+            ViewerRenderedSlices.self,
+            forKey: AnyCodingKey("renderedSlices")
+        )
+        try validate()
+    }
+
+    private func validate() throws {
+        guard status == .pointNavigated,
+              snapshot.selection == nil,
+              containingVoxelIndex.atlasIdentifier == snapshot.atlas.identifier,
+              containingVoxelIndex.atlasVersion == snapshot.atlas.version
+        else {
+            throw ViewerContractError.invalid(
+                "Point navigation returned an invalid status, atlas identity, or selection."
+            )
+        }
+        try navigatedPoint.validate(against: snapshot.atlas)
+        for axis in AtlasAnatomicalAxis.allCases {
+            let expectedIndex = Int(floor(
+                navigatedPoint[axis] / snapshot.atlas.resolutionMicrometres[axis]
+            ))
+            guard containingVoxelIndex[axis] == expectedIndex else {
+                throw ViewerContractError.invalid(
+                    "Navigation point and containing voxel index disagree."
+                )
+            }
+        }
+        guard snapshot.slices.coronal.index == containingVoxelIndex.ap,
+              snapshot.slices.sagittal.index == containingVoxelIndex.ml,
+              snapshot.slices.horizontal.index == containingVoxelIndex.dv
+        else {
+            throw ViewerContractError.invalid(
+                "Point navigation did not atomically publish all three slice depths."
+            )
+        }
+        for orientation in AtlasSliceOrientation.allCases {
+            try validateCanonicalRenderedSlice(
+                renderedSlices[orientation],
+                orientation: orientation,
+                snapshot: snapshot
             )
         }
     }
@@ -987,6 +1279,64 @@ private let viewerSnapshotKeys: Set<String> = [
     "slices",
     "selection",
 ]
+
+private let exactAtlasSliceKeys: Set<String> = [
+    "protocolVersion",
+    "mimeType",
+    "pngBase64",
+    "width",
+    "height",
+    "orientation",
+    "index",
+    "sliceCount",
+    "fixedAxis",
+    "rowAxis",
+    "columnAxis",
+    "sliceCenterMicrometres",
+    "atlas",
+]
+
+private func requireExactAtlasSliceKeys(_ decoder: any Decoder) throws {
+    let dynamic = try decoder.container(keyedBy: AnyCodingKey.self)
+    guard Set(dynamic.allKeys.map(\.stringValue)) == exactAtlasSliceKeys else {
+        throw ViewerContractError.invalid(
+            "Rendered atlas slice keys do not match protocol v1 exactly."
+        )
+    }
+}
+
+private func validateCanonicalRenderedSlice(
+    _ renderedSlice: AtlasSliceResult,
+    orientation: AtlasSliceOrientation,
+    snapshot: ViewerCanonicalSnapshot
+) throws {
+    let expected = snapshot.slices[orientation]
+    let expectedWidth = snapshot.atlas.shapeVoxels[orientation.columnAxis]
+    let expectedHeight = snapshot.atlas.shapeVoxels[orientation.rowAxis]
+    guard renderedSlice.protocolVersion == BridgeProtocolVersion.current,
+          renderedSlice.mimeType == "image/png",
+          !renderedSlice.pngBase64.isEmpty,
+          renderedSlice.width == expectedWidth,
+          renderedSlice.height == expectedHeight,
+          renderedSlice.orientation == orientation.rawValue,
+          renderedSlice.index == expected.index,
+          renderedSlice.sliceCount == expected.sliceCount,
+          renderedSlice.fixedAxis == expected.fixedAxis.rawValue,
+          renderedSlice.rowAxis == expected.rowAxis.rawValue,
+          renderedSlice.columnAxis == expected.columnAxis.rawValue,
+          approximatelyEqual(
+              renderedSlice.sliceCenterMicrometres,
+              expected.sliceCenterMicrometres
+          ),
+          renderedSlice.atlas.identifier == snapshot.atlas.identifier,
+          renderedSlice.atlas.version == snapshot.atlas.version,
+          renderedSlice.atlas.metadataSha256 == snapshot.atlas.metadataSha256
+    else {
+        throw ViewerContractError.invalid(
+            "Rendered slice does not match the canonical viewer snapshot."
+        )
+    }
+}
 
 private func decodeViewerSnapshot(
     from decoder: any Decoder,

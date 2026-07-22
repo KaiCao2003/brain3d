@@ -4,9 +4,10 @@ Audit baseline: `main` commit `51fe26d637b700d39944bbee86e3ea42ded4e7a2`, review
 2026-07-22 before the end-to-end planner refactor.
 
 > **Historical snapshot:** every present-tense “current” statement below refers to that baseline,
-> not the current development tree. The refactor has since made calibration, target projection,
-> probe planning/region traversal, the LAMBADA major-vessel layer and V3 analysis, and SceneKit 3D
-> product-reachable. See [Project Status](../PROJECT_STATUS.md) for the live inventory.
+> not the current development tree. A later refactor made calibration, target projection, probe
+> planning/region traversal, SceneKit 3D, and temporarily the LAMBADA/V3 path product-reachable.
+> The current digest-bound qualification gate rejects P60_606 geometry and analysis. See
+> [Project Status](../PROJECT_STATUS.md) for the live inventory.
 
 This document records evidence about what is reachable from the supported product, what is only
 covered by tests, and what belongs to the superseded Qt/VTK application. A symbol is not deleted
@@ -98,14 +99,14 @@ interaction. Most of the 487 warnings come from tests of the legacy VTK path.
 | `rendering/slice_renderer.py` | `atlas.slice` | `PRODUCT_REACHABLE` | Retain | Arbitrary index rendering already exists | Slice renderer tests |
 | `persistence/project_io.py` provenance-aware APIs | Bridge | `PRODUCT_REACHABLE` | Extend with deterministic migrations | Atomic/checksummed persistence is valuable | Project I/O and integration tests |
 | `coordinates/atlas_space.py` | Atlas/bridge/rendering | `PRODUCT_REACHABLE` | Centralize all order conversions here or a named adjacent module | Prevent distributed AP/DV/ML permutations | Coordinate golden tests |
-| `coordinates/transforms.py` | Tests only | `ORPHANED_BUT_REUSABLE` | Connect through calibration protocol | Required fit/apply/invert/compose math already exists | Anatomical transform tests |
-| `domain/*probe*`, `*stereotaxy*`, `*transform*`, `*measurement*` | Tests only | `ORPHANED_BUT_REUSABLE` | Integrate behind protocol v2 | Target planner needs their validated constraints | Existing surgery/domain tests plus new bridge tests |
-| `surgery/trajectory.py` | Tests only | `ORPHANED_BUT_REUSABLE` | Connect to probe plan service | Placement/site groundwork exists | Probe trajectory tests |
-| `surgery/stereotaxy.py` | Tests only | `ORPHANED_BUT_REUSABLE` | Connect to calibration service | Landmark calibration groundwork exists | Stereotaxy tests |
+| `coordinates/transforms.py` | Calibration and probe bridge | `PRODUCT_REACHABLE` | Retain behind explicit frame contracts | Fits and applies the subject-to-atlas boundary | Transform, calibration, and probe tests |
+| `domain/*probe*`, `*stereotaxy*`, `*transform*`, `*measurement*` | Calibration/probe bridge | `PRODUCT_REACHABLE` | Retain strict schemas and provenance | Four-mode probe planning depends on these constraints | Domain, bridge, and workflow tests |
+| `surgery/trajectory.py` | Probe planning service | `PRODUCT_REACHABLE` | Retain complete-pose rigid/similarity projection | Preserves shank/site geometry and rejects affine shear | Probe trajectory and bridge tests |
+| `surgery/stereotaxy.py` | Calibration and probe services | `PRODUCT_REACHABLE` | Retain | Defines the measured bregma/skull frame | Stereotaxy and calibration tests |
 | `surgery/measurements.py` | Tests only | `ORPHANED_BUT_REUSABLE` | Retain exact segment-distance kernel; rename centerline-only APIs before exposure | Needed by future radius-aware clearance | Measurement tests |
 | `surgery/craniotomy.py` | Tests only | `TEST_ONLY` | Move out of MVP product package or defer | Not a current MVP consumer | Craniotomy tests |
-| `vasculature/reference_*`, `density_overlay.py` | Swift bridge | `PRODUCT_REACHABLE` | Retain with density-only semantics; add orthogonal slices | Source is scalar population density, never vessel geometry | Density/store/integration tests |
-| `vasculature/subject_image.py`, `registration.py`, `subject_overlay.py` | Swift bridge | `PRODUCT_REACHABLE` | Retain; add explicit surface-mask analysis | 2D image cannot support deep clearance | Subject image/registration tests |
+| `vasculature/reference_*`, `density_overlay.py` | Archive compatibility tests only | `ARCHIVED_NOT_REGISTERED` | Preserve code/data; do not register in the primary bridge | Scalar population density is not vessel geometry | Density/store/archive tests |
+| `vasculature/subject_image.py`, `registration.py`, `subject_overlay.py` | Archive compatibility tests only | `ARCHIVED_NOT_REGISTERED` | Preserve code/data; do not register in the primary bridge | A 2D subject image cannot support deep clearance | Subject image/registration archive tests |
 | `rendering/sagittal_cache.py` | Tests only | `TEST_ONLY` | Remove from MVP package | Optimizes a deferred 10 µm path with no product caller | Sagittal cache tests |
 | `gui/**` | `app.py` and Qt tests | `LEGACY_ONLY` | Remove from default package; preserve history in Git | Second UI/state/rendering stack conflicts with supported path | All `tests/gui/**` and Qt worker tests |
 | `app.py` | CLI no-subcommand path | `LEGACY_ONLY` | Remove after CLI behavior changes | It makes an unsupported GUI the default | Smoke and CLI default tests |
@@ -113,35 +114,36 @@ interaction. Most of the 487 warnings come from tests of the legacy VTK path.
 
 ## Bridge runtime reachability
 
-The Python dispatcher registers more methods than Swift currently calls. This is deliberate
-dynamic usage and must not be inferred from Python imports alone.
+Primary registration is the supported product boundary and must not be inferred from Python
+imports alone. Archived subject-image and population-density implementations remain callable only
+when compatibility tests bind them explicitly; the production dispatcher does not register or
+advertise them.
 
-The supported primary Swift workspace currently requests: `hello`, `state.get`, `atlas.open`,
-`atlas.slice`, `atlas.dorsal`, `project.new`, `project.open`, `project.save`, `implant.list`,
-`implant.add`, `implant.remove`, `viewer.state.get`, `viewer.slice.set`,
-`viewer.slice.render`, and `viewer.region.pick`.
+The supported primary Swift workspace requests project/atlas state, `atlas.open`, arbitrary slice
+and dorsal rendering, mesh/ray-pick methods, revision-safe implant/calibration CRUD, atomic viewer
+navigation, the versioned probe catalog and four-mode plan CRUD, exact region traversal, and the
+two-phase region-export methods.
 
-Legacy population-density and subject-image bridge calls remain implemented behind archived
-ViewModel paths, but the primary UI no longer exposes them. Their presence is migration and
+Legacy population-density and subject-image calls remain implemented behind archived compatibility
+code, but are neither registered nor exposed in the primary UI. Their presence is migration and
 research-code retention, not evidence that they are supported surgical-planning inputs.
 
-Registered but not currently requested by the primary Swift workspace include `atlas.list`,
-`atlas.regions`, `atlas.search`, `atlas.point`, `atlas.mesh`, and `shutdown`. The independent
-viewer now performs region lookup through `viewer.region.pick`; the older `atlas.point` handler
-is retained for protocol compatibility. `atlas.mesh` remains non-product until the optional 3D
-renderer has an approved architecture. `shutdown` is a transport/control method rather than a
-visible UI feature.
+Registered compatibility/read-only methods that are not central to the current Swift path include
+`atlas.list`, `atlas.regions`, `atlas.search`, `atlas.point`, and `shutdown`. The independent viewer
+uses `viewer.region.pick`; `atlas.mesh` and atlas ray picking are product-reachable through 3D.
+The three `vessel.major.reference.*` methods remain registered only to return the explicit
+`VESSEL_GEOMETRY_UNAVAILABLE` fail-closed response; they never serve the rejected graph.
 
-## Known product contradictions
+## Resolved contradictions and remaining archive boundaries
 
 - The project schema retains legacy linked-cursor fields for migration; the supported viewer uses
   independent slice depths plus a replace-only region selection.
-- Swift exposes an unavailable 3D button while real rendering code exists only in the unsupported
-  Qt path.
-- Base installation includes Qt/VTK because legacy code remains inside the default package.
-- The console command without a subcommand launches the unsupported application.
+- Native SceneKit 3D brain/probe rendering and atlas-region picking are product-reachable; the old
+  Qt/PyVista renderer is preserved only in Git history.
+- Qt/VTK and the legacy GUI are absent from the default package and dependency graph.
+- The console command without a subcommand prints help; bridge operation is explicit.
 - The archived density overlay is reproducible population context, not individual blood vessels.
-- Passing Python GUI tests primarily proves the removed Qt path, not the Swift product.
+- The rejected P60_606 derivative remains evidence only and is never served as geometry.
 
 ## Scientific and data risks to keep fail-closed
 
@@ -150,8 +152,8 @@ visible UI feature.
 - Population density has no vessel centerlines, radius, or retained depth in its dorsal maximum
   projection.
 - Subject dorsal images have no automatic vessel segmentation and cannot represent deep vessels.
-- Existing vessel polyline distance code lacks radius, probe envelope, margin, uncertainty, and a
-  spatial index; it cannot be exposed as clearance.
+- A radius/probe-envelope/margin/uncertainty kernel exists, but no coordinate-qualified vessel
+  graph is available; the product therefore exposes no clearance result.
 - Probe profiles may not be called manufacturer-verified without complete source and independent
   review records.
 

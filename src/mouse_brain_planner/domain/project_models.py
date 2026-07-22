@@ -13,10 +13,14 @@ from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_plan_models import (
+    ProbePlacementMode,
     ProbePlanRecord,
     ProbeRegionAnalysisBundle,
 )
-from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
+from mouse_brain_planner.domain.stereotaxy_models import (
+    AtlasRegisteredCalibration,
+    atlas_registered_calibration_sha256,
+)
 from mouse_brain_planner.domain.vessel_models import (
     DorsalVascularRegistration,
     ReferenceVascularDensityProjectState,
@@ -67,7 +71,7 @@ def utc_now() -> datetime:
 class RegionDisplayState(BaseModel):
     """Project-local display settings that never mutate atlas metadata."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     structure_id: int = Field(gt=0)
     visible: bool = False
@@ -87,7 +91,7 @@ class RegionDisplayState(BaseModel):
 class ProjectEvent(BaseModel):
     """A meaningful project action without private OS information."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     timestamp: datetime = Field(default_factory=utc_now)
     action: str = Field(min_length=1, max_length=200)
@@ -97,7 +101,7 @@ class ProjectEvent(BaseModel):
 class PlannerProject(BaseModel):
     """Versioned animal surgery-planning project state."""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="forbid")
 
     schema_version: int = PROJECT_SCHEMA_VERSION
     application_version: str = __version__
@@ -113,6 +117,8 @@ class PlannerProject(BaseModel):
     viewer_slice_depths: ViewerSliceDepths | None = None
     viewer_region_selection: ViewerRegionSelection | None = None
     selected_region_id: int | None = Field(default=None, gt=0)
+    # Schema 6 originally accepted any collection that fit the bounded regions.json member.
+    # Narrowing this field requires a schema migration, not an in-place validation change.
     region_display: list[RegionDisplayState] = Field(default_factory=list)
     subject_vascular_images: list[SubjectVascularImage] = Field(
         default_factory=list,
@@ -150,6 +156,7 @@ class PlannerProject(BaseModel):
     )
     coordinate_convention: str = "BrainGlobe ASR: [AP,DV,ML], origin A/S/R, increasing P/I/L, µm"
     scientific_disclaimer_acknowledged: bool = False
+    # Schema 6 originally accepted any text that fit the bounded project.json member.
     user_notes: str = ""
     event_log: list[ProjectEvent] = Field(default_factory=list, max_length=MAX_PROJECT_EVENTS)
 
@@ -301,6 +308,10 @@ class PlannerProject(BaseModel):
                 raise ValueError(
                     "probe plan calibration version does not match project calibration"
                 )
+            if plan.calibration_sha256 != atlas_registered_calibration_sha256(
+                referenced_calibration
+            ):
+                raise ValueError("probe plan calibration digest does not match project calibration")
             if plan.manipulator_input is not None and (
                 plan.manipulator_input.frame_id
                 != referenced_calibration.atlas_transform.source_frame.frame_id
@@ -308,6 +319,18 @@ class PlannerProject(BaseModel):
                 raise ValueError(
                     "probe plan manipulator input frame does not match its calibration"
                 )
+            if plan.placement_input is not None and (
+                plan.placement_input.mode is not ProbePlacementMode.ENTRY_AND_TARGET
+            ):
+                expected_angle_frame = (
+                    referenced_calibration.atlas_transform.destination_frame.frame_id
+                    if plan.placement_input.mode is ProbePlacementMode.TARGET_ANGLES_DEPTH
+                    else referenced_calibration.atlas_transform.source_frame.frame_id
+                )
+                if plan.placement_input.angle_frame_id != expected_angle_frame:
+                    raise ValueError(
+                        "probe placement angle frame does not match its calibration mode"
+                    )
             if not plan.probe_model.permits_verified_device_label and not (
                 plan.placement.custom_geometry_acknowledged
             ):

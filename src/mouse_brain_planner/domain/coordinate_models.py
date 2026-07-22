@@ -31,7 +31,7 @@ class VoxelAnchor(StrEnum):
 
 
 class _AtlasPoint(BaseModel):
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     atlas_key: str = Field(min_length=1)
     atlas_version: str = Field(min_length=1)
@@ -104,7 +104,7 @@ class SurgeryWorldPoint(_AtlasPoint):
 class DisplayCoordinate(BaseModel):
     """User-facing named AP/ML/DV values with an explicit convention."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     ap_mm: FiniteFloat
     ml_mm: FiniteFloat

@@ -127,9 +127,6 @@ def test_hello_state_and_clean_shutdown_have_one_response_per_request() -> None:
         "atlasDownload": True,
         "atlasSlicePng": True,
         "projectPersistence": True,
-        "subjectVascularImport": True,
-        "subjectVascularOverlay": True,
-        "subjectVascularRegistration": True,
     }
     state = responses[1]["result"]
     assert state["atlas"] == {

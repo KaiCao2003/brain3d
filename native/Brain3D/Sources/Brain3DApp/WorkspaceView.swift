@@ -8,7 +8,7 @@ struct WorkspaceView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SafetyNotice(compact: false)
+            SafetyNotice()
                 .padding(.horizontal, 18)
                 .padding(.vertical, 10)
 
@@ -35,7 +35,7 @@ struct WorkspaceView: View {
     private var selectedWorkspace: some View {
         switch model.workspaceMode {
         case .dorsal:
-            DorsalVesselWorkspace(model: model)
+            DorsalAtlasWorkspace(model: model)
         case .coronal:
             AtlasSliceWorkspace(model: model, orientation: .coronal)
         case .sagittal:
@@ -49,15 +49,13 @@ struct WorkspaceView: View {
 }
 
 struct SafetyNotice: View {
-    let compact: Bool
-
     var body: some View {
-        Label(SafetyPolicy.animalResearchOnly, systemImage: "shield.lefthalf.filled")
-            .font(compact ? .caption.weight(.semibold) : .callout.weight(.semibold))
+        Label(SafetyPolicy.planningOnlyNotice, systemImage: "shield.lefthalf.filled")
+            .font(.callout.weight(.semibold))
             .foregroundStyle(.orange)
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityLabel("Safety restriction")
-            .accessibilityValue(SafetyPolicy.animalResearchOnly)
+            .accessibilityValue(SafetyPolicy.planningOnlyNotice)
     }
 }
 
@@ -84,8 +82,12 @@ private struct AtlasSliceWorkspace: View {
                     imagePixelWidth: frame?.width ?? 0,
                     imagePixelHeight: frame?.height ?? 0,
                     viewportIdentity: orientation.rawValue,
+                    anatomicalLabels: .slice(orientation),
                     selection: canvasSelection,
                     majorVesselOverlay: model.majorVesselSliceOverlay(for: orientation),
+                    majorVesselConflictOverlay: model.majorVesselConflictOverlay(
+                        for: orientation
+                    ),
                     probeOverlay: model.probeSliceOverlay(for: orientation),
                     interactionHelp: "Click to identify a brain region. Drag to pan, pinch to zoom, and scroll to change slices.",
                     accessibilityLabel: "\(orientation.displayName) atlas slice",
@@ -225,11 +227,7 @@ private struct AtlasSliceWorkspace: View {
     }
 
     private var canvasSelection: AtlasSliceSelection? {
-        guard
-            let selection = model.viewerRegionSelection,
-            selection.orientation == orientation,
-            selection.index == frame?.index
-        else { return nil }
+        guard let selection = currentSelection else { return nil }
         if let region = selection.region {
             return AtlasSliceSelection(
                 column: selection.column,
@@ -252,9 +250,18 @@ private struct AtlasSliceWorkspace: View {
             color: .secondaryLabelColor
         )
     }
+
+    private var currentSelection: ViewerRegionSelection? {
+        guard let selection = model.viewerRegionSelection,
+              selection.orientation == orientation,
+              selection.index == frame?.index
+        else { return nil }
+        return selection
+    }
+
 }
 
-private struct DorsalVesselWorkspace: View {
+private struct DorsalAtlasWorkspace: View {
     @ObservedObject var model: PlannerViewModel
     @State private var resetGeneration = 0
 
@@ -286,12 +293,14 @@ private struct DorsalVesselWorkspace: View {
                         imageData: model.dorsalSurfacePNG,
                         imagePixelWidth: dorsal.width,
                         imagePixelHeight: dorsal.height,
-                        viewportIdentity: "dorsal-reference-vessels",
+                        viewportIdentity: "dorsal-atlas-surface",
+                        anatomicalLabels: .dorsal,
                         selection: canvasSelection,
                         majorVesselOverlay: model.majorVesselDorsalOverlay,
+                        majorVesselConflictOverlay: model.majorVesselDorsalConflictOverlay,
                         probeOverlay: model.probeDorsalOverlay,
                         interactionHelp: "Click to identify the dorsal-most annotated region. Drag to pan and pinch to zoom.",
-                        accessibilityLabel: "Dorsal atlas with reference major vessels",
+                        accessibilityLabel: "Dorsal atlas surface",
                         accessibilityValue: accessibilityValue,
                         resetGeneration: resetGeneration,
                         onPick: { column, row in
@@ -347,7 +356,9 @@ private struct DorsalVesselWorkspace: View {
 
     private var accessibilityValue: String {
         let region = model.dorsalRegionPick?.region?.acronym ?? "no selected region"
-        return "\(model.majorVesselStatus), \(region)"
+        let vesselStatus = model.majorVesselLoadError.map { "Unavailable: \($0)" }
+            ?? model.majorVesselStatus
+        return "\(vesselStatus), \(region)"
     }
 
     private var canvasSelection: AtlasSliceSelection? {

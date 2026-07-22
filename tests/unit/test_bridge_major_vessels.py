@@ -11,7 +11,15 @@ import pytest
 from numpy.typing import NDArray
 from tests.fixtures.atlas_factory import make_allen_metadata_test_double
 
-from mouse_brain_planner.bridge.major_vessels import register_major_vessel_handlers
+import mouse_brain_planner.bridge.major_vessels as major_vessels_module
+from mouse_brain_planner.bridge.major_vessels import (
+    COORDINATE_QUALIFICATION_BLOCKING_REASONS,
+    COORDINATE_QUALIFICATION_REPORT_FILENAME,
+    COORDINATE_QUALIFICATION_REPORT_SHA256,
+    MajorVesselReferenceBridge,
+    _qualification_report_is_verified_rejection,
+    register_major_vessel_handlers,
+)
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
@@ -157,7 +165,20 @@ def _decode_buffer(
     return np.frombuffer(raw, dtype=dtype).reshape(shape)
 
 
-def test_registration_declares_capabilities_without_loading_geometry() -> None:
+def _allow_synthetic_reference(_bridge: MajorVesselReferenceBridge) -> None:
+    """Test-only bypass for legacy synthetic geometry and analysis contracts."""
+
+
+@pytest.fixture
+def qualified_test_reference(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        MajorVesselReferenceBridge,
+        "_reject_unqualified_reference",
+        _allow_synthetic_reference,
+    )
+
+
+def test_registration_omits_unqualified_capabilities_without_loading_geometry() -> None:
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
     load_count = 0
 
@@ -176,25 +197,98 @@ def test_registration_declares_capabilities_without_loading_geometry() -> None:
 
     hello = _call(dispatcher, "hello", client="major-vessel-contract-test")
     capabilities = _mapping(hello["capabilities"])
-    assert capabilities["auditedReferenceMajorVessels"] is True
-    assert capabilities["radiusAwareReferenceVesselAnalysis"] is True
+    assert "auditedReferenceMajorVessels" not in capabilities
+    assert "radiusAwareReferenceVesselAnalysis" not in capabilities
     assert load_count == 0
 
 
-def test_planning_session_registers_major_vessel_methods_and_capabilities() -> None:
+def test_planning_session_registers_fail_closed_major_vessel_methods() -> None:
     from tests.integration.test_bridge_probe_planning import _probe_dispatcher
 
     dispatcher, _session = _probe_dispatcher()
     hello = _call(dispatcher, "hello", client="planning-registration-test")
     capabilities = _mapping(hello["capabilities"])
-    assert capabilities["auditedReferenceMajorVessels"] is True
-    assert capabilities["radiusAwareReferenceVesselAnalysis"] is True
-    with pytest.raises(BridgeError) as exact_atlas_gate:
+    assert "auditedReferenceMajorVessels" not in capabilities
+    assert "radiusAwareReferenceVesselAnalysis" not in capabilities
+    with pytest.raises(BridgeError) as qualification_gate:
         _call(dispatcher, "vessel.major.reference.get")
-    assert exact_atlas_gate.value.code == "ATLAS_IDENTITY_MISMATCH"
+    assert qualification_gate.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
+    assert qualification_gate.value.details == {
+        "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
+        "qualificationReportVerified": True,
+        "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
+    }
 
 
-def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed() -> None:
+@pytest.mark.parametrize(
+    "method",
+    [
+        "vessel.major.reference.get",
+        "vessel.major.reference.geometry",
+        "vessel.major.reference.analyze",
+    ],
+)
+def test_unqualified_reference_endpoints_reject_before_loading_or_mutating(method: str) -> None:
+    dispatcher = _dispatcher_with_atlas()
+    register_major_vessel_handlers(
+        dispatcher,
+        get_project=lambda: pytest.fail("project must not be read"),
+        get_revision=lambda: pytest.fail("revision must not be read"),
+        replace_project=lambda _project: pytest.fail("project must not be replaced"),
+        graph_loader=lambda: pytest.fail("graph must not be loaded"),
+    )
+
+    with pytest.raises(BridgeError) as rejected:
+        _call(dispatcher, method)
+
+    assert rejected.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
+    assert "laterality and whole-brain coverage" in rejected.value.message
+    assert rejected.value.details == {
+        "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
+        "qualificationReportVerified": True,
+        "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
+    }
+
+
+def test_packaged_rejection_report_is_exactly_digest_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report_path = (
+        Path(major_vessels_module.__file__).parent.parent
+        / "assets"
+        / "vasculature"
+        / COORDINATE_QUALIFICATION_REPORT_FILENAME
+    )
+
+    assert hashlib.sha256(report_path.read_bytes()).hexdigest() == (
+        COORDINATE_QUALIFICATION_REPORT_SHA256
+    )
+    assert _qualification_report_is_verified_rejection() is True
+
+    monkeypatch.setattr(
+        major_vessels_module,
+        "COORDINATE_QUALIFICATION_REPORT_SHA256",
+        "0" * 64,
+    )
+    assert _qualification_report_is_verified_rejection() is False
+
+    dispatcher = _dispatcher_with_atlas()
+    register_major_vessel_handlers(
+        dispatcher,
+        get_project=lambda: pytest.fail("project must not be read"),
+        get_revision=lambda: pytest.fail("revision must not be read"),
+        replace_project=lambda _project: pytest.fail("project must not be replaced"),
+        graph_loader=lambda: pytest.fail("graph must not be loaded"),
+    )
+    with pytest.raises(BridgeError) as rejected:
+        _call(dispatcher, "vessel.major.reference.geometry")
+    assert rejected.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
+    assert rejected.value.details["qualificationReportVerified"] is False
+
+
+def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed(
+    qualified_test_reference: None,
+) -> None:
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
     graph = _tiny_graph()
     load_count = 0
@@ -297,7 +391,9 @@ def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed() -> None:
     assert load_count == 1
 
 
-def test_real_bundled_graph_round_trips_through_bridge_buffers() -> None:
+def test_real_bundled_graph_round_trips_through_bridge_buffers(
+    qualified_test_reference: None,
+) -> None:
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
     graph = load_lambada_major_vessels()
     register_major_vessel_handlers(
@@ -352,7 +448,9 @@ def test_real_bundled_graph_round_trips_through_bridge_buffers() -> None:
     assert geometry["limitations"] == list(MANDATORY_LIMITATIONS)
 
 
-def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary() -> None:
+def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary(
+    qualified_test_reference: None,
+) -> None:
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
     load_count = 0
 
@@ -390,6 +488,7 @@ def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary() -> None
 )
 def test_reference_rejects_every_nonexact_atlas_contract(
     metadata_update: dict[str, object],
+    qualified_test_reference: None,
 ) -> None:
     metadata = make_allen_metadata_test_double(25).model_copy(update=metadata_update)
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(metadata))
@@ -455,7 +554,9 @@ def _analysis_params(
     }
 
 
-def test_analysis_requires_both_acknowledgements_before_classifying_conflicts() -> None:
+def test_analysis_requires_both_acknowledgements_before_classifying_conflicts(
+    qualified_test_reference: None,
+) -> None:
     project, revision = _project_with_probe_plan()
     assert project.atlas is not None
     state = _ProjectState(project=project, revision=revision)
@@ -543,7 +644,9 @@ def test_analysis_requires_both_acknowledgements_before_classifying_conflicts() 
     assert provenance["uncertaintyBoundsReviewed"] is False
 
 
-def test_analysis_does_not_overwrite_project_when_revision_changes_during_compute() -> None:
+def test_analysis_does_not_overwrite_project_when_revision_changes_during_compute(
+    qualified_test_reference: None,
+) -> None:
     project, revision = _project_with_probe_plan()
     assert project.atlas is not None
     state = _ProjectState(project=project, revision=revision)
@@ -579,7 +682,9 @@ def test_analysis_does_not_overwrite_project_when_revision_changes_during_comput
     assert state.project.probe_vessel_analyses == []
 
 
-def test_analysis_rejects_stale_hash_and_nonboolean_acknowledgement_before_loading_graph() -> None:
+def test_analysis_rejects_stale_hash_and_nonboolean_acknowledgement_before_loading_graph(
+    qualified_test_reference: None,
+) -> None:
     project, revision = _project_with_probe_plan()
     assert project.atlas is not None
     state = _ProjectState(project=project, revision=revision)

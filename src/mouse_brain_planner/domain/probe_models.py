@@ -55,7 +55,7 @@ class ProbeTipGeometry(StrEnum):
 class ProbeSourceArtifact(BaseModel):
     """Exact primary artifact used to transcribe factual geometry."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     title: str = Field(min_length=1, max_length=500)
     source_url: str = Field(min_length=1, max_length=2000)
@@ -77,7 +77,7 @@ class ProbeSourceArtifact(BaseModel):
 class ProbeModelVerification(BaseModel):
     """Approval evidence controlling whether a model may be called verified."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     status: ProbeVerificationStatus
     primary_sources: tuple[ProbeSourceArtifact, ...] = ()
@@ -133,7 +133,7 @@ class ProbeLocalPoint(BaseModel):
     Lateral and normal offsets complete a right-handed local frame.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     axial_from_tip_um: NonNegativeFiniteFloat
     lateral_um: FiniteFloat = 0
@@ -144,7 +144,7 @@ class ProbeLocalPoint(BaseModel):
 class RecordingSiteDefinition(BaseModel):
     """One source-defined recording/reference site in probe-local coordinates."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     site_id: str = Field(min_length=1, max_length=200)
     local: ProbeLocalPoint
@@ -155,7 +155,7 @@ class RecordingSiteDefinition(BaseModel):
 class ProbeShankDefinition(BaseModel):
     """One implantable planar shank and its complete local site table."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     shank_id: str = Field(min_length=1, max_length=200)
     length_um: PositiveFiniteFloat
@@ -195,7 +195,7 @@ class ProbeShankDefinition(BaseModel):
 class ProbeModelDefinition(BaseModel):
     """Versioned, unit-explicit probe geometry with verification provenance."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     model_id: str = Field(min_length=1, max_length=200)
     model_version: str = Field(min_length=1, max_length=100)
@@ -270,7 +270,7 @@ class PlacementMethod(StrEnum):
 class NormalizedProbePlacement(BaseModel):
     """One normalized AP/ML/DV probe trajectory and surface intersections."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID = Field(default_factory=uuid4)
     name: str = Field(min_length=1, max_length=200)
@@ -420,7 +420,7 @@ class NormalizedProbePlacement(BaseModel):
 class PlacedRecordingSite(BaseModel):
     """One local site mapped into the placement's anatomical frame."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID
     probe_model_id: str
@@ -435,7 +435,7 @@ class PlacedRecordingSite(BaseModel):
 class PlacedProbeShank(BaseModel):
     """One finite implanted shank centerline with its conservative envelope."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID
     probe_model_id: str = Field(min_length=1, max_length=200)

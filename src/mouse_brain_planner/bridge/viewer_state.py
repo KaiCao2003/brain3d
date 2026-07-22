@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID
@@ -53,11 +54,13 @@ class ViewerStateBridge:
 
     def register(self) -> None:
         self.dispatcher.register("viewer.state.get", self.state_get)
+        self.dispatcher.register("viewer.point.navigate", self.point_navigate)
         self.dispatcher.register("viewer.region.pick", self.region_pick)
         self.dispatcher.register("viewer.slice.set", self.slice_set)
         self.dispatcher.register("viewer.slice.render", self.slice_render)
         self.dispatcher.declare_capability("independentSliceViewer")
         self.dispatcher.declare_capability("independentSliceRender")
+        self.dispatcher.declare_capability("atomicAtlasPointNavigation")
 
     def state_get(self, params: Mapping[str, object]) -> JsonObject:
         _validate_params(params, required={"protocolVersion"})
@@ -139,6 +142,77 @@ class ViewerStateBridge:
             selected_region_id=None if region is None else region.structure_id,
         )
         return self._publish(updated, atlas, renderer, status="regionSelected")
+
+    def point_navigate(self, params: Mapping[str, object]) -> JsonObject:
+        """Atomically navigate every orthogonal view to one atlas-native point.
+
+        This is a localization mutation, not a linked cursor or focus mode.  The
+        supplied point chooses one containing voxel; its AP, ML, and DV indices
+        become the coronal, sagittal, and horizontal depths respectively.  All
+        three frames are rendered before the single project replacement so a
+        rendering failure cannot publish a partial navigation state.
+        """
+
+        _validate_params(
+            params,
+            required={
+                "protocolVersion",
+                "projectId",
+                "expectedProjectRevision",
+                "point",
+            },
+        )
+        _require_protocol(params)
+        project, atlas, renderer = self._validated_mutation_context(params)
+        point = _atlas_physical_point(params["point"], atlas)
+        try:
+            index = BrainGlobeAtlasSpace(atlas.metadata).physical_to_index(point)
+        except ValueError as error:
+            raise BridgeError(
+                "ATLAS_POINT_OUT_OF_RANGE",
+                "The navigation point must lie inside the atlas half-open physical volume.",
+                details={
+                    "minimumInclusiveMicrometres": [0.0, 0.0, 0.0],
+                    "maximumExclusiveMicrometres": list(atlas.metadata.extent_um),
+                    "componentOrder": ["AP", "DV", "ML"],
+                },
+            ) from error
+
+        updated_depths = ViewerSliceDepths(
+            coronal=index.ap,
+            sagittal=index.ml,
+            horizontal=index.dv,
+        )
+        updated = _validated_project_update(
+            project,
+            viewer_slice_depths=updated_depths,
+            viewer_region_selection=None,
+            selected_region_id=None,
+        )
+        rendered_slices: JsonObject = {}
+        for orientation in SliceOrientation:
+            slice_index = _depth_for(updated_depths, orientation)
+            rendered_slices[orientation.value] = render_atlas_slice_payload(
+                atlas,
+                renderer,
+                orientation,
+                slice_index,
+                compression_level=1,
+            )
+
+        result = self._publish(updated, atlas, renderer, status="pointNavigated")
+        result["navigatedPoint"] = _atlas_point_payload(point)
+        result["containingVoxelIndex"] = {
+            "frameId": index.frame_id,
+            "atlasIdentifier": index.atlas_key,
+            "atlasVersion": index.atlas_version,
+            "componentOrder": ["AP", "DV", "ML"],
+            "ap": index.ap,
+            "dv": index.dv,
+            "ml": index.ml,
+        }
+        result["renderedSlices"] = rendered_slices
+        return result
 
     def slice_set(self, params: Mapping[str, object]) -> JsonObject:
         _validate_params(
@@ -503,3 +577,120 @@ def _point_payload(point: BrainGlobePhysicalPoint) -> JsonObject:
         "dvMicrometres": point.dv_um,
         "mlMicrometres": point.ml_um,
     }
+
+
+def _atlas_physical_point(
+    raw: object,
+    atlas: LoadedAtlasProtocol,
+) -> BrainGlobePhysicalPoint:
+    if not isinstance(raw, Mapping):
+        raise BridgeError(
+            "INVALID_PARAMS",
+            "point must be an exact BrainGlobe physical ASR object.",
+            details={"field": "point"},
+        )
+    required = {
+        "frameId",
+        "atlasIdentifier",
+        "atlasVersion",
+        "componentOrder",
+        "units",
+        "apMicrometres",
+        "dvMicrometres",
+        "mlMicrometres",
+    }
+    actual = set(raw)
+    if actual != required:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            "point does not match the exact BrainGlobe physical ASR schema.",
+            details={
+                "field": "point",
+                "missing": sorted(required - actual),
+                "unexpected": sorted(str(item) for item in actual - required),
+            },
+        )
+    expected_identity = (
+        atlas.metadata.atlas_key,
+        atlas.metadata.atlas_package_version,
+    )
+    actual_identity = (raw["atlasIdentifier"], raw["atlasVersion"])
+    if actual_identity != expected_identity:
+        raise BridgeError(
+            "ATLAS_POINT_IDENTITY_MISMATCH",
+            "The navigation point does not belong to the loaded project atlas package.",
+            details={
+                "requestedIdentifier": _safe_protocol_value(actual_identity[0]),
+                "requestedVersion": _safe_protocol_value(actual_identity[1]),
+                "expectedIdentifier": expected_identity[0],
+                "expectedVersion": expected_identity[1],
+            },
+        )
+    exact_values = {
+        "frameId": ATLAS_PHYSICAL_FRAME_ID,
+        "componentOrder": ["AP", "DV", "ML"],
+        "units": "micrometre",
+    }
+    for field, expected in exact_values.items():
+        if raw[field] != expected:
+            raise BridgeError(
+                "INVALID_PARAMS",
+                f"point.{field} does not match the BrainGlobe physical ASR contract.",
+                details={
+                    "field": f"point.{field}",
+                    "expected": expected,
+                    "received": _safe_protocol_value(raw[field]),
+                },
+            )
+    return BrainGlobePhysicalPoint(
+        atlas_key=atlas.metadata.atlas_key,
+        atlas_version=atlas.metadata.atlas_package_version,
+        ap_um=_finite_number(raw["apMicrometres"], "point.apMicrometres"),
+        dv_um=_finite_number(raw["dvMicrometres"], "point.dvMicrometres"),
+        ml_um=_finite_number(raw["mlMicrometres"], "point.mlMicrometres"),
+    )
+
+
+def _atlas_point_payload(point: BrainGlobePhysicalPoint) -> JsonObject:
+    return {
+        "frameId": point.frame_id,
+        "atlasIdentifier": point.atlas_key,
+        "atlasVersion": point.atlas_version,
+        "componentOrder": ["AP", "DV", "ML"],
+        "units": "micrometre",
+        "apMicrometres": point.ap_um,
+        "dvMicrometres": point.dv_um,
+        "mlMicrometres": point.ml_um,
+    }
+
+
+def _finite_number(value: object, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BridgeError(
+            "INVALID_PARAMS",
+            f"{field} must be a finite number.",
+            details={"field": field},
+        )
+    number = float(value)
+    if not math.isfinite(number):
+        raise BridgeError(
+            "INVALID_PARAMS",
+            f"{field} must be a finite number.",
+            details={"field": field},
+        )
+    return number
+
+
+def _safe_protocol_value(value: object) -> object:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [
+            (
+                item
+                if item is None or isinstance(item, (bool, int, float, str))
+                else type(item).__name__
+            )
+            for item in value
+        ]
+    return type(value).__name__

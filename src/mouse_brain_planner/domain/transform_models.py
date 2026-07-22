@@ -51,7 +51,7 @@ class TransformMethod(StrEnum):
 class AnatomicalFrameDefinition(BaseModel):
     """Definition of one named AP/ML/DV frame in micrometres."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     frame_id: str = Field(min_length=1, max_length=200)
     kind: CoordinateSystemKind
@@ -80,7 +80,7 @@ class AnatomicalFrameDefinition(BaseModel):
 class AnatomicalPoint(BaseModel):
     """One named-frame point with explicit anatomical components."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     frame_id: str = Field(min_length=1, max_length=200)
     ap_um: FiniteFloat
@@ -98,7 +98,7 @@ class AnatomicalPoint(BaseModel):
 class AnatomicalVector(BaseModel):
     """One named-frame direction or displacement; translation never applies."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     frame_id: str = Field(min_length=1, max_length=200)
     ap_um: FiniteFloat
@@ -116,7 +116,7 @@ class AnatomicalVector(BaseModel):
 class LandmarkCorrespondence3D(BaseModel):
     """One explicitly paired source and destination landmark."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     landmark_uuid: UUID = Field(default_factory=uuid4)
     label: str = Field(min_length=1, max_length=200)
@@ -128,7 +128,7 @@ class LandmarkCorrespondence3D(BaseModel):
 class TransformLandmarkResidual(BaseModel):
     """Destination-frame residual for one enabled 3D landmark."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     landmark_uuid: UUID
     ap_error_um: FiniteFloat
@@ -140,7 +140,7 @@ class TransformLandmarkResidual(BaseModel):
 class AnatomicalTransform(BaseModel):
     """One validated versioned homogeneous transform in AP/ML/DV order."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     transform_uuid: UUID = Field(default_factory=uuid4)
     version: int = Field(default=1, gt=0)

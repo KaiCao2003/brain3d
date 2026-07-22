@@ -165,7 +165,7 @@ struct AtlasSliceViewportTests {
         ))
     }
 
-    @Test("Precise scroll deltas accumulate while wheel and momentum remain deterministic")
+    @Test("Precise, wheel, and momentum deltas accumulate deterministically")
     func scrollAccumulation() {
         var accumulator = AtlasSliceScrollAccumulator(preciseThreshold: 12)
 
@@ -178,7 +178,7 @@ struct AtlasSliceViewportTests {
 
         #expect(accumulator.consume(deltaY: -25, isPrecise: true, isMomentum: false) == 2)
         #expect(accumulator.remainder == -1)
-        #expect(accumulator.consume(deltaY: 24, isPrecise: true, isMomentum: true) == 0)
+        #expect(accumulator.consume(deltaY: 24, isPrecise: true, isMomentum: true) == -2)
         #expect(accumulator.remainder == 0)
 
         #expect(accumulator.consume(deltaY: -0.1, isPrecise: false, isMomentum: false) == 1)
@@ -188,6 +188,55 @@ struct AtlasSliceViewportTests {
 
         accumulator.reset()
         #expect(accumulator.remainder == 0)
+    }
+
+    @Test("A new or reversed direct gesture interrupts momentum without stale remainder")
+    func momentumInterruption() {
+        var accumulator = AtlasSliceScrollAccumulator(preciseThreshold: 12)
+
+        #expect(accumulator.consume(
+            deltaY: -18,
+            isPrecise: true,
+            isMomentum: true,
+            phase: .began,
+            timestamp: 1
+        ) == 1)
+        #expect(accumulator.remainder == -6)
+        #expect(accumulator.consume(
+            deltaY: -6,
+            isPrecise: true,
+            isMomentum: true,
+            phase: .changed,
+            timestamp: 1.01
+        ) == 1)
+        #expect(accumulator.remainder == 0)
+
+        // The new physical gesture starts from its own delta, not momentum's
+        // fractional state, and an immediate reversal clears its remainder.
+        #expect(accumulator.consume(
+            deltaY: 5,
+            isPrecise: true,
+            isMomentum: false,
+            phase: .began,
+            timestamp: 1.02
+        ) == 0)
+        #expect(accumulator.remainder == 5)
+        #expect(accumulator.consume(
+            deltaY: -12,
+            isPrecise: true,
+            isMomentum: false,
+            phase: .changed,
+            timestamp: 1.03
+        ) == 1)
+        #expect(accumulator.remainder == 0)
+
+        #expect(accumulator.consume(
+            deltaY: -10_000,
+            isPrecise: true,
+            isMomentum: true,
+            phase: .changed,
+            timestamp: 1.04
+        ) == AtlasSliceScrollAccumulator.defaultMaximumStepsPerEvent)
     }
 
     @Test("Scroll gesture boundaries, reversals, gaps, and huge deltas clear stale remainder")

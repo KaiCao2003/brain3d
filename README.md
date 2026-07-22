@@ -5,8 +5,9 @@ development tree provides one native, single-view workspace with exactly five mo
 **Dorsal / Coronal / Sagittal / Horizontal / 3D**.
 
 > **Animal research only — non-human and non-clinical.** Brain3D is an engineering testing build,
-> not a qualified surgical-navigation or veterinary device. Its atlas, calibration, probe, and
-> vascular outputs require independent review before an animal procedure.
+> not a qualified surgical-navigation or veterinary device. Its atlas, calibration, and probe
+> outputs require independent review before an animal procedure. The current build exposes
+> neither vessel geometry nor a vessel-clearance result.
 
 The repository is public at [KaiCao2003/brain3d](https://github.com/KaiCao2003/brain3d). Current
 development is tracked in [draft pull request #1](https://github.com/KaiCao2003/brain3d/pull/1).
@@ -20,17 +21,18 @@ claim.
 | Atlas | BrainGlobe `allen_mouse_25um` package `1.2` only; 10 µm is excluded from this testing phase |
 | Slice navigation | One full-size coronal, sagittal, or horizontal view; each retains an independent depth with buttons, slider, wheel, pan, and zoom |
 | Region inspection | Clicking replaces one compact acronym/name label and does not change any slice depth |
-| Dorsal | Atlas surface with reference major vessels and the selected probe's AP/ML projection |
-| 3D | Native SceneKit brain mesh with camera control, atlas-region picking, probes, and radius-bearing major-vessel tubes |
-| Stereotaxy | Signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC and guarded target projection |
-| Probes | Versioned catalog, placement, slice/3D overlays, recording sites, exact region traversal, inspection, and CSV/JSON export |
-| Vessels | LAMBADA P60_606 reference graph, filtered to diameter ≥30 µm, overlaid in 2D slices, Dorsal, and 3D |
-| Reference analysis | Probe-envelope to tapered-vessel-surface analysis with explicit margin, uncertainty, risk-profile, and incomplete-coverage acknowledgements |
+| Dorsal | Atlas surface with the selected probe's AP/ML projection |
+| 3D | Native SceneKit brain mesh with camera control, atlas-region picking, and probes |
+| Stereotaxy | Required subject identity; signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC and guarded target projection |
+| Probes | Four explicit editable placement modes, slice/3D overlays, recording sites, exact region traversal, inspection, and CSV/JSON export |
+| Vessels | P60_606 derivative retained as archived qualification evidence only; no vessel layer is displayed or served |
+| Reference analysis | Unavailable: all reference metadata, geometry, and analysis calls fail closed with `VESSEL_GEOMETRY_UNAVAILABLE` |
 | Persistence | Checksummed `.mouseplan` packages with revisions, provenance, migrations, and backup recovery |
 
-Population vascular density and subject-image registration remain archived backend capabilities.
-They are intentionally absent from the primary planning UI and are not substituted for vessel
-paths. There is no focus mode, crosshair, 2×2 layout, or capillary layer.
+Population vascular density and subject-image registration remain archived compatibility code and
+persisted data only. Their methods and capabilities are not registered by the primary bridge, they
+are absent from the planning UI, and they are not substituted for vessel paths. There is no focus
+mode, crosshair, 2×2 layout, or capillary layer.
 
 ## Coordinate contract
 
@@ -48,6 +50,11 @@ remain centralized in Python. An unprojected entry stays unprojected until an ex
 calibration passes QC; the Allen CCF does not provide one official bregma transform. See
 [Coordinate Systems](COORDINATE_SYSTEMS.md).
 
+Probe creation and editing expose exactly four input contracts: **Entry + target**, **Entry +
+angles + depth**, **Target + angles + depth**, and **Stereotaxic target**. Inputs that are not
+part of the selected contract are neither submitted nor silently reused. Derived entry, target,
+angles, and depth remain provenance-bound to the selected mode.
+
 ## Probe geometry boundary
 
 The catalog includes a complete source transcription of Neuropixels 1.0 NP1000 /
@@ -61,32 +68,30 @@ requires explicit acknowledgement and does not present it as independently verif
 A separate 16-site generic model is synthetic software-test geometry. See
 [Probe Models](PROBE_MODELS.md).
 
-## Major-vessel reference and analysis
+## Archived major-vessel evidence
 
-The bundled vessel layer is a reproducible derivative of specimen P60_606 from Renier, de
-Launoit, and Skriabine's *Vascular graphs of the developing post-natal mouse brain*,
+The repository retains a reproducible diameter-≥30 µm derivative of specimen P60_606 from
+Renier, de Launoit, and Skriabine's *Vascular graphs of the developing post-natal mouse brain*,
 [Zenodo record 18876865](https://zenodo.org/records/18876865), DOI
-`10.5281/zenodo.18876865`, CC BY 4.0. It keeps maximal consecutive in-bounds runs whose point
-radius is at least 15 µm (diameter at least 30 µm). The integrity-checked asset contains 71,313
-points, 59,495 segments, and 11,818 runs.
+`10.5281/zenodo.18876865`, CC BY 4.0. The derivative and its extraction record are evidence for
+qualification work; they are not an application vessel layer.
 
-This is one fixed, cleared, atlas-registered P60 reference—not live or subject-specific
-vasculature. The source omits pial and choroidal vessels; this derivative also omits smaller
-vessels. Sex/side are unpublished, artery/vein identity is unavailable, and registration error,
-tissue distortion, biological variation, and omitted vessels are not bounded by the graph.
+Qualification against the pinned Allen 25 µm v1.2 atlas found supporting AP and DV orientation
+evidence, but rejected the geometry for use because the primary source describes hemisphere
+specimens and the exact graph has no persisted property that binds its biological hemisphere or
+ML laterality. Numeric coordinates on both sides of an array midpoint do not establish
+whole-brain coverage. The application does not guess an ML sign and does not mirror the source.
 
-The V3 analysis uses a conservative AABB broad phase, then minimizes distance from the probe
-envelope to candidate tapered vessel surfaces and applies the declared margin and uncertainty.
-It requires separate acknowledgement of those inputs and the reference's incomplete coverage.
+The runtime therefore omits the `auditedReferenceMajorVessels` and
+`radiusAwareReferenceVesselAnalysis` capabilities. Calls to
+`vessel.major.reference.get`, `vessel.major.reference.geometry`, and
+`vessel.major.reference.analyze` return `VESSEL_GEOMETRY_UNAVAILABLE` before loading or serving
+the derivative. No displayed absence, geometry comparison, or result from this asset may be used
+as a surgical-clearance claim.
 
-The bundled P60_606 source does not publish reviewed bounds for atlas-registration error or
-tissue distortion. Therefore a trajectory with no loaded-geometry conflict returns
-`insufficientGeometry`; entering zero or another user value cannot manufacture an absence claim.
-Measured intersections and threshold violations in the loaded reference are still reported. The
-following wording is reserved for a future source that supplies reviewed bounds and for which the
-stated uncertainty meets those bounds:
-
-> No conflict detected within the loaded geometry and stated uncertainty assumptions.
+The canonical rejected report is
+[checked in as qualification evidence](docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 
 See [the derivation record](docs/LAMBADA_MAJOR_VESSELS.md) and
 [Known Limitations](KNOWN_LIMITATIONS.md).
@@ -97,12 +102,12 @@ See [the derivation record](docs/LAMBADA_MAJOR_VESSELS.md) and
 SwiftUI macOS application
   ├─ one selected Dorsal / Coronal / Sagittal / Horizontal / 3D workspace
   ├─ native controls, file panels, accessibility, and 2D overlays
-  └─ SceneKit brain/probe/vessel rendering and camera interaction
+  └─ SceneKit brain/probe rendering and camera interaction
                          ↕ strict typed NDJSON
 Python 3.12 scientific service
   ├─ pinned BrainGlobe atlas access and coordinate transforms
-  ├─ calibration, probe geometry, voxel traversal, and vessel analysis
-  └─ provenance, integrity checks, stale-result rejection, and persistence
+  ├─ calibration, probe geometry, and voxel traversal
+  └─ provenance, integrity checks, qualification gates, stale-result rejection, and persistence
 ```
 
 Swift owns presentation. Python owns scientific coordinate conversion and analysis. Both paths
@@ -159,8 +164,8 @@ src/mouse_brain_planner/
   bridge/                       typed service used by the native app
   coordinates/                 named coordinate frames and transforms
   probes/                       source-traceable probe catalog
-  analysis/                     region traversal and tapered-vessel analysis
-  vasculature/                  LAMBADA reference plus archived evidence workflows
+  analysis/                     region traversal plus archived vessel-analysis code
+  vasculature/                  archived LAMBADA evidence and qualification workflows
   persistence/                  checksummed project packages and migrations
 tests/                          Python software tests and fixtures
 docs/                           architecture, decisions, audits, and source records

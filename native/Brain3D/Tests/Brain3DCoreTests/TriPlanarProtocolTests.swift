@@ -59,7 +59,7 @@ struct TriPlanarProtocolTests {
         #expect(depths == [1, 5, 2])
     }
 
-    @Test("The four supported methods encode exact protocol-v1 request fields")
+    @Test("The supported methods encode exact protocol-v1 request fields")
     func exactRequestWireShapes() throws {
         let canonicalProjectId = "abcdefab-cdef-4abc-8def-abcdefabcdef"
         let projectId = try #require(UUID(uuidString: canonicalProjectId))
@@ -103,9 +103,93 @@ struct TriPlanarProtocolTests {
         ])
         #expect(pick["projectId"] as? String == canonicalProjectId)
 
+        let snapshot = try JSONDecoder().decode(
+            ViewerStateResult.self,
+            from: try ViewerSnapshotFixture.data()
+        ).snapshot
+        let navigation = try jsonObject(ViewerPointNavigationParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            atlas: snapshot.atlas,
+            apMicrometres: 37.5,
+            dvMicrometres: 62.5,
+            mlMicrometres: 137.5
+        ))
+        #expect(Set(navigation.keys) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "point",
+        ])
+        let point = try #require(navigation["point"] as? [String: Any])
+        #expect(Set(point.keys) == [
+            "frameId", "atlasIdentifier", "atlasVersion", "componentOrder", "units",
+            "apMicrometres", "dvMicrometres", "mlMicrometres",
+        ])
+        #expect(point["frameId"] as? String == "BRAINGLOBE_PHYSICAL_ASR_UM")
+        #expect(point["atlasIdentifier"] as? String == "allen_mouse_25um")
+        #expect(point["atlasVersion"] as? String == "1.2")
+        #expect(point["componentOrder"] as? [String] == ["AP", "DV", "ML"])
+        #expect(point["units"] as? String == "micrometre")
+
         #expect(ViewerBridgeMethod.allCases.map(\.rawValue) == [
             "viewer.state.get", "viewer.slice.set", "viewer.slice.render", "viewer.region.pick",
+            "viewer.point.navigate",
         ])
+    }
+
+    @Test("Point navigation locks one point, one revision, and all three rendered frames")
+    func pointNavigationResponse() throws {
+        let data = try pointNavigationData()
+        let result = try JSONDecoder().decode(ViewerPointNavigationResult.self, from: data)
+        #expect(result.status == .pointNavigated)
+        #expect(result.snapshot.selection == nil)
+        #expect(result.navigatedPoint.apMicrometres == 37.5)
+        #expect(result.containingVoxelIndex.ap == 1)
+        #expect(result.containingVoxelIndex.dv == 2)
+        #expect(result.containingVoxelIndex.ml == 5)
+        #expect(result.renderedSlices.coronal.index == 1)
+        #expect(result.renderedSlices.sagittal.index == 5)
+        #expect(result.renderedSlices.horizontal.index == 2)
+
+        let wrongStatus = try pointNavigationData { object in
+            object["status"] = "sliceUpdated"
+        }
+        #expect(decodeFails(ViewerPointNavigationResult.self, from: wrongStatus))
+
+        let wrongVoxel = try pointNavigationData { object in
+            var voxel = try nestedObject(object, "containingVoxelIndex")
+            voxel["ml"] = 4
+            try setNestedObject(&object, voxel, "containingVoxelIndex")
+        }
+        #expect(decodeFails(ViewerPointNavigationResult.self, from: wrongVoxel))
+
+        let partialDepths = try pointNavigationData { object in
+            var sagittal = try nestedObject(object, "slices", "sagittal")
+            sagittal["index"] = 4
+            sagittal["sliceCenterMicrometres"] = 112.5
+            try setNestedObject(&object, sagittal, "slices", "sagittal")
+        }
+        #expect(decodeFails(ViewerPointNavigationResult.self, from: partialDepths))
+
+        let missingFrame = try pointNavigationData { object in
+            var rendered = try nestedObject(object, "renderedSlices")
+            rendered.removeValue(forKey: "horizontal")
+            try setNestedObject(&object, rendered, "renderedSlices")
+        }
+        #expect(decodeFails(ViewerPointNavigationResult.self, from: missingFrame))
+
+        let extraPointField = try pointNavigationData { object in
+            var point = try nestedObject(object, "navigatedPoint")
+            point["ambiguousX"] = 37.5
+            try setNestedObject(&object, point, "navigatedPoint")
+        }
+        #expect(decodeFails(ViewerPointNavigationResult.self, from: extraPointField))
+
+        let staleRenderedFrame = try pointNavigationData { object in
+            var frame = try nestedObject(object, "renderedSlices", "coronal")
+            frame["index"] = 0
+            frame["sliceCenterMicrometres"] = 12.5
+            try setNestedObject(&object, frame, "renderedSlices", "coronal")
+        }
+        #expect(decodeFails(ViewerPointNavigationResult.self, from: staleRenderedFrame))
     }
 
     @Test("Fused slice response locks its full-resolution frame to the changed view only")
@@ -273,6 +357,10 @@ struct TriPlanarProtocolTests {
     @Test("Invalid outgoing mutation indices cannot be constructed")
     func invalidOutgoingValues() throws {
         let projectId = try #require(UUID(uuidString: ViewerSnapshotFixture.projectId))
+        let atlas = try JSONDecoder().decode(
+            ViewerStateResult.self,
+            from: try ViewerSnapshotFixture.data()
+        ).snapshot.atlas
         #expect(throws: ViewerContractError.invalid(
             "Expected project revision and slice index must be nonnegative."
         )) {
@@ -293,6 +381,28 @@ struct TriPlanarProtocolTests {
                 index: 1,
                 column: -1,
                 row: 2
+            )
+        }
+        #expect(throws: ViewerContractError.self) {
+            try ViewerPointNavigationParameters(
+                projectId: projectId,
+                expectedProjectRevision: 7,
+                atlas: atlas,
+                apMicrometres: 100,
+                dvMicrometres: 50,
+                mlMicrometres: 50
+            )
+        }
+        #expect(throws: ViewerContractError.invalid(
+            "Expected project revision must be nonnegative."
+        )) {
+            try ViewerPointNavigationParameters(
+                projectId: projectId,
+                expectedProjectRevision: -1,
+                atlas: atlas,
+                apMicrometres: 37.5,
+                dvMicrometres: 62.5,
+                mlMicrometres: 137.5
             )
         }
     }
@@ -319,6 +429,103 @@ struct TriPlanarProtocolTests {
             ]
         }
     }
+
+    private func pointNavigationData(
+        mutate: ((inout [String: Any]) throws -> Void)? = nil
+    ) throws -> Data {
+        try ViewerSnapshotFixture.mutated { object in
+            let atlas = try #require(object["atlas"] as? [String: Any])
+            object["status"] = "pointNavigated"
+            object["selection"] = NSNull()
+            object["navigatedPoint"] = [
+                "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+                "atlasIdentifier": "allen_mouse_25um",
+                "atlasVersion": "1.2",
+                "componentOrder": ["AP", "DV", "ML"],
+                "units": "micrometre",
+                "apMicrometres": 37.5,
+                "dvMicrometres": 62.5,
+                "mlMicrometres": 137.5,
+            ]
+            object["containingVoxelIndex"] = [
+                "frameId": "BRAINGLOBE_VOXEL_INDEX_ASR",
+                "atlasIdentifier": "allen_mouse_25um",
+                "atlasVersion": "1.2",
+                "componentOrder": ["AP", "DV", "ML"],
+                "ap": 1,
+                "dv": 2,
+                "ml": 5,
+            ]
+            object["renderedSlices"] = [
+                "coronal": renderedSlice(
+                    atlas: atlas,
+                    orientation: "coronal",
+                    index: 1,
+                    count: 4,
+                    fixed: "AP",
+                    row: "DV",
+                    column: "ML",
+                    width: 8,
+                    height: 6,
+                    center: 37.5
+                ),
+                "sagittal": renderedSlice(
+                    atlas: atlas,
+                    orientation: "sagittal",
+                    index: 5,
+                    count: 8,
+                    fixed: "ML",
+                    row: "DV",
+                    column: "AP",
+                    width: 4,
+                    height: 6,
+                    center: 137.5
+                ),
+                "horizontal": renderedSlice(
+                    atlas: atlas,
+                    orientation: "horizontal",
+                    index: 2,
+                    count: 6,
+                    fixed: "DV",
+                    row: "AP",
+                    column: "ML",
+                    width: 8,
+                    height: 4,
+                    center: 62.5
+                ),
+            ]
+            try mutate?(&object)
+        }
+    }
+}
+
+private func renderedSlice(
+    atlas: [String: Any],
+    orientation: String,
+    index: Int,
+    count: Int,
+    fixed: String,
+    row: String,
+    column: String,
+    width: Int,
+    height: Int,
+    center: Double
+) -> [String: Any] {
+    [
+        "protocolVersion": 1,
+        "mimeType": "image/png",
+        "pngBase64": "iVBORw0KGgo=",
+        "width": width,
+        "height": height,
+        "orientation": orientation,
+        "index": index,
+        "sliceCount": count,
+        "fixedAxis": fixed,
+        "rowAxis": row,
+        "columnAxis": column,
+        "sliceCenterMicrometres": center,
+        "atlas": atlas,
+    ]
 }
 
 private enum ViewerSnapshotFixture {

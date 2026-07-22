@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -22,10 +23,13 @@ from mouse_brain_planner.analysis.vessel_clearance import (
 )
 from mouse_brain_planner.domain.vessel_clearance_models import (
     MajorVesselSourceProvenance,
+    ProbeVesselAnalysis,
+    ProbeVesselConflict,
     ProbeVesselResultStatus,
     VesselConflictClassification,
     VesselRiskProfile,
 )
+from mouse_brain_planner.domain.vessel_plan_models import build_probe_vessel_analysis_bundle
 from mouse_brain_planner.surgery.measurements import finite_segment_closest_points
 
 
@@ -200,6 +204,57 @@ def test_reviewed_source_uncertainty_requires_complete_evidence() -> None:
     payload["registration_transform_id"] = None
     with pytest.raises(ValueError, match="transform ID and both uncertainty bounds"):
         MajorVesselSourceProvenance.model_validate(payload)
+
+
+def test_schema_six_provenance_accepts_authors_above_retracted_limits() -> None:
+    authors = ("A" * 501, *(f"Author {index}" for index in range(128)))
+    payload = _source().model_dump()
+    payload["authors"] = authors
+
+    restored = MajorVesselSourceProvenance.model_validate(payload)
+
+    assert restored.authors == authors
+
+
+def test_schema_six_vessel_records_accept_warnings_above_retracted_limits() -> None:
+    result = analyze_probe_vessel_clearance(
+        shanks=(_probe(),),
+        vessels=_horizontal_vessel(distance=10),
+        risk_profile=_profile(),
+        provenance=_source(),
+    )
+    warnings = ("w" * 2_001, *(f"warning {index}" for index in range(64)))
+    analysis_payload = result.model_dump()
+    analysis_payload["warnings"] = warnings
+    restored_analysis = ProbeVesselAnalysis.model_validate(analysis_payload)
+
+    conflict_payload = result.conflicts[0].model_dump()
+    conflict_payload["warnings"] = warnings
+    restored_conflict = ProbeVesselConflict.model_validate(conflict_payload)
+
+    assert restored_analysis.warnings == warnings
+    assert restored_conflict.warnings == warnings
+
+
+def test_vessel_bundle_rejects_more_conflicts_than_requested() -> None:
+    analysis = analyze_probe_vessel_clearance(
+        shanks=(_probe(),),
+        vessels=_horizontal_vessel(distance=10, repeats=2),
+        risk_profile=_profile(),
+        provenance=_source(),
+        maximum_conflicts=2,
+    )
+    assert len(analysis.conflicts) == 2
+
+    with pytest.raises(ValueError, match="conflicts exceed the persisted maximum"):
+        build_probe_vessel_analysis_bundle(
+            plan_uuid=uuid4(),
+            plan_version=1,
+            plan_input_sha256="a" * 64,
+            maximum_conflicts=1,
+            analysis=analysis,
+            limitations=("Reference-only geometry.",),
+        )
 
 
 def test_unconfirmed_reference_profile_returns_measurements_without_classification() -> None:

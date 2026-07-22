@@ -31,5 +31,9 @@ let package = Package(
             name: "Brain3DSceneTests",
             dependencies: ["Brain3DScene", "Brain3DCore"]
         ),
+        .testTarget(
+            name: "Brain3DAppTests",
+            dependencies: ["Brain3DApp", "Brain3DCore"]
+        ),
     ]
 )

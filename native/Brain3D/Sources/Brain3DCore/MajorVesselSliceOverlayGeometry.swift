@@ -7,19 +7,137 @@ public struct MajorVesselSliceSegment: Equatable, Sendable {
     public let startRadiusMicrometres: Double
     public let endRadiusMicrometres: Double
     public let sourceEdgeIndex: Int32
+    public let runIndex: Int
+    public let segmentIndexInRun: Int
 
     public init(
         start: ProbeSliceImagePoint,
         end: ProbeSliceImagePoint,
         startRadiusMicrometres: Double,
         endRadiusMicrometres: Double,
-        sourceEdgeIndex: Int32
+        sourceEdgeIndex: Int32,
+        runIndex: Int,
+        segmentIndexInRun: Int
     ) {
         self.start = start
         self.end = end
         self.startRadiusMicrometres = startRadiusMicrometres
         self.endRadiusMicrometres = endRadiusMicrometres
         self.sourceEdgeIndex = sourceEdgeIndex
+        self.runIndex = runIndex
+        self.segmentIndexInRun = segmentIndexInRun
+    }
+}
+
+public struct MajorVesselSegmentReference: Equatable, Sendable {
+    public let runIndex: Int
+    public let pointIndex: Int
+}
+
+/// Immutable radius-aware lookup built once per verified graph. Slice changes
+/// then inspect only segments whose tapered volume can touch that plane.
+public struct MajorVesselSliceSpatialIndex: Equatable, Sendable {
+    public let assetSHA256: String
+    public let atlasMetadataSHA256: String
+    private let coronal: [[MajorVesselSegmentReference]]
+    private let sagittal: [[MajorVesselSegmentReference]]
+    private let horizontal: [[MajorVesselSegmentReference]]
+
+    public init(geometry: MajorVesselGeometryResult) {
+        self.init(
+            graph: geometry.graph,
+            atlas: geometry.atlas,
+            assetSHA256: geometry.provenance.derivedAssetSha256
+        )
+    }
+
+    public init(
+        graph: MajorVesselGraph,
+        atlas: ViewerAtlasIdentity,
+        assetSHA256: String
+    ) {
+        self.assetSHA256 = assetSHA256
+        atlasMetadataSHA256 = atlas.metadataSha256
+        coronal = Self.makeBuckets(
+            graph: graph,
+            fixedAxis: .ap,
+            resolutionMicrometres: atlas.resolutionMicrometres.apMicrometres,
+            sliceCount: atlas.shapeVoxels.apVoxels
+        )
+        sagittal = Self.makeBuckets(
+            graph: graph,
+            fixedAxis: .ml,
+            resolutionMicrometres: atlas.resolutionMicrometres.mlMicrometres,
+            sliceCount: atlas.shapeVoxels.mlVoxels
+        )
+        horizontal = Self.makeBuckets(
+            graph: graph,
+            fixedAxis: .dv,
+            resolutionMicrometres: atlas.resolutionMicrometres.dvMicrometres,
+            sliceCount: atlas.shapeVoxels.dvVoxels
+        )
+    }
+
+    public func references(
+        for orientation: AtlasSliceOrientation,
+        sliceIndex: Int
+    ) -> [MajorVesselSegmentReference]? {
+        let buckets = switch orientation {
+        case .coronal: coronal
+        case .sagittal: sagittal
+        case .horizontal: horizontal
+        }
+        guard buckets.indices.contains(sliceIndex) else { return nil }
+        return buckets[sliceIndex]
+    }
+
+    private static func makeBuckets(
+        graph: MajorVesselGraph,
+        fixedAxis: AtlasAnatomicalAxis,
+        resolutionMicrometres: Double,
+        sliceCount: Int
+    ) -> [[MajorVesselSegmentReference]] {
+        var buckets = [[MajorVesselSegmentReference]](
+            repeating: [],
+            count: sliceCount
+        )
+        for runIndex in 0 ..< graph.runCount {
+            let runStart = graph.runOffsets[runIndex]
+            let runEnd = graph.runOffsets[runIndex + 1]
+            for pointIndex in runStart ..< runEnd - 1 {
+                let start = Double(axisValue(graph.pointsASRMicrometres[pointIndex], fixedAxis))
+                let end = Double(axisValue(graph.pointsASRMicrometres[pointIndex + 1], fixedAxis))
+                let startRadius = Double(graph.radiiMicrometres[pointIndex])
+                let endRadius = Double(graph.radiiMicrometres[pointIndex + 1])
+                let minimum = min(start - startRadius, end - endRadius)
+                let maximum = max(start + startRadius, end + endRadius)
+                let first = max(0, Int(floor(minimum / resolutionMicrometres)))
+                let last = min(
+                    sliceCount - 1,
+                    Int(floor(maximum / resolutionMicrometres))
+                )
+                guard first <= last else { continue }
+                let reference = MajorVesselSegmentReference(
+                    runIndex: runIndex,
+                    pointIndex: pointIndex
+                )
+                for sliceIndex in first ... last {
+                    buckets[sliceIndex].append(reference)
+                }
+            }
+        }
+        return buckets
+    }
+
+    private static func axisValue(
+        _ point: SIMD3<Float>,
+        _ axis: AtlasAnatomicalAxis
+    ) -> Float {
+        switch axis {
+        case .ap: point.x
+        case .dv: point.y
+        case .ml: point.z
+        }
     }
 }
 
@@ -85,7 +203,9 @@ public enum MajorVesselSliceOverlayGeometry {
                         ),
                         startRadiusMicrometres: Double(graph.radiiMicrometres[pointIndex]),
                         endRadiusMicrometres: Double(graph.radiiMicrometres[pointIndex + 1]),
-                        sourceEdgeIndex: sourceEdgeIndex
+                        sourceEdgeIndex: sourceEdgeIndex,
+                        runIndex: runIndex,
+                        segmentIndexInRun: pointIndex - runStart
                     )
                 )
             }
@@ -106,14 +226,25 @@ public enum MajorVesselSliceOverlayGeometry {
     public static func make(
         geometry: MajorVesselGeometryResult,
         orientation: AtlasSliceOrientation,
-        sliceIndex: Int
+        sliceIndex: Int,
+        spatialIndex: MajorVesselSliceSpatialIndex? = nil
     ) -> MajorVesselSliceOverlay {
-        make(
+        let references: [MajorVesselSegmentReference]? = if let spatialIndex,
+                            spatialIndex.assetSHA256
+                            == geometry.provenance.derivedAssetSha256,
+                            spatialIndex.atlasMetadataSHA256 == geometry.atlas.metadataSha256
+        {
+            spatialIndex.references(for: orientation, sliceIndex: sliceIndex)
+        } else {
+            nil
+        }
+        return make(
             graph: geometry.graph,
             atlas: geometry.atlas,
             assetSHA256: geometry.provenance.derivedAssetSha256,
             orientation: orientation,
-            sliceIndex: sliceIndex
+            sliceIndex: sliceIndex,
+            segmentReferences: references
         )
     }
 
@@ -122,7 +253,34 @@ public enum MajorVesselSliceOverlayGeometry {
         atlas: ViewerAtlasIdentity,
         assetSHA256: String,
         orientation: AtlasSliceOrientation,
-        sliceIndex: Int
+        sliceIndex: Int,
+        spatialIndex: MajorVesselSliceSpatialIndex? = nil
+    ) -> MajorVesselSliceOverlay {
+        let references: [MajorVesselSegmentReference]? = if let spatialIndex,
+                            spatialIndex.assetSHA256 == assetSHA256,
+                            spatialIndex.atlasMetadataSHA256 == atlas.metadataSha256
+        {
+            spatialIndex.references(for: orientation, sliceIndex: sliceIndex)
+        } else {
+            nil
+        }
+        return make(
+            graph: graph,
+            atlas: atlas,
+            assetSHA256: assetSHA256,
+            orientation: orientation,
+            sliceIndex: sliceIndex,
+            segmentReferences: references
+        )
+    }
+
+    private static func make(
+        graph: MajorVesselGraph,
+        atlas: ViewerAtlasIdentity,
+        assetSHA256: String,
+        orientation: AtlasSliceOrientation,
+        sliceIndex: Int,
+        segmentReferences: [MajorVesselSegmentReference]?
     ) -> MajorVesselSliceOverlay {
         let resolution = atlas.resolutionMicrometres
         let shape = atlas.shapeVoxels
@@ -142,52 +300,67 @@ public enum MajorVesselSliceOverlayGeometry {
         let slabMaximum = Double(sliceIndex + 1) * resolution[fixedAxis]
         var segments: [MajorVesselSliceSegment] = []
         segments.reserveCapacity(max(64, graph.segmentCount / shape[fixedAxis]))
-        for runIndex in 0 ..< graph.runCount {
+        func appendSegment(runIndex: Int, pointIndex: Int) {
             let runStart = graph.runOffsets[runIndex]
-            let runEnd = graph.runOffsets[runIndex + 1]
             let sourceEdgeIndex = graph.sourceEdgeIndices[runIndex]
-            for pointIndex in runStart ..< runEnd - 1 {
-                let start = graph.pointsASRMicrometres[pointIndex]
-                let end = graph.pointsASRMicrometres[pointIndex + 1]
-                let startRadius = Double(graph.radiiMicrometres[pointIndex])
-                let endRadius = Double(graph.radiiMicrometres[pointIndex + 1])
-                guard let interval = radiusBearingSlabInterval(
-                    startFixed: Double(axisValue(start, fixedAxis)),
-                    endFixed: Double(axisValue(end, fixedAxis)),
-                    startRadius: startRadius,
-                    endRadius: endRadius,
-                    slabMinimum: slabMinimum,
-                    slabMaximum: slabMaximum
-                ) else { continue }
-                let clippedStart = interpolate(start, end, interval.lowerBound)
-                let clippedEnd = interpolate(start, end, interval.upperBound)
-                let clippedStartRadius = interpolate(
-                    startRadius,
-                    endRadius,
-                    interval.lowerBound
+            let start = graph.pointsASRMicrometres[pointIndex]
+            let end = graph.pointsASRMicrometres[pointIndex + 1]
+            let startRadius = Double(graph.radiiMicrometres[pointIndex])
+            let endRadius = Double(graph.radiiMicrometres[pointIndex + 1])
+            guard let interval = radiusBearingSlabInterval(
+                startFixed: Double(axisValue(start, fixedAxis)),
+                endFixed: Double(axisValue(end, fixedAxis)),
+                startRadius: startRadius,
+                endRadius: endRadius,
+                slabMinimum: slabMinimum,
+                slabMaximum: slabMaximum
+            ) else { return }
+            let clippedStart = interpolate(start, end, interval.lowerBound)
+            let clippedEnd = interpolate(start, end, interval.upperBound)
+            let clippedStartRadius = interpolate(
+                startRadius,
+                endRadius,
+                interval.lowerBound
+            )
+            let clippedEndRadius = interpolate(
+                startRadius,
+                endRadius,
+                interval.upperBound
+            )
+            segments.append(
+                MajorVesselSliceSegment(
+                    start: imagePoint(
+                        clippedStart,
+                        orientation: orientation,
+                        resolution: resolution
+                    ),
+                    end: imagePoint(
+                        clippedEnd,
+                        orientation: orientation,
+                        resolution: resolution
+                    ),
+                    startRadiusMicrometres: clippedStartRadius,
+                    endRadiusMicrometres: clippedEndRadius,
+                    sourceEdgeIndex: sourceEdgeIndex,
+                    runIndex: runIndex,
+                    segmentIndexInRun: pointIndex - runStart
                 )
-                let clippedEndRadius = interpolate(
-                    startRadius,
-                    endRadius,
-                    interval.upperBound
+            )
+        }
+        if let segmentReferences {
+            for reference in segmentReferences {
+                appendSegment(
+                    runIndex: reference.runIndex,
+                    pointIndex: reference.pointIndex
                 )
-                segments.append(
-                    MajorVesselSliceSegment(
-                        start: imagePoint(
-                            clippedStart,
-                            orientation: orientation,
-                            resolution: resolution
-                        ),
-                        end: imagePoint(
-                            clippedEnd,
-                            orientation: orientation,
-                            resolution: resolution
-                        ),
-                        startRadiusMicrometres: clippedStartRadius,
-                        endRadiusMicrometres: clippedEndRadius,
-                        sourceEdgeIndex: sourceEdgeIndex
-                    )
-                )
+            }
+        } else {
+            for runIndex in 0 ..< graph.runCount {
+                let runStart = graph.runOffsets[runIndex]
+                let runEnd = graph.runOffsets[runIndex + 1]
+                for pointIndex in runStart ..< runEnd - 1 {
+                    appendSegment(runIndex: runIndex, pointIndex: pointIndex)
+                }
             }
         }
         return MajorVesselSliceOverlay(

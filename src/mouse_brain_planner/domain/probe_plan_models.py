@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import UTC, datetime
+from enum import StrEnum
 from typing import Final, Literal, Self
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_models import (
     NormalizedProbePlacement,
+    PlacementMethod,
     ProbeModelDefinition,
 )
 from mouse_brain_planner.domain.region_models import ProbeRegionAnalysis
@@ -21,8 +23,11 @@ from mouse_brain_planner.domain.surgery_common import FiniteFloat, PositiveFinit
 LEGACY_PROBE_PLANNING_ALGORITHM_VERSION: Final[Literal["calibrated-target-angle-depth-v1"]] = (
     "calibrated-target-angle-depth-v1"
 )
-PROBE_PLANNING_ALGORITHM_VERSION: Final[Literal["calibrated-stereotaxic-probe-transform-v2"]] = (
-    "calibrated-stereotaxic-probe-transform-v2"
+STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION: Final[
+    Literal["calibrated-stereotaxic-probe-transform-v2"]
+] = "calibrated-stereotaxic-probe-transform-v2"
+PROBE_PLANNING_ALGORITHM_VERSION: Final[Literal["calibrated-explicit-placement-mode-v3"]] = (
+    "calibrated-explicit-placement-mode-v3"
 )
 REGION_ANALYSIS_BUNDLE_VERSION: Final[Literal["probe-region-analysis-bundle-v1"]] = (
     "probe-region-analysis-bundle-v1"
@@ -48,6 +53,92 @@ class ProbeManipulatorInput(BaseModel):
     ] = "azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"
 
 
+class ProbePlacementMode(StrEnum):
+    """Operator-visible input modes normalized into one calibrated trajectory."""
+
+    ENTRY_AND_TARGET = "ENTRY_AND_TARGET"
+    ENTRY_ANGLES_DEPTH = "ENTRY_ANGLES_DEPTH"
+    TARGET_ANGLES_DEPTH = "TARGET_ANGLES_DEPTH"
+    STEREOTAXIC_TARGET_MANIPULATOR = "STEREOTAXIC_TARGET_MANIPULATOR"
+
+    @property
+    def placement_method(self) -> PlacementMethod:
+        return {
+            ProbePlacementMode.ENTRY_AND_TARGET: PlacementMethod.ENTRY_TARGET,
+            ProbePlacementMode.ENTRY_ANGLES_DEPTH: PlacementMethod.ENTRY_ANGLES_DEPTH,
+            ProbePlacementMode.TARGET_ANGLES_DEPTH: PlacementMethod.TARGET_ANGLES_DEPTH,
+            ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR: (
+                PlacementMethod.STEREOTAXIC_TARGET_MANIPULATOR
+            ),
+        }[self]
+
+
+class BregmaRelativeEntryInput(BaseModel):
+    """Exact editable entry coordinate entered relative to the animal's bregma."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    frame_id: Literal["BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED"] = (
+        "BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED"
+    )
+    origin: Literal["bregma"] = "bregma"
+    component_order: tuple[Literal["AP"], Literal["ML"], Literal["DV"]] = (
+        "AP",
+        "ML",
+        "DV",
+    )
+    units: Literal["millimetre"] = "millimetre"
+    ap_positive_direction: Literal["anterior"] = "anterior"
+    ap_negative_direction: Literal["posterior/back"] = "posterior/back"
+    ml_positive_direction: Literal["right"] = "right"
+    ml_negative_direction: Literal["left"] = "left"
+    dv_positive_direction: Literal["dorsal/up"] = "dorsal/up"
+    dv_negative_direction: Literal["deep/ventral"] = "deep/ventral"
+    ap_mm: FiniteFloat
+    ml_mm: FiniteFloat
+    dv_mm: FiniteFloat
+
+
+class ProbePlacementInput(BaseModel):
+    """Exact mode-specific controls retained independently from normalized geometry."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: ProbePlacementMode
+    entry: BregmaRelativeEntryInput | None = None
+    angle_frame_id: str | None = Field(default=None, min_length=1, max_length=200)
+    azimuth_deg: FiniteFloat | None = Field(default=None, ge=-180, le=180)
+    elevation_deg: FiniteFloat | None = Field(default=None, ge=-90, le=90)
+    insertion_depth_um: PositiveFiniteFloat | None = None
+    axial_rotation_deg: FiniteFloat = Field(ge=-180, le=180)
+    angle_convention: (
+        Literal["azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"]
+        | None
+    ) = None
+
+    @model_validator(mode="after")
+    def validate_mode_fields(self) -> Self:
+        needs_entry = self.mode in {
+            ProbePlacementMode.ENTRY_AND_TARGET,
+            ProbePlacementMode.ENTRY_ANGLES_DEPTH,
+        }
+        if (self.entry is not None) != needs_entry:
+            raise ValueError(f"{self.mode.value} has an invalid entry-coordinate shape")
+        needs_angles = self.mode is not ProbePlacementMode.ENTRY_AND_TARGET
+        angle_fields = (
+            self.angle_frame_id,
+            self.azimuth_deg,
+            self.elevation_deg,
+            self.insertion_depth_um,
+            self.angle_convention,
+        )
+        if needs_angles and any(value is None for value in angle_fields):
+            raise ValueError(f"{self.mode.value} requires angles, depth, and angle frame")
+        if not needs_angles and any(value is not None for value in angle_fields):
+            raise ValueError(f"{self.mode.value} cannot contain angle or depth inputs")
+        return self
+
+
 class ProbePlanRecord(BaseModel):
     """One editable plan version tied to exact calibration and atlas inputs."""
 
@@ -60,6 +151,7 @@ class ProbePlanRecord(BaseModel):
     source_target: UnprojectedBregmaTarget
     probe_model: ProbeModelDefinition
     manipulator_input: ProbeManipulatorInput | None = None
+    placement_input: ProbePlacementInput | None = None
     placement: NormalizedProbePlacement
     calibration_uuid: UUID
     calibration_version: int = Field(gt=0)
@@ -69,6 +161,7 @@ class ProbePlanRecord(BaseModel):
     planning_algorithm_version: Literal[
         "calibrated-target-angle-depth-v1",
         "calibrated-stereotaxic-probe-transform-v2",
+        "calibrated-explicit-placement-mode-v3",
     ] = LEGACY_PROBE_PLANNING_ALGORITHM_VERSION
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=_utc_now)
@@ -107,11 +200,39 @@ class ProbePlanRecord(BaseModel):
             raise ValueError("probe plan requires an explicit animal subject ID")
         if self.source_target.projected:
             raise ValueError("probe plan source must preserve the original unprojected target")
-        if self.planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
+        if self.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION:
             if self.manipulator_input is None:
-                raise ValueError("current probe plans require preserved manipulator inputs")
+                raise ValueError("v2 probe plans require preserved manipulator inputs")
             if self.placement.method.value != "stereotaxic-target-plus-manipulator-angles":
-                raise ValueError("current probe plans require stereotaxic manipulator placement")
+                raise ValueError("v2 probe plans require stereotaxic manipulator placement")
+            if self.placement_input is not None:
+                raise ValueError("v2 probe plans cannot contain v3 placement inputs")
+        elif self.planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
+            if self.placement_input is None:
+                raise ValueError("v3 probe plans require preserved placement-mode inputs")
+            if self.placement.method is not self.placement_input.mode.placement_method:
+                raise ValueError("placement mode does not match normalized placement method")
+            if self.placement_input.mode is ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR:
+                if self.manipulator_input is None:
+                    raise ValueError("stereotaxic mode requires preserved manipulator inputs")
+                comparable = (
+                    self.placement_input.angle_frame_id,
+                    self.placement_input.azimuth_deg,
+                    self.placement_input.elevation_deg,
+                    self.placement_input.insertion_depth_um,
+                    self.placement_input.axial_rotation_deg,
+                )
+                manipulator = (
+                    self.manipulator_input.frame_id,
+                    self.manipulator_input.azimuth_deg,
+                    self.manipulator_input.elevation_deg,
+                    self.manipulator_input.insertion_depth_um,
+                    self.manipulator_input.axial_rotation_deg,
+                )
+                if comparable != manipulator:
+                    raise ValueError("placement input does not match preserved manipulator input")
+            elif self.manipulator_input is not None:
+                raise ValueError("non-manipulator placement modes cannot contain manipulator input")
         expected = probe_plan_input_digest(
             plan_uuid=self.plan_uuid,
             plan_version=self.plan_version,
@@ -119,6 +240,7 @@ class ProbePlanRecord(BaseModel):
             source_target=self.source_target,
             probe_model=self.probe_model,
             manipulator_input=self.manipulator_input,
+            placement_input=self.placement_input,
             placement=self.placement,
             calibration_uuid=self.calibration_uuid,
             calibration_version=self.calibration_version,
@@ -188,6 +310,7 @@ def probe_plan_input_digest(
     source_target: UnprojectedBregmaTarget,
     probe_model: ProbeModelDefinition,
     manipulator_input: ProbeManipulatorInput | None = None,
+    placement_input: ProbePlacementInput | None = None,
     placement: NormalizedProbePlacement,
     calibration_uuid: UUID,
     calibration_version: int,
@@ -197,6 +320,7 @@ def probe_plan_input_digest(
     planning_algorithm_version: Literal[
         "calibrated-target-angle-depth-v1",
         "calibrated-stereotaxic-probe-transform-v2",
+        "calibrated-explicit-placement-mode-v3",
     ] = LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
 ) -> str:
     """Hash every input that can change displayed or analyzed geometry."""
@@ -220,9 +344,16 @@ def probe_plan_input_digest(
         "projectionSha256": projection_sha256,
         "planningAlgorithmVersion": planning_algorithm_version,
     }
-    if planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
+    if planning_algorithm_version in {
+        STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+        PROBE_PLANNING_ALGORITHM_VERSION,
+    }:
         payload["manipulatorInput"] = (
             None if manipulator_input is None else manipulator_input.model_dump(mode="json")
+        )
+    if planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
+        payload["placementInput"] = (
+            None if placement_input is None else placement_input.model_dump(mode="json")
         )
     return _canonical_sha256(payload)
 

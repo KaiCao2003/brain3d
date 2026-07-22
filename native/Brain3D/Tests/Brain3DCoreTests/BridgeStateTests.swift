@@ -100,4 +100,27 @@ struct BridgeStateTests {
         #expect(state.project?.isDirty == true)
         #expect(state.project?.animalResearchOnlyAcknowledged == true)
     }
+
+    @Test("Viewer revisions reconcile without discarding project metadata or regressing")
+    func viewerRevisionReconciliation() throws {
+        let data = Data(
+            """
+            {"protocolVersion":1,"animalOnly":true,"warning":"Animal research only — not for human or clinical use","atlas":{"identifier":"allen_mouse_25um","version":"1.2","loaded":true,"status":"loaded"},"project":{"projectId":"00000000-0000-0000-0000-000000000001","title":"Animal plan","subjectId":"mouse-a","path":"/tmp/animal.brain3d","requiresSaveAs":false,"recoveredFromBackup":false,"schemaVersion":5,"revision":7,"isDirty":false,"animalResearchOnlyAcknowledged":true,"calibrationCount":2,"activeCalibrationId":"cal-1","probePlanCount":3,"probeRegionAnalysisCount":1},"subjectVessels":{"imported":false,"registered":false,"images":[]},"populationDensity":{"available":false,"visible":false,"opacity":0.65,"status":"notLoaded"}}
+            """.utf8
+        )
+        let original = try JSONDecoder().decode(PlannerBridgeState.self, from: data)
+
+        let advanced = original.updatingProjectRevision(8, isDirty: true)
+        #expect(advanced.project?.revision == 8)
+        #expect(advanced.project?.isDirty == true)
+        #expect(advanced.project?.title == original.project?.title)
+        #expect(advanced.project?.subjectId == original.project?.subjectId)
+        #expect(advanced.project?.path == original.project?.path)
+        #expect(advanced.project?.calibrationCount == original.project?.calibrationCount)
+        #expect(advanced.project?.probePlanCount == original.project?.probePlanCount)
+
+        let stale = advanced.updatingProjectRevision(6, isDirty: false)
+        #expect(stale.project?.revision == 8)
+        #expect(stale.project?.isDirty == true)
+    }
 }

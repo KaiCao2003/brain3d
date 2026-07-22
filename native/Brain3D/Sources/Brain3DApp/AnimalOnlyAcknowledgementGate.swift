@@ -6,6 +6,7 @@ struct AnimalOnlyAcknowledgementGate: View {
     let openExistingProject: () -> Void
 
     @State private var acknowledgement = AnimalOnlyAcknowledgementState()
+    @State private var subjectId = ""
 
     var body: some View {
         ZStack {
@@ -41,6 +42,17 @@ struct AnimalOnlyAcknowledgementGate: View {
                     "Required before a new animal plan can be created or an existing one opened."
                 )
 
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Animal subject ID")
+                        .font(.caption.weight(.semibold))
+                    TextField("Required, for example mouse-001", text: $subjectId)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(model.projectOperationInProgress)
+                    Text("Stored with calibrations, targets, probe plans, and analyses.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+
                 Text(
                     "Acknowledgement does not establish surgical accuracy, vessel clearance, "
                         + "or authorization for navigation."
@@ -53,22 +65,28 @@ struct AnimalOnlyAcknowledgementGate: View {
                     Button("Acknowledge and Create Animal Plan") {
                         Task {
                             _ = await model.createNewAnimalProject(
-                                acknowledgement: acknowledgement
+                                acknowledgement: acknowledgement,
+                                subjectId: subjectId
                             )
                         }
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(
+                        !acknowledgement.isExplicitlyAcknowledged
+                            || subjectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                            || model.projectOperationInProgress
+                    )
 
                     Button("Open Existing Animal Plan…") {
                         openExistingProject()
                     }
                     .buttonStyle(.bordered)
+                    .disabled(
+                        !acknowledgement.isExplicitlyAcknowledged
+                            || model.projectOperationInProgress
+                    )
                 }
-                .disabled(
-                    !acknowledgement.isExplicitlyAcknowledged
-                        || model.projectOperationInProgress
-                )
 
                 if model.projectOperationInProgress {
                     ProgressView("Validating animal-only project…")

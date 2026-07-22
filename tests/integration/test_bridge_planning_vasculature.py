@@ -19,6 +19,8 @@ from mouse_brain_planner.bridge.planning import (
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
 from mouse_brain_planner.domain.atlas_models import AtlasAxis, AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
+from mouse_brain_planner.domain.project_models import PlannerProject
+from mouse_brain_planner.persistence.project_io import save_project
 from mouse_brain_planner.vasculature.reference_density import (
     BRAINGLOBE_ASR_FRAME_AP_DV_ML,
     STXVN5SV44_V1_SOURCE,
@@ -102,6 +104,38 @@ def _dispatcher() -> tuple[BridgeDispatcher, PlanningBridgeSession]:
     context.set_loaded_atlas(atlas)
     dispatcher = BridgeDispatcher(context)
     return dispatcher, register_planning_handlers(dispatcher)
+
+
+def _register_archived_subject_vascular_handlers_for_test(
+    dispatcher: BridgeDispatcher,
+    session: PlanningBridgeSession,
+) -> None:
+    """Bind legacy handlers only inside tests that verify archive compatibility."""
+
+    dispatcher.register("vascular.import", session.vascular_import)
+    dispatcher.register("vascular.preview", session.vascular_preview)
+    dispatcher.register("vascular.register", session.vascular_register)
+    dispatcher.register("vascular.overlay", session.vascular_overlay)
+
+
+def _register_archived_population_density_handlers_for_test(
+    dispatcher: BridgeDispatcher,
+    session: PlanningBridgeSession,
+) -> None:
+    """Bind archived population-density handlers without advertising them."""
+
+    dispatcher.register("vascular.reference.prepare", session.vascular_reference_prepare)
+    dispatcher.register("vascular.reference.display", session.vascular_reference_display)
+    dispatcher.register("vascular.reference.overlay", session.vascular_reference_overlay)
+
+
+def _archived_subject_vascular_dispatcher() -> tuple[
+    BridgeDispatcher,
+    PlanningBridgeSession,
+]:
+    dispatcher, session = _dispatcher()
+    _register_archived_subject_vascular_handlers_for_test(dispatcher, session)
+    return dispatcher, session
 
 
 def _reference_metadata() -> AtlasMetadata:
@@ -210,6 +244,7 @@ def _reference_dispatcher() -> tuple[
     dispatcher = BridgeDispatcher(context)
     store = _FakeReferenceDensityStore(_cached_reference_density(metadata))
     session = register_planning_handlers(dispatcher, reference_density_store=store)
+    _register_archived_population_density_handlers_for_test(dispatcher, session)
     return dispatcher, session, store
 
 
@@ -271,10 +306,57 @@ def _new_project(dispatcher: BridgeDispatcher) -> None:
     assert result["warning"] == ANIMAL_ONLY_WARNING
 
 
-def test_subject_vessel_journey_saves_reopens_and_preserves_registration(
+def _save_project(
+    dispatcher: BridgeDispatcher,
+    session: PlanningBridgeSession,
+    *,
+    path: Path | None = None,
+) -> dict[str, object]:
+    assert session.project is not None
+    params: dict[str, object] = {
+        "projectId": str(session.project.project_uuid),
+        "expectedProjectRevision": session.project_revision,
+    }
+    if path is not None:
+        params["path"] = str(path)
+    return _call(dispatcher, "project.save", **params)
+
+
+def test_primary_bridge_does_not_expose_archived_vascular_methods_or_capabilities() -> None:
+    dispatcher, _ = _dispatcher()
+
+    hello = _call(dispatcher, "hello", client="archive-boundary-test")
+    capabilities = hello["capabilities"]
+    assert isinstance(capabilities, dict)
+    assert {
+        "subjectVascularImport",
+        "subjectVascularOverlay",
+        "subjectVascularRegistration",
+        "populationReferenceDensityPrepare",
+        "populationReferenceDensityDisplayMutation",
+        "populationReferenceDensityOverlay",
+    }.isdisjoint(capabilities)
+
+    archived_methods = (
+        "vascular.import",
+        "vascular.preview",
+        "vascular.register",
+        "vascular.overlay",
+        "vascular.reference.prepare",
+        "vascular.reference.display",
+        "vascular.reference.overlay",
+    )
+    for method in archived_methods:
+        with pytest.raises(BridgeError) as caught:
+            _call(dispatcher, method)
+        assert caught.value.code == "METHOD_NOT_FOUND"
+        assert caught.value.details == {"method": method}
+
+
+def test_archived_subject_vessel_journey_saves_reopens_and_preserves_registration(
     tmp_path: Path,
 ) -> None:
-    dispatcher, session = _dispatcher()
+    dispatcher, session = _archived_subject_vascular_dispatcher()
     _new_project(dispatcher)
     source = tmp_path / "animal-dorsal.png"
     source_pixels = _write_subject_png(source)
@@ -318,12 +400,12 @@ def test_subject_vessel_journey_saves_reopens_and_preserves_registration(
     np.testing.assert_array_equal(rendered, expected)
 
     destination = tmp_path / "animal-a.mouseplan"
-    saved = _call(dispatcher, "project.save", path=str(destination))
+    saved = _save_project(dispatcher, session, path=destination)
     assert saved["status"] == "saved"
     assert destination.is_dir()
     assert (destination / "images").is_dir()
 
-    reopened_dispatcher, reopened_session = _dispatcher()
+    reopened_dispatcher, reopened_session = _archived_subject_vascular_dispatcher()
     opened = _call(reopened_dispatcher, "project.open", path=str(destination))
     assert opened["status"] == "opened"
     assert opened["subjectVascularImageCount"] == 1
@@ -363,10 +445,61 @@ def test_project_creation_requires_animal_only_acknowledgement() -> None:
     assert caught.value.code == "ANIMAL_ONLY_ACKNOWLEDGEMENT_REQUIRED"
 
 
+def test_project_creation_requires_animal_subject_id() -> None:
+    dispatcher, _ = _dispatcher()
+
+    with pytest.raises(BridgeError) as caught:
+        _call(
+            dispatcher,
+            "project.new",
+            animalResearchOnlyAcknowledged=True,
+        )
+
+    assert caught.value.code == "ANIMAL_SUBJECT_ID_REQUIRED"
+
+
+@pytest.mark.parametrize("subject_id", [None, "   "])
+def test_project_open_rejects_subjectless_legacy_package(
+    tmp_path: Path,
+    subject_id: str | None,
+) -> None:
+    metadata = _metadata()
+    anchor = BrainGlobePhysicalPoint(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=1.5,
+        dv_um=0.5,
+        ml_um=1.5,
+    )
+    path = save_project(
+        PlannerProject(
+            title="Legacy subjectless project",
+            subject_id=subject_id,
+            atlas=metadata,
+            renderer_anchor=anchor,
+            scientific_disclaimer_acknowledged=True,
+        ),
+        tmp_path / "subjectless.mouseplan",
+    )
+    dispatcher, session = _dispatcher()
+
+    with pytest.raises(BridgeError) as caught:
+        _call(dispatcher, "project.open", path=str(path))
+
+    assert caught.value.code == "ANIMAL_SUBJECT_ID_REQUIRED"
+    assert "explicit subject ID" in caught.value.message
+    assert caught.value.details == {
+        "projectOpened": False,
+        "suggestedAction": "Create a new animal plan with an explicit subject ID.",
+    }
+    assert session.project is None
+    assert session.project_revision == 0
+
+
 def test_backend_project_revision_is_authoritative_for_unsaved_changes(
     tmp_path: Path,
 ) -> None:
-    dispatcher, _ = _dispatcher()
+    dispatcher, session = _dispatcher()
     _new_project(dispatcher)
 
     created_state = _call(dispatcher, "state.get")
@@ -374,6 +507,11 @@ def test_backend_project_revision_is_authoritative_for_unsaved_changes(
     assert isinstance(created_project, dict)
     assert created_project["revision"] == 1
     assert created_project["isDirty"] is True
+    events = created_project["eventLog"]
+    assert isinstance(events, list)
+    assert len(events) == 1
+    assert events[0]["action"] == "project-created"
+    assert events[0]["details"] == ANIMAL_ONLY_WARNING
     assert created_project["rendererAnchor"] == {
         "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
         "apMicrometres": 2.5,
@@ -382,23 +520,28 @@ def test_backend_project_revision_is_authoritative_for_unsaved_changes(
     }
 
     destination = tmp_path / "revision.mouseplan"
-    _call(dispatcher, "project.save", path=str(destination))
+    _save_project(dispatcher, session, path=destination)
     saved_state = _call(dispatcher, "state.get")
     saved_project = saved_state["project"]
     assert isinstance(saved_project, dict)
     assert saved_project["revision"] == 2
     assert saved_project["isDirty"] is False
 
-    source = tmp_path / "revision-vessels.png"
-    _write_subject_png(source)
-    _call(dispatcher, "vascular.import", path=str(source))
+    _call(
+        dispatcher,
+        "viewer.slice.set",
+        projectId=saved_project["projectId"],
+        expectedProjectRevision=2,
+        orientation="coronal",
+        index=1,
+    )
     imported_state = _call(dispatcher, "state.get")
     imported_project = imported_state["project"]
     assert isinstance(imported_project, dict)
     assert imported_project["revision"] == 3
     assert imported_project["isDirty"] is True
 
-    _call(dispatcher, "project.save")
+    _save_project(dispatcher, session)
     resaved_state = _call(dispatcher, "state.get")
     resaved_project = resaved_state["project"]
     assert isinstance(resaved_project, dict)
@@ -424,6 +567,79 @@ def test_backend_project_revision_is_authoritative_for_unsaved_changes(
     assert stale.value.code == "PROJECT_REVISION_CONFLICT"
 
 
+def test_project_save_rejects_wrong_stale_and_out_of_order_requests_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    dispatcher, session = _dispatcher()
+    _new_project(dispatcher)
+    assert session.project is not None
+    project_id = str(session.project.project_uuid)
+    destination = tmp_path / "revision-guard.mouseplan"
+
+    with pytest.raises(BridgeError) as wrong_project:
+        _call(
+            dispatcher,
+            "project.save",
+            projectId="00000000-0000-0000-0000-000000000001",
+            expectedProjectRevision=session.project_revision,
+            path=str(destination),
+        )
+    assert wrong_project.value.code == "PROJECT_ID_MISMATCH"
+    assert not destination.exists()
+    assert session.project_revision == 1
+
+    with pytest.raises(BridgeError) as stale_initial:
+        _call(
+            dispatcher,
+            "project.save",
+            projectId=project_id,
+            expectedProjectRevision=0,
+            path=str(destination),
+        )
+    assert stale_initial.value.code == "PROJECT_REVISION_CONFLICT"
+    assert not destination.exists()
+    assert session.project_revision == 1
+
+    saved = _call(
+        dispatcher,
+        "project.save",
+        projectId=project_id,
+        expectedProjectRevision=1,
+        path=str(destination),
+    )
+    assert saved["projectId"] == project_id
+    assert saved["projectRevision"] == 2
+    assert session.project_revision == 2
+    assert session.project.project_revision == 2
+
+    # A request prepared at revision 2 becomes stale after another mutation.
+    _call(
+        dispatcher,
+        "viewer.slice.set",
+        projectId=project_id,
+        expectedProjectRevision=2,
+        orientation="coronal",
+        index=0,
+    )
+    assert session.project_revision == 3
+    with pytest.raises(BridgeError) as out_of_order:
+        _call(
+            dispatcher,
+            "project.save",
+            projectId=project_id,
+            expectedProjectRevision=2,
+            path=str(destination),
+        )
+    assert out_of_order.value.code == "PROJECT_REVISION_CONFLICT"
+    assert session.project_revision == 3
+
+    reopened_dispatcher, reopened_session = _dispatcher()
+    _call(reopened_dispatcher, "project.open", path=str(destination))
+    assert reopened_session.project is not None
+    assert reopened_session.project_revision == 2
+    assert reopened_session.project.project_revision == 2
+
+
 def test_project_save_failure_rolls_back_revision_event_and_session_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -441,7 +657,7 @@ def test_project_save_failure_rolls_back_revision_event_and_session_state(
     monkeypatch.setattr(planning_module, "save_project", fail_save)
     destination = tmp_path / "must-not-exist.mouseplan"
     with pytest.raises(BridgeError) as failure:
-        _call(dispatcher, "project.save", path=str(destination))
+        _save_project(dispatcher, session, path=destination)
 
     assert failure.value.code == "PROJECT_SAVE_FAILED"
     assert session.project is not None
@@ -453,8 +669,10 @@ def test_project_save_failure_rolls_back_revision_event_and_session_state(
     assert not destination.exists()
 
 
-def test_unconfirmed_laterality_never_produces_subject_overlay(tmp_path: Path) -> None:
-    dispatcher, _ = _dispatcher()
+def test_archived_unconfirmed_laterality_never_produces_subject_overlay(
+    tmp_path: Path,
+) -> None:
+    dispatcher, _ = _archived_subject_vascular_dispatcher()
     _new_project(dispatcher)
     source = tmp_path / "animal-dorsal.png"
     _write_subject_png(source)
@@ -810,12 +1028,12 @@ def test_population_state_never_claims_available_from_metadata_without_runtime()
 def test_population_reference_compact_metadata_rebinds_only_to_verified_cache(
     tmp_path: Path,
 ) -> None:
-    dispatcher, _, _ = _reference_dispatcher()
+    dispatcher, session, _ = _reference_dispatcher()
     _new_project(dispatcher)
     _call(dispatcher, "vascular.reference.prepare", downloadIfMissing=False)
     _call(dispatcher, "vascular.reference.display", visible=True, opacity=0.37)
     destination = tmp_path / "population-reference.mouseplan"
-    _call(dispatcher, "project.save", path=str(destination))
+    _save_project(dispatcher, session, path=destination)
 
     reopened_dispatcher, _, _ = _reference_dispatcher()
     _call(reopened_dispatcher, "project.open", path=str(destination))

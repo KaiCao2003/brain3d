@@ -360,10 +360,11 @@ public struct MajorVesselClearanceAnalysis: Decodable, Equatable, Sendable {
               isClearanceSHA256(inputSha256),
               !statement.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !statement.localizedCaseInsensitiveContains("safe"),
+              optionalDistances.count == 3,
               optionalDistances.allSatisfy(\.isFinite),
-              nearestCenterlineDistanceMicrometres.map({ $0 >= 0 }) ?? true,
-              candidateSegmentCount >= 0,
-              measuredSegmentCount >= candidateSegmentCount,
+              nearestCenterlineDistanceMicrometres.map({ $0 >= 0 }) == true,
+              candidateSegmentCount > 0,
+              measuredSegmentCount == candidateSegmentCount,
               conflicts.count <= MajorVesselAnalysisContract.maximumConflicts,
               !warnings.isEmpty,
               !usableForNavigation
@@ -378,10 +379,16 @@ public struct MajorVesselClearanceAnalysis: Decodable, Equatable, Sendable {
                 )
             }
         case .noConflictDetected:
+            let reviewedSourceBound = reviewedSourceUncertaintyBound
             guard riskProfile.confirmedByUser,
                   riskProfile.referenceOnlyCoverageAcknowledged,
                   conflicts.isEmpty,
-                  statement == MajorVesselAnalysisContract.noConflictStatement
+                  !conflictsTruncated,
+                  statement == MajorVesselAnalysisContract.noConflictStatement,
+                  reviewedSourceBound != nil,
+                  riskProfile.registrationUncertaintyMicrometres + 1e-6
+                    >= (reviewedSourceBound ?? .infinity),
+                  minimumAdjustedClearanceMicrometres.map({ $0 > 1e-6 }) == true
             else {
                 throw MajorVesselContractError.invalid(
                     "No-conflict vessel result is not bounded by the required contract."
@@ -390,13 +397,119 @@ public struct MajorVesselClearanceAnalysis: Decodable, Equatable, Sendable {
         case .intersection, .marginViolation, .uncertaintyViolation:
             guard riskProfile.confirmedByUser,
                   riskProfile.referenceOnlyCoverageAcknowledged,
-                  !conflicts.isEmpty
+                  !conflicts.isEmpty,
+                  minimumAdjustedClearanceMicrometres.map({ $0 <= 1e-6 }) == true
             else {
                 throw MajorVesselContractError.invalid(
                     "Classified vessel result requires acknowledged inputs and conflicts."
                 )
             }
         }
+        try validateNumericalIdentities()
+    }
+
+    private var reviewedSourceUncertaintyBound: Double? {
+        guard provenance.uncertaintyBoundsReviewed,
+              provenance.registrationTransformId != nil,
+              let registration = provenance.registrationUncertaintyBoundMicrometres,
+              let distortion = provenance.tissueDistortionUncertaintyBoundMicrometres,
+              registration.isFinite, registration >= 0,
+              distortion.isFinite, distortion >= 0
+        else { return nil }
+        return registration + distortion
+    }
+
+    private func validateNumericalIdentities() throws {
+        guard let minimumGeometricClearanceMicrometres,
+              let minimumAdjustedClearanceMicrometres,
+              approximatelyEqual(
+                  minimumAdjustedClearanceMicrometres,
+                  minimumGeometricClearanceMicrometres
+                    - riskProfile.requiredMarginMicrometres
+                    - riskProfile.registrationUncertaintyMicrometres
+              )
+        else {
+            throw MajorVesselContractError.invalid(
+                "Vessel-analysis minimum clearance values are inconsistent."
+            )
+        }
+
+        for conflict in conflicts {
+            let dx = conflict.probePoint.apMicrometres - conflict.vesselPoint.apMicrometres
+            let dy = conflict.probePoint.dvMicrometres - conflict.vesselPoint.dvMicrometres
+            let dz = conflict.probePoint.mlMicrometres - conflict.vesselPoint.mlMicrometres
+            let pointDistance = (dx * dx + dy * dy + dz * dz).squareRoot()
+            let expectedGeometric = conflict.centerlineDistanceMicrometres
+                - conflict.vesselDiameterMicrometres / 2
+                - conflict.probeEnvelopeRadiusMicrometres
+            let expectedAdjusted = expectedGeometric
+                - conflict.requiredMarginMicrometres
+                - conflict.registrationUncertaintyMicrometres
+            guard approximatelyEqual(pointDistance, conflict.centerlineDistanceMicrometres),
+                  approximatelyEqual(
+                      conflict.requiredMarginMicrometres,
+                      riskProfile.requiredMarginMicrometres
+                  ),
+                  approximatelyEqual(
+                      conflict.registrationUncertaintyMicrometres,
+                      riskProfile.registrationUncertaintyMicrometres
+                  ),
+                  approximatelyEqual(
+                      conflict.geometricSurfaceClearanceMicrometres,
+                      expectedGeometric
+                  ),
+                  approximatelyEqual(conflict.adjustedClearanceMicrometres, expectedAdjusted),
+                  conflict.adjustedClearanceMicrometres <= 1e-6,
+                  conflict.adjustedClearanceMicrometres
+                    >= minimumAdjustedClearanceMicrometres - 1e-6,
+                  classificationMatchesGeometry(conflict)
+            else {
+                throw MajorVesselContractError.invalid(
+                    "Vessel-conflict distances, thresholds, or classification are inconsistent."
+                )
+            }
+        }
+
+        if let first = conflicts.first {
+            guard approximatelyEqual(
+                first.adjustedClearanceMicrometres,
+                minimumAdjustedClearanceMicrometres
+            ) else {
+                throw MajorVesselContractError.invalid(
+                    "Vessel conflicts are not ordered from the global minimum clearance."
+                )
+            }
+            let expectedStatus: MajorVesselResultStatus
+            if conflicts.contains(where: { $0.classification == .intersection }) {
+                expectedStatus = .intersection
+            } else if conflicts.contains(where: { $0.classification == .marginViolation }) {
+                expectedStatus = .marginViolation
+            } else {
+                expectedStatus = .uncertaintyViolation
+            }
+            guard resultStatus == expectedStatus else {
+                throw MajorVesselContractError.invalid(
+                    "Overall vessel status does not match the published conflicts."
+                )
+            }
+        }
+    }
+
+    private func classificationMatchesGeometry(_ conflict: MajorVesselConflict) -> Bool {
+        let geometric = conflict.geometricSurfaceClearanceMicrometres
+        let afterMargin = geometric - conflict.requiredMarginMicrometres
+        switch conflict.classification {
+        case .intersection:
+            return geometric <= 1e-6
+        case .marginViolation:
+            return geometric > 1e-6 && afterMargin <= 1e-6
+        case .uncertaintyViolation:
+            return afterMargin > 1e-6 && conflict.adjustedClearanceMicrometres <= 1e-6
+        }
+    }
+
+    private func approximatelyEqual(_ lhs: Double, _ rhs: Double) -> Bool {
+        abs(lhs - rhs) <= max(1e-6, max(abs(lhs), abs(rhs)) * 1e-10)
     }
 }
 

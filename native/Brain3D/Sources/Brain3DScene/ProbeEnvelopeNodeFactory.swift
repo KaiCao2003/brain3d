@@ -93,4 +93,5 @@ enum SceneCategory: Int {
     case brain = 1
     case probe = 2
     case majorVessel = 4
+    case selectedVesselConflict = 8
 }

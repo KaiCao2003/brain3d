@@ -5,22 +5,25 @@
 
 ## Implementation update — 2026-07-22
 
-The independent-slice decision remains in force. Its later renderer gate is now satisfied by a
-SceneKit module that consumes the same backend-verified atlas, probe, vessel, and ray-pick state.
-The current product path therefore implements all five single-view modes without reintroducing a
-linked cursor, crosshair, focus mode, or 2×2 layout.
+The independent-slice decision remains in force. Its later renderer gate is now satisfied: a
+SceneKit module consumes schema-checked atlas, probe, and ray-pick payloads from the backend. The
+current product path therefore implements all five single-view modes without reintroducing a
+linked cursor, crosshair, focus mode, or 2×2 layout. Vessel state is excluded because P60_606
+coordinate/coverage qualification is rejected.
 
 ## Context
 
-The intended product must project calibrated AP/ML/DV targets, place Neuropixels geometry, report
-atlas-region traversal, and compare probe envelopes with explicitly registered vessel geometry.
-The early SwiftUI application showed only midpoint rasters and an unavailable 3D card. An older
-Qt/PyVista application contained unrelated interaction/rendering state and is not the supported
-product.
+The intended product must project calibrated AP/ML/DV targets, place Neuropixels geometry, and
+report atlas-region traversal. The original design also proposed comparing probe envelopes with
+explicitly registered vessel geometry; that proposal is not a current capability because no
+vessel source passed qualification. The early SwiftUI application showed only midpoint rasters
+and an unavailable 3D card. An older Qt/PyVista application contained unrelated
+interaction/rendering state and is not the supported product.
 
-Coordinate order, laterality, voxel anchoring, calibration, probe geometry, and clearance can be
-verified more directly in orthogonal slices than in an early 3D presentation layer. A 3D renderer
-must not acquire a second copy of scientific state or collision logic.
+Coordinate order, laterality, voxel anchoring, and probe geometry can be verified more directly in
+orthogonal slices than in an early 3D presentation layer. A 3D renderer must not acquire a second
+copy of scientific state or collision logic. Rendering cannot substitute for source
+qualification or create a vessel-clearance result.
 
 ## Options
 
@@ -34,15 +37,15 @@ must not acquire a second copy of scientific state or collision logic.
 Choose option 3.
 
 - SwiftUI is the only supported GUI.
-- Python owns atlas access, coordinate transformations, calibration, probe/vessel analysis,
-  provenance, and project persistence.
+- Python owns atlas access, coordinate transformations, calibration, probe/region analysis,
+  vessel qualification, provenance, and project persistence.
 - One full-size selected slice is the MVP presentation; the three depths are independent and
   persisted because switching or clicking another view must not move hidden planes.
 - Region selection is separate from depth state. A click replaces one compact label and never
   changes a slice.
 - All analysis remains three-dimensional even though the MVP display is two-dimensional.
-- Optional 3D is Phase 8 and consumes the same persisted depths, selection, placements, vessel
-  graph, and analysis results. It may not implement independent coordinate or collision logic.
+- Optional 3D is Phase 8 and consumes the same persisted depths, selection, and placements. It may
+  not implement independent coordinate or collision logic or ingest archived vessel files.
 
 ## Consequences
 
@@ -50,7 +53,8 @@ Choose option 3.
   interaction milestone.
 - Qt, PyVista, PyVistaQt, and VTK can leave the default runtime dependency set.
 - Existing `atlas.slice` and `atlas.point` functionality can be reused rather than replaced.
-- Mesh/tube presentation does not block calibrated planning and region traversal.
+- Mesh presentation does not block calibrated planning and region traversal. Historical vessel-
+  tube rendering code is not a product capability.
 - The project must add Swift application/ViewModel tests; core transport tests alone are not
   enough.
 - 3D remained unavailable during the slice-first milestone; the current SceneKit implementation

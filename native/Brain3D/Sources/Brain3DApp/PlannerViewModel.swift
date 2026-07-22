@@ -3,6 +3,7 @@ import Brain3DScene
 import CryptoKit
 import Foundation
 import SwiftUI
+import simd
 
 enum BridgeConnectionPhase: Equatable {
     case notConfigured
@@ -122,6 +123,13 @@ struct PendingViewerSlice: Equatable {
     let index: Int
 }
 
+struct MajorVesselConflictCanvasOverlay: Equatable {
+    let conflictId: String
+    let probePoint: ProbeSliceImagePoint
+    let vesselPoint: ProbeSliceImagePoint
+    let exactVesselSegment: MajorVesselSliceSegment?
+}
+
 private enum ViewerMutation: Sendable {
     case slice(orientation: AtlasSliceOrientation, index: Int)
     case regionPick(
@@ -130,6 +138,53 @@ private enum ViewerMutation: Sendable {
         column: Int,
         row: Int
     )
+}
+
+enum ViewerInteractionPolicy {
+    static func allowsRegionPick(
+        orientation: AtlasSliceOrientation,
+        displayedSliceIndex: Int,
+        authoritativeSliceIndex: Int?,
+        pendingSliceOrientation: AtlasSliceOrientation?,
+        atomicNavigationInProgress: Bool
+    ) -> Bool {
+        pendingSliceOrientation != orientation
+            && !atomicNavigationInProgress
+            && authoritativeSliceIndex == displayedSliceIndex
+    }
+}
+
+enum ViewerMutationPublicationPolicy {
+    /// A fused slice response has already advanced the backend's canonical
+    /// project revision, so its matching pixels must be retained even when a
+    /// newer request is queued. `false` only means that another mutation still
+    /// owns the final ready/error state.
+    @discardableResult
+    static func publishSlice(
+        _ frame: VerifiedAtlasSliceFrame,
+        requestGeneration: Int,
+        currentGeneration: Int,
+        into frames: inout TriPlanarFrameSet
+    ) -> Bool {
+        frames[frame.orientation] = frame
+        return requestGeneration == currentGeneration
+    }
+
+    /// A region result is visible interaction state, so a superseded request
+    /// must not replace the selection currently shown to the user. The caller
+    /// may still reconcile the backend's authoritative revision before using
+    /// this gate to process the next queued mutation.
+    @discardableResult
+    static func publishRegionSelection<Selection>(
+        _ candidate: Selection,
+        requestGeneration: Int,
+        currentGeneration: Int,
+        into visibleSelection: inout Selection
+    ) -> Bool {
+        guard requestGeneration == currentGeneration else { return false }
+        visibleSelection = candidate
+        return true
+    }
 }
 
 struct LocalVesselProvenance: Equatable {
@@ -173,8 +228,11 @@ final class PlannerViewModel: ObservableObject {
     @Published private(set) var majorVesselLoadInProgress = false
     @Published private(set) var majorVesselLoadError: String?
     @Published private(set) var selectedProbeVesselAnalysis: MajorVesselAnalysisResult?
+    @Published private(set) var selectedMajorVesselConflict: MajorVesselConflict?
     @Published private(set) var majorVesselAnalysisInProgress = false
     @Published private(set) var majorVesselAnalysisError: String?
+    @Published private(set) var majorVesselNavigationInProgress = false
+    @Published private(set) var majorVesselNavigationError: String?
     @Published private(set) var localVessel: LocalVesselProvenance?
     @Published private(set) var importedVessel: ImportedVascularImage?
     @Published private(set) var subjectPreviewPNG: Data?
@@ -228,6 +286,7 @@ final class PlannerViewModel: ObservableObject {
     private var threeDimensionalPickWorker: Task<Void, Never>?
     private var cachedRootMesh: AtlasMeshResult?
     private var majorVesselSliceOverlayCache: [String: MajorVesselSliceOverlay] = [:]
+    private var majorVesselSliceSpatialIndex: MajorVesselSliceSpatialIndex?
 
     init(launchConfiguration: BridgeLaunchConfiguration?) {
         self.launchConfiguration = launchConfiguration
@@ -451,6 +510,19 @@ final class PlannerViewModel: ObservableObject {
             && !projectOperationInProgress
     }
 
+    var canNavigateMajorVesselConflict: Bool {
+        connection.isReady
+            && helloResult?.capabilities.atomicAtlasPointNavigation == true
+            && backendState?.project != nil
+            && viewerSnapshot != nil
+            && selectedProbeVesselAnalysis != nil
+            && majorVesselGeometry != nil
+            && !majorVesselNavigationInProgress
+            && !projectOperationInProgress
+            && pendingViewerMutation == nil
+            && viewerMutationWorker == nil
+    }
+
     private var supportsProbePlanning: Bool {
         helloResult?.capabilities.probeCatalog == true
             && helloResult?.capabilities.calibratedProbePlanning == true
@@ -469,6 +541,14 @@ final class PlannerViewModel: ObservableObject {
             atlasProvenance?.metadataSha256 ?? "no-atlas",
             selectedProbePlan?.inputSha256 ?? "no-probe",
             majorVesselGeometry?.provenance.derivedAssetSha256 ?? "no-vessels",
+            selectedMajorVesselConflict.map {
+                [
+                    $0.conflictId,
+                    String($0.probePoint.apMicrometres.bitPattern),
+                    String($0.probePoint.dvMicrometres.bitPattern),
+                    String($0.probePoint.mlMicrometres.bitPattern),
+                ].joined(separator: ":")
+            } ?? "no-vessel-conflict",
         ].joined(separator: ":")
     }
 
@@ -477,7 +557,7 @@ final class PlannerViewModel: ObservableObject {
         if let geometry = majorVesselGeometry {
             return "P60 reference · \(geometry.segmentCount.formatted()) segments · diameter ≥30 µm"
         }
-        if let majorVesselLoadError { return "Unavailable · \(majorVesselLoadError)" }
+        if majorVesselLoadError != nil { return "Unavailable" }
         return "Reference major vessels not loaded"
     }
 
@@ -550,6 +630,7 @@ final class PlannerViewModel: ObservableObject {
         clearDorsalRegionPick()
         majorVesselGeometry = nil
         majorVesselDorsalProjection = nil
+        majorVesselSliceSpatialIndex = nil
         majorVesselSliceOverlayCache = [:]
         majorVesselLoadInProgress = false
         majorVesselLoadError = nil
@@ -582,7 +663,8 @@ final class PlannerViewModel: ObservableObject {
     }
 
     func createNewAnimalProject(
-        acknowledgement: AnimalOnlyAcknowledgementState
+        acknowledgement: AnimalOnlyAcknowledgementState,
+        subjectId: String
     ) async -> Bool {
         projectOperationError = nil
         guard let bridgeClient, canCreateNewAnimalProject else {
@@ -592,10 +674,11 @@ final class PlannerViewModel: ObservableObject {
         }
         guard let parameters = ProjectNewParameters(
             acknowledgement: acknowledgement,
-            title: "Untitled animal surgery plan"
+            title: "Untitled animal surgery plan",
+            subjectId: subjectId
         ) else {
             projectOperationError =
-                "Explicitly acknowledge animal-only, non-human, non-clinical use first."
+                "Enter an animal subject ID and explicitly acknowledge animal-only use first."
             return false
         }
 
@@ -658,6 +741,9 @@ final class PlannerViewModel: ObservableObject {
                 clearPopulationDensity(clearPreparation: true)
                 throw PopulationDensityOperationFailure.preparationNotPublishedToState
             }
+            // This callable legacy operation may retain its verified preparation
+            // result, but ordinary refresh never hydrates the archived display.
+            populationDensityPreparation = result
         } catch {
             populationDensityError = error.localizedDescription
         }
@@ -706,6 +792,13 @@ final class PlannerViewModel: ObservableObject {
                 published.opacity == display.opacity
             else {
                 throw PopulationDensityOperationFailure.displayMutationNotPublished
+            }
+            if shouldShow, let state = backendState {
+                await synchronizePopulationDensity(using: bridgeClient, state: state)
+            } else {
+                populationDensityVisible = false
+                populationDensityPNG = nil
+                populationDensityOverlay = nil
             }
         } catch {
             let mutationError = error.localizedDescription
@@ -784,13 +877,7 @@ final class PlannerViewModel: ObservableObject {
             }
             backendState = state
             hasUnsavedChanges = state.project?.isDirty ?? false
-            if !state.populationDensity.available {
-                clearPopulationDensity(clearPreparation: true)
-            } else {
-                await synchronizePopulationDensity(using: bridgeClient, state: state)
-            }
-            await loadSubjectPreviewIfAvailable(using: bridgeClient, state: state)
-            await loadRegisteredOverlayIfAvailable(using: bridgeClient, state: state)
+            clearArchivedDisplayState()
             if state.project != nil {
                 await refreshViewerState(using: bridgeClient)
             } else {
@@ -807,7 +894,7 @@ final class PlannerViewModel: ObservableObject {
             selectedCalibration = nil
             targetProjections = [:]
             clearProbePlanning()
-            clearPopulationDensity(clearPreparation: true)
+            clearArchivedDisplayState()
             clearViewerState(message: "Planning state is unavailable")
         }
     }
@@ -819,7 +906,10 @@ final class PlannerViewModel: ObservableObject {
         dvText: String
     ) async -> Bool {
         implantOperationError = nil
-        guard let bridgeClient, canStoreImplantTarget else {
+        guard let bridgeClient,
+              canStoreImplantTarget,
+              let project = backendState?.project
+        else {
             implantOperationError = "Open an animal plan before storing an implant site."
             return false
         }
@@ -837,18 +927,23 @@ final class PlannerViewModel: ObservableObject {
                 ml: mlText,
                 dv: dvText
             )
+            let request = ImplantAddParameters(
+                projectId: project.projectId,
+                expectedProjectRevision: project.revision,
+                label: normalizedLabel,
+                apMillimetres: coordinates.apMillimetres,
+                mlMillimetres: coordinates.mlMillimetres,
+                dvMillimetres: coordinates.dvMillimetres
+            )
             let result: ImplantMutationResult = try await bridgeClient.request(
                 method: "implant.add",
-                params: ImplantAddParameters(
-                    label: normalizedLabel,
-                    apMillimetres: coordinates.apMillimetres,
-                    mlMillimetres: coordinates.mlMillimetres,
-                    dvMillimetres: coordinates.dvMillimetres
-                )
+                params: request
             )
-            try ImplantTargetValidator.validateMutation(result, expectedStatus: "added")
+            try ImplantTargetValidator.validateAddedMutation(result, request: request)
             await refreshState()
-            guard implantTargets.contains(where: { $0.targetId == result.target.targetId }) else {
+            guard backendState?.project?.revision == result.projectRevision,
+                  implantTargets.contains(where: { $0.targetId == result.target.targetId })
+            else {
                 throw ImplantOperationFailure.mutationNotPublished
             }
             return true
@@ -860,7 +955,10 @@ final class PlannerViewModel: ObservableObject {
 
     func removeUnprojectedImplantTarget(targetId: String) async -> Bool {
         implantOperationError = nil
-        guard let bridgeClient, canStoreImplantTarget else {
+        guard let bridgeClient,
+              canStoreImplantTarget,
+              let project = backendState?.project
+        else {
             implantOperationError = "Open an animal plan before removing an implant site."
             return false
         }
@@ -868,16 +966,20 @@ final class PlannerViewModel: ObservableObject {
         implantOperationInProgress = true
         defer { implantOperationInProgress = false }
         do {
+            let request = ImplantRemoveParameters(
+                projectId: project.projectId,
+                expectedProjectRevision: project.revision,
+                targetId: targetId
+            )
             let result: ImplantMutationResult = try await bridgeClient.request(
                 method: "implant.remove",
-                params: ImplantRemoveParameters(targetId: targetId)
+                params: request
             )
-            try ImplantTargetValidator.validateMutation(result, expectedStatus: "removed")
-            guard result.target.targetId == targetId else {
-                throw ImplantOperationFailure.removedTargetMismatch
-            }
+            try ImplantTargetValidator.validateRemovedMutation(result, request: request)
             await refreshState()
-            guard !implantTargets.contains(where: { $0.targetId == targetId }) else {
+            guard backendState?.project?.revision == result.projectRevision,
+                  !implantTargets.contains(where: { $0.targetId == targetId })
+            else {
                 throw ImplantOperationFailure.mutationNotPublished
             }
             targetProjections[targetId] = nil
@@ -1189,6 +1291,7 @@ final class PlannerViewModel: ObservableObject {
                 ? result.regionAnalysis : nil
             selectedProbeVesselAnalysis = result.plan.hasCurrentPlanningGeometry
                 ? result.majorVesselAnalysis : nil
+            reconcileSelectedMajorVesselConflict()
             majorVesselAnalysisError = nil
             return true
         } catch {
@@ -1206,6 +1309,10 @@ final class PlannerViewModel: ObservableObject {
         targetId: String,
         modelId: String,
         modelVersion: String,
+        placementMode: ProbePlacementMode,
+        entryAPText: String,
+        entryMLText: String,
+        entryDVText: String,
         azimuthText: String,
         elevationText: String,
         insertionDepthText: String,
@@ -1226,6 +1333,10 @@ final class PlannerViewModel: ObservableObject {
         defer { probeOperationInProgress = false }
         do {
             let numbers = try parseProbeNumbers(
+                placementMode: placementMode,
+                entryAPText: entryAPText,
+                entryMLText: entryMLText,
+                entryDVText: entryDVText,
                 azimuthText: azimuthText,
                 elevationText: elevationText,
                 insertionDepthText: insertionDepthText,
@@ -1238,6 +1349,10 @@ final class PlannerViewModel: ObservableObject {
                 modelId: modelId,
                 modelVersion: modelVersion,
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                placementMode: placementMode,
+                entryAPMillimetres: numbers.entryAP,
+                entryMLMillimetres: numbers.entryML,
+                entryDVMillimetres: numbers.entryDV,
                 azimuthDegrees: numbers.azimuth,
                 elevationDegrees: numbers.elevation,
                 insertionDepthMicrometres: numbers.depth,
@@ -1249,12 +1364,7 @@ final class PlannerViewModel: ObservableObject {
                 method: "probe.plan.create",
                 params: request
             )
-            try ProbePlanningValidator.validateMutation(
-                result,
-                projectId: project.projectId,
-                expectedStatus: "created",
-                expectedRevision: project.revision + 1
-            )
+            try ProbePlanningValidator.validateCreatedMutation(result, request: request)
             selectedProbePlanId = result.plan.planId
             selectedProbePlan = result.plan
             selectedProbeRegionAnalysis = nil
@@ -1276,6 +1386,10 @@ final class PlannerViewModel: ObservableObject {
         targetId: String,
         modelId: String,
         modelVersion: String,
+        placementMode: ProbePlacementMode,
+        entryAPText: String,
+        entryMLText: String,
+        entryDVText: String,
         azimuthText: String,
         elevationText: String,
         insertionDepthText: String,
@@ -1296,6 +1410,10 @@ final class PlannerViewModel: ObservableObject {
         defer { probeOperationInProgress = false }
         do {
             let numbers = try parseProbeNumbers(
+                placementMode: placementMode,
+                entryAPText: entryAPText,
+                entryMLText: entryMLText,
+                entryDVText: entryDVText,
                 azimuthText: azimuthText,
                 elevationText: elevationText,
                 insertionDepthText: insertionDepthText,
@@ -1310,6 +1428,10 @@ final class PlannerViewModel: ObservableObject {
                 modelId: modelId,
                 modelVersion: modelVersion,
                 name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+                placementMode: placementMode,
+                entryAPMillimetres: numbers.entryAP,
+                entryMLMillimetres: numbers.entryML,
+                entryDVMillimetres: numbers.entryDV,
                 azimuthDegrees: numbers.azimuth,
                 elevationDegrees: numbers.elevation,
                 insertionDepthMicrometres: numbers.depth,
@@ -1321,12 +1443,7 @@ final class PlannerViewModel: ObservableObject {
                 method: "probe.plan.update",
                 params: request
             )
-            try ProbePlanningValidator.validateMutation(
-                result,
-                projectId: project.projectId,
-                expectedStatus: "updated",
-                expectedRevision: project.revision + 1
-            )
+            try ProbePlanningValidator.validateUpdatedMutation(result, request: request)
             selectedProbePlanId = result.plan.planId
             selectedProbePlan = result.plan
             selectedProbeRegionAnalysis = nil
@@ -1488,6 +1605,8 @@ final class PlannerViewModel: ObservableObject {
                 )
             }
             selectedProbeVesselAnalysis = result
+            selectedMajorVesselConflict = nil
+            majorVesselNavigationError = nil
             await refreshState()
             guard backendState?.project?.revision == result.projectRevision,
                   selectedProbePlan?.inputSha256 == result.planInputSha256,
@@ -1498,9 +1617,115 @@ final class PlannerViewModel: ObservableObject {
             return true
         } catch {
             selectedProbeVesselAnalysis = nil
+            selectedMajorVesselConflict = nil
             majorVesselAnalysisError = error.localizedDescription
             return false
         }
+    }
+
+    @discardableResult
+    func navigateToMajorVesselConflict(_ conflict: MajorVesselConflict) async -> Bool {
+        majorVesselNavigationError = nil
+        guard let bridgeClient,
+              canNavigateMajorVesselConflict,
+              let base = authoritativeViewerSnapshot,
+              let project = backendState?.project,
+              project.projectId.lowercased() == base.projectId.uuidString.lowercased(),
+              project.revision == base.projectRevision,
+              let analysis = selectedProbeVesselAnalysis?.analysis,
+              let geometry = majorVesselGeometry,
+              analysis.conflicts.contains(conflict),
+              analysis.provenance.derivedAssetSha256
+                == geometry.provenance.derivedAssetSha256,
+              exactVesselSegment(
+                  for: conflict,
+                  geometry: geometry,
+                  orientation: .coronal
+              ) != nil
+        else {
+            majorVesselNavigationError =
+                "Wait for the current atlas update, then select a returned vessel conflict."
+            return false
+        }
+
+        majorVesselNavigationInProgress = true
+        viewerGeneration &+= 1
+        let generation = viewerGeneration
+        pendingViewerMutation = nil
+        pendingViewerSlice = nil
+        viewerRegionSelection = nil
+        viewerPhase = .updating
+        defer { majorVesselNavigationInProgress = false }
+
+        do {
+            let request = try ViewerPointNavigationParameters(
+                projectId: base.projectId,
+                expectedProjectRevision: base.projectRevision,
+                atlas: base.atlas,
+                apMicrometres: conflict.probePoint.apMicrometres,
+                dvMicrometres: conflict.probePoint.dvMicrometres,
+                mlMicrometres: conflict.probePoint.mlMicrometres
+            )
+            let result: ViewerPointNavigationResult = try await bridgeClient.request(
+                method: ViewerBridgeMethod.pointNavigate.rawValue,
+                params: request
+            )
+            guard generation == viewerGeneration,
+                  result.snapshot.projectId == base.projectId,
+                  result.snapshot.projectRevision == base.projectRevision + 1,
+                  result.navigatedPoint == request.point
+            else {
+                throw ViewerContractError.invalid(
+                    "Conflict navigation returned a stale or mismatched viewer revision."
+                )
+            }
+
+            var frames = TriPlanarFrameSet()
+            for orientation in AtlasSliceOrientation.allCases {
+                frames[orientation] = try verifiedFrame(
+                    from: result.renderedSlices[orientation],
+                    expected: sliceMetadata(orientation, in: result.snapshot),
+                    snapshot: result.snapshot
+                )
+            }
+            guard AtlasSliceOrientation.allCases.allSatisfy({ frames[$0] != nil }) else {
+                throw ViewerContractError.invalid(
+                    "Conflict navigation did not return every orthogonal atlas frame."
+                )
+            }
+
+            try reconcileBackendProject(with: result.snapshot)
+            authoritativeViewerSnapshot = result.snapshot
+            viewerSnapshot = result.snapshot
+            triPlanarFrames = frames
+            viewerRegionSelection = nil
+            viewerPhase = .ready
+            hasUnsavedChanges = true
+
+            await refreshState()
+            guard backendState?.project?.revision == result.snapshot.projectRevision,
+                  viewerSnapshot?.projectRevision == result.snapshot.projectRevision,
+                  selectedProbeVesselAnalysis?.analysis.conflicts.contains(conflict) == true,
+                  majorVesselGeometry?.provenance.derivedAssetSha256
+                    == geometry.provenance.derivedAssetSha256
+            else {
+                throw ViewerContractError.invalid(
+                    "Conflict navigation was not coherently published to the animal plan."
+                )
+            }
+            selectedMajorVesselConflict = conflict
+            return true
+        } catch {
+            let navigationError = error.localizedDescription
+            await refreshState()
+            majorVesselNavigationError = navigationError
+            return false
+        }
+    }
+
+    func clearMajorVesselConflictSelection() {
+        selectedMajorVesselConflict = nil
+        majorVesselNavigationError = nil
     }
 
     func invalidateMajorVesselAnalysis() {
@@ -1524,27 +1749,95 @@ final class PlannerViewModel: ObservableObject {
         probeOperationInProgress = true
         defer { probeOperationInProgress = false }
         do {
+            let request = ProbeRegionExportParameters(
+                projectId: project.projectId,
+                expectedProjectRevision: project.revision,
+                planId: plan.planId,
+                expectedPlanInputSha256: plan.inputSha256,
+                format: format
+            )
             let result: ProbeRegionExportResult = try await bridgeClient.request(
                 method: "probe.region.export",
-                params: ProbeRegionExportParameters(
-                    projectId: project.projectId,
-                    planId: plan.planId,
-                    expectedPlanInputSha256: plan.inputSha256,
-                    format: format
-                )
+                params: request
             )
-            try ProbePlanningValidator.validateExport(
+            try ProbePlanningValidator.validateExportGeneration(
                 result,
-                projectId: project.projectId,
+                request: request,
                 plan: plan,
-                analysis: analysis,
-                format: format,
-                projectRevision: project.revision
+                analysis: analysis
             )
+            guard backendState?.project?.projectId == result.projectId,
+                  backendState?.project?.revision == result.projectRevision,
+                  selectedProbePlan?.planId == result.planId,
+                  selectedProbePlan?.inputSha256 == result.planInputSha256,
+                  selectedProbeRegionAnalysis?.analysisSha256 == result.analysisSha256
+            else { throw ProbePlanningOperationFailure.generatedExportBecameStale }
             return result
         } catch {
             probeOperationError = error.localizedDescription
             return nil
+        }
+    }
+
+    func confirmProbeRegionExport(_ generated: ProbeRegionExportResult) async -> Bool {
+        probeOperationError = nil
+        guard
+            let bridgeClient,
+            connection.isReady,
+            let project = backendState?.project,
+            let plan = selectedProbePlan,
+            let analysis = selectedProbeRegionAnalysis,
+            project.projectId == generated.projectId,
+            project.revision == generated.projectRevision,
+            plan.planId == generated.planId,
+            plan.inputSha256 == generated.planInputSha256,
+            analysis.analysisSha256 == generated.analysisSha256
+        else {
+            probeOperationError = ProbePlanningOperationFailure.generatedExportBecameStale
+                .localizedDescription
+            return false
+        }
+
+        probeOperationInProgress = true
+        defer { probeOperationInProgress = false }
+        do {
+            let generationRequest = ProbeRegionExportParameters(
+                projectId: project.projectId,
+                expectedProjectRevision: project.revision,
+                planId: plan.planId,
+                expectedPlanInputSha256: plan.inputSha256,
+                format: generated.format
+            )
+            try ProbePlanningValidator.validateExportGeneration(
+                generated,
+                request: generationRequest,
+                plan: plan,
+                analysis: analysis
+            )
+            let request = ProbeRegionExportConfirmParameters(
+                projectId: generated.projectId,
+                expectedProjectRevision: generated.projectRevision,
+                planId: generated.planId,
+                expectedPlanInputSha256: generated.planInputSha256,
+                analysisSha256: generated.analysisSha256,
+                format: generated.format,
+                contentSha256: generated.contentSha256
+            )
+            let result: ProbeRegionExportConfirmationResult = try await bridgeClient.request(
+                method: "probe.region.export.confirm",
+                params: request
+            )
+            try ProbePlanningValidator.validateExportConfirmation(result, request: request)
+            await refreshState()
+            guard backendState?.project?.projectId == result.projectId,
+                  backendState?.project?.revision == result.projectRevision,
+                  backendState?.project?.isDirty == true,
+                  hasUnsavedChanges
+            else { throw ProbePlanningOperationFailure.exportConfirmationNotPublished }
+            return true
+        } catch {
+            probeOperationError = error.localizedDescription
+            return false
         }
     }
 
@@ -1595,12 +1888,13 @@ final class PlannerViewModel: ObservableObject {
         let overlay = MajorVesselSliceOverlayGeometry.make(
             geometry: geometry,
             orientation: orientation,
-            sliceIndex: frame.index
+            sliceIndex: frame.index,
+            spatialIndex: majorVesselSliceSpatialIndex
         )
         if majorVesselSliceOverlayCache.count >= 24,
-           let oldestKey = majorVesselSliceOverlayCache.keys.first
+           let evictionKey = majorVesselSliceOverlayCache.keys.sorted().first
         {
-            majorVesselSliceOverlayCache[oldestKey] = nil
+            majorVesselSliceOverlayCache[evictionKey] = nil
         }
         majorVesselSliceOverlayCache[key] = overlay
         return overlay
@@ -1608,6 +1902,164 @@ final class PlannerViewModel: ObservableObject {
 
     var majorVesselDorsalOverlay: MajorVesselSliceOverlay? {
         majorVesselDorsalProjection
+    }
+
+    func majorVesselConflictOverlay(
+        for orientation: AtlasSliceOrientation
+    ) -> MajorVesselConflictCanvasOverlay? {
+        guard let conflict = selectedMajorVesselConflict,
+              let atlas = viewerSnapshot?.atlas,
+              let frame = viewerFrame(for: orientation),
+              let geometry = majorVesselGeometry,
+              conflict.probePoint.frameId == AtlasPhysicalCoordinateFrame.expectedFrameId,
+              conflict.vesselPoint.frameId == AtlasPhysicalCoordinateFrame.expectedFrameId
+        else { return nil }
+        let fixedCoordinate = coordinate(conflict.probePoint, axis: orientation.fixedAxis)
+        let expectedSlice = Int(floor(
+            fixedCoordinate / atlas.resolutionMicrometres[orientation.fixedAxis]
+        ))
+        guard frame.index == expectedSlice,
+              let exactSegment = exactVesselSegment(
+                  for: conflict,
+                  geometry: geometry,
+                  orientation: orientation
+              )
+        else { return nil }
+        return MajorVesselConflictCanvasOverlay(
+            conflictId: conflict.conflictId,
+            probePoint: imagePoint(
+                conflict.probePoint,
+                orientation: orientation,
+                atlas: atlas
+            ),
+            vesselPoint: imagePoint(
+                conflict.vesselPoint,
+                orientation: orientation,
+                atlas: atlas
+            ),
+            exactVesselSegment: exactSegment
+        )
+    }
+
+    var majorVesselDorsalConflictOverlay: MajorVesselConflictCanvasOverlay? {
+        guard let conflict = selectedMajorVesselConflict,
+              let atlas = viewerSnapshot?.atlas,
+              majorVesselDorsalProjection != nil,
+              let geometry = majorVesselGeometry
+        else { return nil }
+        guard let exactSegment = exactVesselSegment(
+            for: conflict,
+            geometry: geometry,
+            orientation: .horizontal
+        ) else { return nil }
+        return MajorVesselConflictCanvasOverlay(
+            conflictId: conflict.conflictId,
+            probePoint: ProbeSliceImagePoint(
+                column: conflict.probePoint.mlMicrometres
+                    / atlas.resolutionMicrometres.mlMicrometres,
+                row: conflict.probePoint.apMicrometres
+                    / atlas.resolutionMicrometres.apMicrometres
+            ),
+            vesselPoint: ProbeSliceImagePoint(
+                column: conflict.vesselPoint.mlMicrometres
+                    / atlas.resolutionMicrometres.mlMicrometres,
+                row: conflict.vesselPoint.apMicrometres
+                    / atlas.resolutionMicrometres.apMicrometres
+            ),
+            exactVesselSegment: exactSegment
+        )
+    }
+
+    private func exactVesselSegment(
+        for conflict: MajorVesselConflict,
+        geometry: MajorVesselGeometryResult,
+        orientation: AtlasSliceOrientation
+    ) -> MajorVesselSliceSegment? {
+        let graph = geometry.graph
+        let runIndex = conflict.vesselRunIndex
+        let segmentIndex = conflict.vesselSegmentIndexInRun
+        guard graph.runOffsets.indices.dropLast().contains(runIndex),
+              graph.sourceEdgeIndices.indices.contains(runIndex),
+              let expectedEdge = Int32(exactly: conflict.vesselSourceEdgeIndex),
+              graph.sourceEdgeIndices[runIndex] == expectedEdge
+        else { return nil }
+        let runStart = graph.runOffsets[runIndex]
+        let runEnd = graph.runOffsets[runIndex + 1]
+        guard segmentIndex >= 0,
+              segmentIndex < runEnd - runStart - 1
+        else { return nil }
+        let pointIndex = runStart + segmentIndex
+        guard graph.pointsASRMicrometres.indices.contains(pointIndex),
+              graph.pointsASRMicrometres.indices.contains(pointIndex + 1),
+              graph.radiiMicrometres.indices.contains(pointIndex),
+              graph.radiiMicrometres.indices.contains(pointIndex + 1)
+        else { return nil }
+        let start = graph.pointsASRMicrometres[pointIndex]
+        let end = graph.pointsASRMicrometres[pointIndex + 1]
+        let vesselPoint = SIMD3<Float>(
+            Float(conflict.vesselPoint.apMicrometres),
+            Float(conflict.vesselPoint.dvMicrometres),
+            Float(conflict.vesselPoint.mlMicrometres)
+        )
+        let delta = end - start
+        let lengthSquared = simd_length_squared(delta)
+        guard lengthSquared > 0 else { return nil }
+        let parameter = max(0, min(1, simd_dot(vesselPoint - start, delta) / lengthSquared))
+        guard simd_distance(vesselPoint, start + parameter * delta) <= 1 else {
+            return nil
+        }
+        let resolution = geometry.atlas.resolutionMicrometres
+        return MajorVesselSliceSegment(
+            start: graphImagePoint(start, orientation: orientation, resolution: resolution),
+            end: graphImagePoint(end, orientation: orientation, resolution: resolution),
+            startRadiusMicrometres: Double(graph.radiiMicrometres[pointIndex]),
+            endRadiusMicrometres: Double(graph.radiiMicrometres[pointIndex + 1]),
+            sourceEdgeIndex: expectedEdge,
+            runIndex: runIndex,
+            segmentIndexInRun: segmentIndex
+        )
+    }
+
+    private func graphImagePoint(
+        _ point: SIMD3<Float>,
+        orientation: AtlasSliceOrientation,
+        resolution: AtlasASRResolution
+    ) -> ProbeSliceImagePoint {
+        func value(_ axis: AtlasAnatomicalAxis) -> Double {
+            switch axis {
+            case .ap: Double(point.x)
+            case .dv: Double(point.y)
+            case .ml: Double(point.z)
+            }
+        }
+        return ProbeSliceImagePoint(
+            column: value(orientation.columnAxis) / resolution[orientation.columnAxis],
+            row: value(orientation.rowAxis) / resolution[orientation.rowAxis]
+        )
+    }
+
+    private func imagePoint(
+        _ point: MajorVesselPhysicalPoint,
+        orientation: AtlasSliceOrientation,
+        atlas: ViewerAtlasIdentity
+    ) -> ProbeSliceImagePoint {
+        ProbeSliceImagePoint(
+            column: coordinate(point, axis: orientation.columnAxis)
+                / atlas.resolutionMicrometres[orientation.columnAxis],
+            row: coordinate(point, axis: orientation.rowAxis)
+                / atlas.resolutionMicrometres[orientation.rowAxis]
+        )
+    }
+
+    private func coordinate(
+        _ point: MajorVesselPhysicalPoint,
+        axis: AtlasAnatomicalAxis
+    ) -> Double {
+        switch axis {
+        case .ap: point.apMicrometres
+        case .dv: point.dvMicrometres
+        case .ml: point.mlMicrometres
+        }
     }
 
     func prepareThreeDimensionalScene() async {
@@ -1669,7 +2121,8 @@ final class PlannerViewModel: ObservableObject {
                 selectedProbePlan: selectedProbePlan.flatMap {
                     $0.hasCurrentPlanningGeometry ? $0 : nil
                 },
-                majorVessels: majorVesselGeometry
+                majorVessels: majorVesselGeometry,
+                selectedVesselConflict: selectedMajorVesselConflict
             )
             cachedRootMesh = meshResult
             threeDimensionalSnapshot = snapshot
@@ -1825,15 +2278,44 @@ final class PlannerViewModel: ObservableObject {
     }
 
     private func parseProbeNumbers(
+        placementMode: ProbePlacementMode,
+        entryAPText: String,
+        entryMLText: String,
+        entryDVText: String,
         azimuthText: String,
         elevationText: String,
         insertionDepthText: String,
         axialRotationText: String
-    ) throws -> (azimuth: Double, elevation: Double, depth: Double, rotation: Double) {
-        (
-            try CalibrationNumberInput.parse(azimuthText, field: "Azimuth"),
-            try CalibrationNumberInput.parse(elevationText, field: "Elevation"),
-            try CalibrationNumberInput.parse(insertionDepthText, field: "Insertion depth"),
+    ) throws -> (
+        entryAP: Double?,
+        entryML: Double?,
+        entryDV: Double?,
+        azimuth: Double?,
+        elevation: Double?,
+        depth: Double?,
+        rotation: Double
+    ) {
+        let entry = placementMode.requiresEntryCoordinates
+            ? (
+                try CalibrationNumberInput.parse(entryAPText, field: "Entry AP"),
+                try CalibrationNumberInput.parse(entryMLText, field: "Entry ML"),
+                try CalibrationNumberInput.parse(entryDVText, field: "Entry DV")
+            )
+            : nil
+        let angles = placementMode.requiresAnglesAndDepth
+            ? (
+                try CalibrationNumberInput.parse(azimuthText, field: "Azimuth"),
+                try CalibrationNumberInput.parse(elevationText, field: "Elevation"),
+                try CalibrationNumberInput.parse(insertionDepthText, field: "Insertion depth")
+            )
+            : nil
+        return (
+            entry?.0,
+            entry?.1,
+            entry?.2,
+            angles?.0,
+            angles?.1,
+            angles?.2,
             try CalibrationNumberInput.parse(axialRotationText, field: "Axial rotation")
         )
     }
@@ -1859,7 +2341,9 @@ final class PlannerViewModel: ObservableObject {
     }
 
     func requestViewerSlice(_ orientation: AtlasSliceOrientation, index: Int) {
-        guard let frame = viewerFrame(for: orientation) else { return }
+        guard !majorVesselNavigationInProgress,
+              let frame = viewerFrame(for: orientation)
+        else { return }
         let clamped = min(frame.sliceCount - 1, max(0, index))
         if requestedViewerIndex(for: orientation) == clamped { return }
         viewerRegionSelection = nil
@@ -1877,12 +2361,20 @@ final class PlannerViewModel: ObservableObject {
         column: Int,
         row: Int
     ) {
-        guard
-            let frame = viewerFrame(for: orientation),
+        guard let frame = viewerFrame(for: orientation) else { return }
+        let authoritativeIndex = authoritativeViewerSnapshot.map {
+            sliceMetadata(orientation, in: $0).index
+        }
+        guard ViewerInteractionPolicy.allowsRegionPick(
+            orientation: orientation,
+            displayedSliceIndex: frame.index,
+            authoritativeSliceIndex: authoritativeIndex,
+            pendingSliceOrientation: pendingViewerSlice?.orientation,
+            atomicNavigationInProgress: majorVesselNavigationInProgress
+        ),
             column >= 0, column < frame.width,
             row >= 0, row < frame.height
         else { return }
-        pendingViewerSlice = nil
         enqueueViewerMutation(
             .regionPick(
                 orientation: orientation,
@@ -1930,17 +2422,22 @@ final class PlannerViewModel: ObservableObject {
                             index: index
                         )
                     )
-                    authoritativeViewerSnapshot = result.snapshot
-                    hasUnsavedChanges = true
                     let frame = try verifiedFrame(
                         from: result.renderedSlice,
                         expected: sliceMetadata(orientation, in: result.snapshot),
                         snapshot: result.snapshot
                     )
-                    guard generation == viewerGeneration else { continue }
+                    try reconcileBackendProject(with: result.snapshot)
+                    authoritativeViewerSnapshot = result.snapshot
                     viewerSnapshot = result.snapshot
-                    triPlanarFrames[orientation] = frame
                     viewerRegionSelection = nil
+                    let isLatest = ViewerMutationPublicationPolicy.publishSlice(
+                        frame,
+                        requestGeneration: generation,
+                        currentGeneration: viewerGeneration,
+                        into: &triPlanarFrames
+                    )
+                    guard isLatest else { continue }
                 case let .regionPick(orientation, index, column, row):
                     let result: ViewerRegionPickResult = try await bridgeClient.request(
                         method: ViewerBridgeMethod.regionPick.rawValue,
@@ -1953,11 +2450,16 @@ final class PlannerViewModel: ObservableObject {
                             row: row
                         )
                     )
+                    try reconcileBackendProject(with: result.snapshot)
                     authoritativeViewerSnapshot = result.snapshot
-                    hasUnsavedChanges = true
-                    guard generation == viewerGeneration else { continue }
+                    let isLatest = ViewerMutationPublicationPolicy.publishRegionSelection(
+                        result.snapshot.selection,
+                        requestGeneration: generation,
+                        currentGeneration: viewerGeneration,
+                        into: &viewerRegionSelection
+                    )
+                    guard isLatest else { continue }
                     viewerSnapshot = result.snapshot
-                    viewerRegionSelection = result.snapshot.selection
                 }
                 pendingViewerSlice = nil
                 viewerPhase = .ready
@@ -1972,6 +2474,24 @@ final class PlannerViewModel: ObservableObject {
                 ? .unavailable("The atlas-slice viewer has no active project")
                 : .ready
         }
+    }
+
+    private func reconcileBackendProject(
+        with snapshot: ViewerCanonicalSnapshot
+    ) throws {
+        guard let state = backendState,
+              let project = state.project,
+              UUID(uuidString: project.projectId) == snapshot.projectId
+        else {
+            throw ViewerContractError.invalid(
+                "Viewer mutation project identity does not match the open animal plan."
+            )
+        }
+        backendState = state.updatingProjectRevision(
+            snapshot.projectRevision,
+            isDirty: true
+        )
+        hasUnsavedChanges = true
     }
 
     private func refreshViewerState(using bridgeClient: BridgeClient) async {
@@ -2143,14 +2663,8 @@ final class PlannerViewModel: ObservableObject {
 
     private func loadDorsalSurface() async {
         clearDorsalRegionPick()
-        let shouldReloadPopulationDensity = backendState?.populationDensity.visible == true
-        if shouldReloadPopulationDensity {
-            populationDensityPNG = nil
-            populationDensityOverlay = nil
-        }
+        clearArchivedDisplayState()
         guard let bridgeClient, atlasProvenance != nil else {
-            populationDensityPNG = nil
-            populationDensityOverlay = nil
             dorsalLoadPhase = .unavailable("The reviewed atlas is not open")
             return
         }
@@ -2177,14 +2691,9 @@ final class PlannerViewModel: ObservableObject {
             )
             dorsalSurface = result
             dorsalLoadPhase = .ready
-            if shouldReloadPopulationDensity, let state = backendState {
-                await synchronizePopulationDensity(using: bridgeClient, state: state)
-            }
         } catch {
             dorsalSurface = nil
             dorsalSurfacePNG = nil
-            populationDensityPNG = nil
-            populationDensityOverlay = nil
             dorsalLoadPhase = .failed(error.localizedDescription)
         }
     }
@@ -2205,12 +2714,18 @@ final class PlannerViewModel: ObservableObject {
         else {
             majorVesselGeometry = nil
             majorVesselDorsalProjection = nil
+            majorVesselSliceSpatialIndex = nil
             majorVesselSliceOverlayCache = [:]
-            majorVesselLoadError = "The connected service does not expose the pinned vessel graph."
+            majorVesselLoadError = (
+                "Reference vessels are disabled because the bundled graph's ML laterality "
+                    + "and whole-brain coverage are not qualified."
+            )
             return
         }
         if let geometry = majorVesselGeometry,
-           geometry.atlas.metadataSha256 == atlasProvenance.metadataSha256
+           geometry.atlas.metadataSha256 == atlasProvenance.metadataSha256,
+           majorVesselSliceSpatialIndex != nil,
+           majorVesselDorsalProjection != nil
         {
             return
         }
@@ -2240,14 +2755,38 @@ final class PlannerViewModel: ObservableObject {
                     "Major-vessel geometry does not match the open atlas."
                 )
             }
+            let derived = await Task.detached(priority: .userInitiated) {
+                let dorsalOverlay = MajorVesselSliceOverlayGeometry.makeDorsalProjection(
+                    geometry: geometry
+                )
+                let dorsalWidth = geometry.atlas.shapeVoxels.mlVoxels
+                let dorsalHeight = geometry.atlas.shapeVoxels.apVoxels
+                return (
+                    MajorVesselSliceSpatialIndex(geometry: geometry),
+                    dorsalOverlay,
+                    MajorVesselRasterizer.render(
+                        overlay: dorsalOverlay,
+                        imagePixelWidth: dorsalWidth,
+                        imagePixelHeight: dorsalHeight
+                    )
+                )
+            }.value
             majorVesselGeometry = geometry
-            majorVesselDorsalProjection = MajorVesselSliceOverlayGeometry.makeDorsalProjection(
-                geometry: geometry
-            )
+            majorVesselSliceSpatialIndex = derived.0
+            majorVesselDorsalProjection = derived.1
+            if let raster = derived.2 {
+                MajorVesselRasterCache.insert(
+                    raster,
+                    overlay: derived.1,
+                    imagePixelWidth: geometry.atlas.shapeVoxels.mlVoxels,
+                    imagePixelHeight: geometry.atlas.shapeVoxels.apVoxels
+                )
+            }
             majorVesselSliceOverlayCache = [:]
         } catch {
             majorVesselGeometry = nil
             majorVesselDorsalProjection = nil
+            majorVesselSliceSpatialIndex = nil
             majorVesselSliceOverlayCache = [:]
             majorVesselLoadError = error.localizedDescription
         }
@@ -2375,6 +2914,9 @@ final class PlannerViewModel: ObservableObject {
             }
             registrationResult = result
             hasUnsavedChanges = true
+            if let state = backendState {
+                await loadRegisteredOverlayIfAvailable(using: bridgeClient, state: state)
+            }
             return subjectOverlayPNG != nil
         } catch {
             subjectOverlayPNG = nil
@@ -2385,7 +2927,10 @@ final class PlannerViewModel: ObservableObject {
 
     func saveProject(to url: URL) async -> Bool {
         projectOperationError = nil
-        guard let bridgeClient, canSaveProject else {
+        guard let bridgeClient,
+              canSaveProject,
+              let project = backendState?.project
+        else {
             projectOperationError = "There is no connected project to save."
             return false
         }
@@ -2394,13 +2939,22 @@ final class PlannerViewModel: ObservableObject {
         do {
             let result: ProjectSaveResult = try await bridgeClient.request(
                 method: "project.save",
-                params: ProjectSaveParameters(path: url.path)
+                params: ProjectSaveParameters(
+                    projectId: project.projectId,
+                    expectedProjectRevision: project.revision,
+                    path: url.path
+                )
             )
-            await refreshState()
             guard
                 result.status == "saved",
+                result.projectId.lowercased() == project.projectId.lowercased(),
+                result.projectRevision == project.revision + 1,
                 canonicalPath(result.path) == canonicalPath(url.path)
             else {
+                throw ProjectOperationFailure.pathMismatch
+            }
+            await refreshState()
+            guard backendState?.project?.revision == result.projectRevision else {
                 throw ProjectOperationFailure.pathMismatch
             }
             hasUnsavedChanges = false
@@ -2553,6 +3107,7 @@ final class PlannerViewModel: ObservableObject {
             ? detail.regionAnalysis : nil
         selectedProbeVesselAnalysis = detail.plan.hasCurrentPlanningGeometry
             ? detail.majorVesselAnalysis : nil
+        reconcileSelectedMajorVesselConflict()
         majorVesselAnalysisError = nil
     }
 
@@ -2570,8 +3125,22 @@ final class PlannerViewModel: ObservableObject {
 
     private func clearMajorVesselAnalysis() {
         selectedProbeVesselAnalysis = nil
+        selectedMajorVesselConflict = nil
         majorVesselAnalysisInProgress = false
         majorVesselAnalysisError = nil
+        majorVesselNavigationInProgress = false
+        majorVesselNavigationError = nil
+    }
+
+    private func reconcileSelectedMajorVesselConflict() {
+        guard let selectedMajorVesselConflict,
+              let analysis = selectedProbeVesselAnalysis?.analysis,
+              analysis.conflicts.contains(selectedMajorVesselConflict)
+        else {
+            self.selectedMajorVesselConflict = nil
+            majorVesselNavigationError = nil
+            return
+        }
     }
 
     private func loadSubjectPreviewIfAvailable(
@@ -2797,6 +3366,17 @@ final class PlannerViewModel: ObservableObject {
         }
     }
 
+    /// Population-density and subject-registration state remains readable for
+    /// package compatibility, but its methods are not registered and it must
+    /// never inflate the primary surgical-planning connect/refresh/Dorsal path.
+    private func clearArchivedDisplayState() {
+        clearPopulationDensity(clearPreparation: true)
+        importedVessel = nil
+        subjectPreviewPNG = nil
+        subjectOverlayPNG = nil
+        registrationResult = nil
+    }
+
     private func verifiedPNG(base64: String, mimeType: String) throws -> Data {
         guard mimeType == "image/png", let data = Data(base64Encoded: base64) else {
             throw StateValidationFailure.invalidPNG
@@ -2891,14 +3471,11 @@ private enum PopulationDensityOperationFailure: LocalizedError {
 
 private enum ImplantOperationFailure: LocalizedError {
     case mutationNotPublished
-    case removedTargetMismatch
 
     var errorDescription: String? {
         switch self {
         case .mutationNotPublished:
             "The backend did not publish the persisted implant-site change."
-        case .removedTargetMismatch:
-            "The backend removed a different implant site than requested."
         }
     }
 }
@@ -2906,6 +3483,8 @@ private enum ImplantOperationFailure: LocalizedError {
 private enum ProbePlanningOperationFailure: LocalizedError {
     case mutationNotPublished
     case stateCountMismatch
+    case generatedExportBecameStale
+    case exportConfirmationNotPublished
 
     var errorDescription: String? {
         switch self {
@@ -2913,6 +3492,10 @@ private enum ProbePlanningOperationFailure: LocalizedError {
             "The backend did not publish the persisted probe-plan change."
         case .stateCountMismatch:
             "Probe-plan or region-analysis counts do not match project state."
+        case .generatedExportBecameStale:
+            "The generated region export no longer matches the current probe plan and analysis."
+        case .exportConfirmationNotPublished:
+            "The file was saved, but the backend did not publish its export audit record."
         }
     }
 }

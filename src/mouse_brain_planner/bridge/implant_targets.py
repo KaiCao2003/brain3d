@@ -31,11 +31,22 @@ IMPLANT_PROJECTION_STATUS: Final = "lockedUntilExplicitBregmaSkullCalibration"
 class ImplantAddParameters:
     """Normalized protocol inputs for one target addition."""
 
+    project_id: UUID
+    expected_project_revision: int
     label: str
     ap_mm: float
     ml_mm: float
     dv_mm: float
     notes: str
+
+
+@dataclass(frozen=True, slots=True)
+class ImplantRemoveParameters:
+    """Normalized protocol inputs for one target removal."""
+
+    project_id: UUID
+    expected_project_revision: int
+    target_id: UUID
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +58,8 @@ class ImplantTargetMutation:
 
 
 ProjectReader = Callable[[], PlannerProject]
-ProjectReplacer = Callable[[PlannerProject], None]
+RevisionReader = Callable[[], int]
+ProjectReplacer = Callable[[PlannerProject], int]
 
 
 @dataclass(slots=True)
@@ -56,6 +68,7 @@ class ImplantTargetBridge:
 
     dispatcher: BridgeDispatcher
     get_project: ProjectReader
+    get_revision: RevisionReader
     replace_project: ProjectReplacer
 
     def register(self) -> None:
@@ -70,13 +83,37 @@ class ImplantTargetBridge:
         return implant_list(self.get_project(), params)
 
     def add_target(self, params: Mapping[str, object]) -> JsonObject:
-        mutation = implant_add(self.get_project(), params)
-        self.replace_project(mutation.project)
+        base_revision = self.get_revision()
+        mutation = implant_add(
+            self.get_project(),
+            params,
+            current_revision=base_revision,
+        )
+        published_revision = self.replace_project(mutation.project)
+        _require_single_revision_increment(
+            base_revision=base_revision,
+            published_revision=published_revision,
+            observed_revision=self.get_revision(),
+            operation="implant.add",
+        )
+        mutation.result["projectRevision"] = published_revision
         return mutation.result
 
     def remove_target(self, params: Mapping[str, object]) -> JsonObject:
-        mutation = implant_remove(self.get_project(), params)
-        self.replace_project(mutation.project)
+        base_revision = self.get_revision()
+        mutation = implant_remove(
+            self.get_project(),
+            params,
+            current_revision=base_revision,
+        )
+        published_revision = self.replace_project(mutation.project)
+        _require_single_revision_increment(
+            base_revision=base_revision,
+            published_revision=published_revision,
+            observed_revision=self.get_revision(),
+            operation="implant.remove",
+        )
+        mutation.result["projectRevision"] = published_revision
         return mutation.result
 
 
@@ -84,16 +121,23 @@ def register_implant_target_handlers(
     dispatcher: BridgeDispatcher,
     *,
     get_project: ProjectReader,
+    get_revision: RevisionReader,
     replace_project: ProjectReplacer,
 ) -> ImplantTargetBridge:
     """Register implant handlers against caller-owned project state.
 
     ``replace_project`` is called exactly once after a successful add or
-    remove.  The eventual planning-session integration can therefore publish
-    the returned replacement and increment its own revision atomically.
+    remove and must return the revision produced by that publication.  The
+    adapter rejects any owner that does not increment the authoritative
+    revision exactly once.
     """
 
-    extension = ImplantTargetBridge(dispatcher, get_project, replace_project)
+    extension = ImplantTargetBridge(
+        dispatcher,
+        get_project,
+        get_revision,
+        replace_project,
+    )
     extension.register()
     return extension
 
@@ -112,6 +156,8 @@ def parse_implant_add_params(params: Mapping[str, object]) -> ImplantAddParamete
         params,
         required={
             "protocolVersion",
+            "projectId",
+            "expectedProjectRevision",
             "label",
             "apMillimetres",
             "mlMillimetres",
@@ -121,6 +167,11 @@ def parse_implant_add_params(params: Mapping[str, object]) -> ImplantAddParamete
     )
     _require_protocol(params)
     return ImplantAddParameters(
+        project_id=_uuid(params["projectId"], field="projectId"),
+        expected_project_revision=_nonnegative_integer(
+            params["expectedProjectRevision"],
+            field="expectedProjectRevision",
+        ),
         label=_text(params["label"], field="label", maximum=200, require_visible=True),
         ap_mm=_finite_number(params["apMillimetres"], field="apMillimetres"),
         ml_mm=_finite_number(params["mlMillimetres"], field="mlMillimetres"),
@@ -129,12 +180,27 @@ def parse_implant_add_params(params: Mapping[str, object]) -> ImplantAddParamete
     )
 
 
-def parse_implant_remove_params(params: Mapping[str, object]) -> UUID:
-    """Validate ``implant.remove`` parameters and return the requested UUID."""
+def parse_implant_remove_params(params: Mapping[str, object]) -> ImplantRemoveParameters:
+    """Validate and normalize the exact ``implant.remove`` parameter schema."""
 
-    _validate_params(params, required={"protocolVersion", "targetId"})
+    _validate_params(
+        params,
+        required={
+            "protocolVersion",
+            "projectId",
+            "expectedProjectRevision",
+            "targetId",
+        },
+    )
     _require_protocol(params)
-    return _uuid(params["targetId"], field="targetId")
+    return ImplantRemoveParameters(
+        project_id=_uuid(params["projectId"], field="projectId"),
+        expected_project_revision=_nonnegative_integer(
+            params["expectedProjectRevision"],
+            field="expectedProjectRevision",
+        ),
+        target_id=_uuid(params["targetId"], field="targetId"),
+    )
 
 
 def implant_list(project: PlannerProject, params: Mapping[str, object]) -> JsonObject:
@@ -152,10 +218,20 @@ def implant_list(project: PlannerProject, params: Mapping[str, object]) -> JsonO
 def implant_add(
     project: PlannerProject,
     params: Mapping[str, object],
+    *,
+    current_revision: int | None = None,
 ) -> ImplantTargetMutation:
     """Parse one add request and return a validated replacement project."""
 
     parsed = parse_implant_add_params(params)
+    _validate_mutation_project(
+        project,
+        project_id=parsed.project_id,
+        expected_revision=parsed.expected_project_revision,
+        current_revision=(
+            project.project_revision if current_revision is None else current_revision
+        ),
+    )
     try:
         target = UnprojectedBregmaTarget(
             label=parsed.label,
@@ -177,6 +253,8 @@ def implant_add(
         result=_operation_result(
             status="added",
             target_count=len(replacement.unprojected_bregma_targets),
+            project_id=project.project_uuid,
+            project_revision=parsed.expected_project_revision + 1,
             target=implant_target_payload(stored),
         ),
     )
@@ -185,16 +263,28 @@ def implant_add(
 def implant_remove(
     project: PlannerProject,
     params: Mapping[str, object],
+    *,
+    current_revision: int | None = None,
 ) -> ImplantTargetMutation:
     """Parse one remove request and return a validated replacement project."""
 
-    target_id = parse_implant_remove_params(params)
-    replacement, removed = remove_implant_target(project, target_id)
+    parsed = parse_implant_remove_params(params)
+    _validate_mutation_project(
+        project,
+        project_id=parsed.project_id,
+        expected_revision=parsed.expected_project_revision,
+        current_revision=(
+            project.project_revision if current_revision is None else current_revision
+        ),
+    )
+    replacement, removed = remove_implant_target(project, parsed.target_id)
     return ImplantTargetMutation(
         project=replacement,
         result=_operation_result(
             status="removed",
             target_count=len(replacement.unprojected_bregma_targets),
+            project_id=project.project_uuid,
+            project_revision=parsed.expected_project_revision + 1,
             target=implant_target_payload(removed),
         ),
     )
@@ -303,6 +393,8 @@ def _operation_result(
     *,
     status: str,
     target_count: int,
+    project_id: UUID | None = None,
+    project_revision: int | None = None,
     target: JsonObject | None = None,
     targets: list[JsonObject] | None = None,
 ) -> JsonObject:
@@ -315,6 +407,10 @@ def _operation_result(
         "usableForNavigation": False,
         "projectionStatus": IMPLANT_PROJECTION_STATUS,
     }
+    if project_id is not None:
+        result["projectId"] = str(project_id)
+    if project_revision is not None:
+        result["projectRevision"] = project_revision
     if target is not None:
         result["target"] = target
     if targets is not None:
@@ -377,6 +473,48 @@ def _validated_target_snapshot(target: UnprojectedBregmaTarget) -> UnprojectedBr
         ) from error
 
 
+def _validate_mutation_project(
+    project: PlannerProject,
+    *,
+    project_id: UUID,
+    expected_revision: int,
+    current_revision: int,
+) -> None:
+    """Reject a mutation that is not based on the authoritative live project."""
+
+    if project.project_revision != current_revision:
+        raise RuntimeError("implant project and authoritative revisions diverged")
+    if project_id != project.project_uuid:
+        raise BridgeError(
+            "PROJECT_ID_MISMATCH",
+            "The implant mutation does not belong to the current project.",
+            details={
+                "requestedProjectId": str(project_id),
+                "currentProjectId": str(project.project_uuid),
+            },
+        )
+    if expected_revision != current_revision:
+        raise BridgeError(
+            "PROJECT_REVISION_CONFLICT",
+            "The implant mutation was based on a stale project revision.",
+            details={
+                "expectedProjectRevision": expected_revision,
+                "actualProjectRevision": current_revision,
+            },
+        )
+
+
+def _require_single_revision_increment(
+    *,
+    base_revision: int,
+    published_revision: int,
+    observed_revision: int,
+    operation: str,
+) -> None:
+    if published_revision != base_revision + 1 or observed_revision != published_revision:
+        raise RuntimeError(f"{operation} project replacer did not increment revision exactly once")
+
+
 def _validate_params(
     params: Mapping[str, object],
     *,
@@ -427,6 +565,16 @@ def _finite_number(value: object, *, field: str) -> float:
             details={"field": field},
         )
     return 0.0 if normalized == 0 else normalized
+
+
+def _nonnegative_integer(value: object, *, field: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            f"{field} must be a nonnegative integer.",
+            details={"field": field},
+        )
+    return value
 
 
 def _text(

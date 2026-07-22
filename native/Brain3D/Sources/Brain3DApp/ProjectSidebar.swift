@@ -16,12 +16,17 @@ struct ProjectSidebar: View {
     @State private var showingCalibrationSheet = false
     @State private var probeName = ""
     @State private var probeTargetId = ""
+    @State private var probePlacementMode: ProbePlacementMode = .stereotaxicTargetManipulator
+    @State private var probeEntryAP = ""
+    @State private var probeEntryML = ""
+    @State private var probeEntryDV = ""
     @State private var probeAzimuth = ""
     @State private var probeElevation = ""
     @State private var probeDepth = ""
     @State private var probeAxialRotation = ""
     @State private var probeGeometryAcknowledged = false
     @State private var showingProbeRegionInspector = false
+    @State private var showingMajorVesselConflictInspector = false
     @State private var confirmingProbeRemoval = false
     @State private var vesselAnalysisDraft = VesselAnalysisDraft()
 
@@ -29,7 +34,6 @@ struct ProjectSidebar: View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    projectHeader
                     backendSection
                     atlasSection
                     implantTargetSection
@@ -38,9 +42,6 @@ struct ProjectSidebar: View {
                 }
                 .padding(16)
             }
-            SafetyNotice(compact: true)
-                .padding(12)
-                .background(.bar)
         }
         .background(.thinMaterial)
         .sheet(isPresented: $showingCalibrationSheet) {
@@ -52,6 +53,9 @@ struct ProjectSidebar: View {
             {
                 ProbeRegionInspectorSheet(plan: plan, analysis: analysis)
             }
+        }
+        .sheet(isPresented: $showingMajorVesselConflictInspector) {
+            MajorVesselConflictInspectorSheet(model: model)
         }
         .confirmationDialog(
             "Remove this probe plan and its region analysis?",
@@ -114,24 +118,38 @@ struct ProjectSidebar: View {
                 }
             }
 
+            Picker("Mode", selection: $probePlacementMode) {
+                ForEach(ProbePlacementMode.allCases, id: \.self) { mode in
+                    Text(mode.displayName).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            .controlSize(.small)
+
             TextField("Probe plan name", text: $probeName)
                 .textFieldStyle(.roundedBorder)
 
-            probeNumberField(
-                "Azimuth (°)",
-                sign: "+ rotates anterior → right; − rotates toward left",
-                text: $probeAzimuth
-            )
-            probeNumberField(
-                "Elevation (°)",
-                sign: "+ dorsal / up; − deep / ventral",
-                text: $probeElevation
-            )
-            probeNumberField(
-                "Insertion depth (µm)",
-                sign: "Positive distance from entry toward tip",
-                text: $probeDepth
-            )
+            if probePlacementMode.requiresEntryCoordinates {
+                probeEntryCoordinateFields
+            }
+
+            if probePlacementMode.requiresAnglesAndDepth {
+                probeNumberField(
+                    "Azimuth (°)",
+                    sign: "+ rotates anterior → right; − rotates toward left",
+                    text: $probeAzimuth
+                )
+                probeNumberField(
+                    "Elevation (°)",
+                    sign: "+ dorsal / up; − deep / ventral",
+                    text: $probeElevation
+                )
+                probeNumberField(
+                    "Insertion depth (µm)",
+                    sign: "Positive distance from entry toward tip",
+                    text: $probeDepth
+                )
+            }
             probeNumberField(
                 "Axial rotation (°)",
                 sign: "Right-hand rotation about the entry → tip axis",
@@ -281,13 +299,37 @@ struct ProjectSidebar: View {
             && model.selectedProbeModel != nil
             && !probeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && !probeTargetId.isEmpty
-            && !probeAzimuth.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !probeElevation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !probeDepth.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !probeAxialRotation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && validProbeNumber(probeAxialRotation, range: -180 ... 180)
+            && entryFieldsAreValid
+            && angleAndDepthFieldsAreValid
             && (model.selectedProbeModel.map {
                 !$0.requiresExplicitAcknowledgement || probeGeometryAcknowledged
             } == true)
+    }
+
+    private var entryFieldsAreValid: Bool {
+        !probePlacementMode.requiresEntryCoordinates
+            || [probeEntryAP, probeEntryML, probeEntryDV].allSatisfy {
+                validProbeNumber($0)
+            }
+    }
+
+    private var angleAndDepthFieldsAreValid: Bool {
+        !probePlacementMode.requiresAnglesAndDepth
+            || (validProbeNumber(probeAzimuth, range: -180 ... 180)
+                && validProbeNumber(probeElevation, range: -90 ... 90)
+                && validProbeNumber(probeDepth, strictlyPositive: true))
+    }
+
+    private func validProbeNumber(
+        _ text: String,
+        range: ClosedRange<Double>? = nil,
+        strictlyPositive: Bool = false
+    ) -> Bool {
+        guard let value = try? CalibrationNumberInput.parse(text, field: "Probe value")
+        else { return false }
+        if let range, !range.contains(value) { return false }
+        return !strictlyPositive || value > 0
     }
 
     private func probeNumberField(
@@ -309,6 +351,41 @@ struct ProjectSidebar: View {
         }
     }
 
+    private var probeEntryCoordinateFields: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Entry from bregma (mm)")
+                .font(.caption.weight(.semibold))
+            HStack(spacing: 8) {
+                compactProbeNumberField("AP", text: $probeEntryAP)
+                compactProbeNumberField("ML", text: $probeEntryML)
+                compactProbeNumberField("DV", text: $probeEntryDV)
+            }
+            Text(
+                "+AP anterior · −AP posterior/back · +ML right · −ML left · "
+                    + "+DV dorsal/up · −DV deep/ventral"
+            )
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func compactProbeNumberField(
+        _ axis: String,
+        text: Binding<String>
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(axis)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.secondary)
+            TextField(axis, text: text)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .accessibilityLabel("Entry \(axis) in millimetres from bregma")
+        }
+        .frame(maxWidth: .infinity)
+    }
+
     private func createProbePlan() async -> Bool {
         guard let probe = model.selectedProbeModel else { return false }
         return await model.createProbePlan(
@@ -316,6 +393,10 @@ struct ProjectSidebar: View {
             targetId: probeTargetId,
             modelId: probe.modelId,
             modelVersion: probe.modelVersion,
+            placementMode: probePlacementMode,
+            entryAPText: probeEntryAP,
+            entryMLText: probeEntryML,
+            entryDVText: probeEntryDV,
             azimuthText: probeAzimuth,
             elevationText: probeElevation,
             insertionDepthText: probeDepth,
@@ -331,6 +412,10 @@ struct ProjectSidebar: View {
             targetId: probeTargetId,
             modelId: probe.modelId,
             modelVersion: probe.modelVersion,
+            placementMode: probePlacementMode,
+            entryAPText: probeEntryAP,
+            entryMLText: probeEntryML,
+            entryDVText: probeEntryDV,
             azimuthText: probeAzimuth,
             elevationText: probeElevation,
             insertionDepthText: probeDepth,
@@ -341,13 +426,17 @@ struct ProjectSidebar: View {
 
     private func populateProbeDraft() {
         guard let plan = model.selectedProbePlan else { return }
-        let manipulator = plan.manipulatorDraft
+        let draft = plan.placementDraft
         probeName = plan.name
         probeTargetId = plan.targetId
-        probeAzimuth = decimalText(manipulator.azimuthDegrees)
-        probeElevation = decimalText(manipulator.elevationDegrees)
-        probeDepth = decimalText(manipulator.insertionDepthMicrometres)
-        probeAxialRotation = decimalText(manipulator.axialRotationDegrees)
+        probePlacementMode = draft.mode
+        probeEntryAP = draft.entryAPMillimetres.map(decimalText) ?? ""
+        probeEntryML = draft.entryMLMillimetres.map(decimalText) ?? ""
+        probeEntryDV = draft.entryDVMillimetres.map(decimalText) ?? ""
+        probeAzimuth = draft.azimuthDegrees.map(decimalText) ?? ""
+        probeElevation = draft.elevationDegrees.map(decimalText) ?? ""
+        probeDepth = draft.insertionDepthMicrometres.map(decimalText) ?? ""
+        probeAxialRotation = decimalText(draft.axialRotationDegrees)
         probeGeometryAcknowledged = ProbePlanningContract.requiresExplicitAcknowledgement(
             verificationStatus: plan.verificationStatus
         )
@@ -356,6 +445,10 @@ struct ProjectSidebar: View {
     private func clearProbeDraft() {
         probeName = ""
         probeTargetId = ""
+        probePlacementMode = .stereotaxicTargetManipulator
+        probeEntryAP = ""
+        probeEntryML = ""
+        probeEntryDV = ""
         probeAzimuth = ""
         probeElevation = ""
         probeDepth = ""
@@ -405,6 +498,7 @@ struct ProjectSidebar: View {
             guard panel.runModal() == .OK, let url = panel.url else { return }
             do {
                 try Data(export.content.utf8).write(to: url, options: .atomic)
+                _ = await model.confirmProbeRegionExport(export)
             } catch {
                 model.recordProbeFileError(error)
             }
@@ -560,27 +654,30 @@ struct ProjectSidebar: View {
                 Text("Nearest loaded centerline: \(nearest.formatted(.number.precision(.fractionLength(1)))) µm")
                     .font(.caption2.monospacedDigit())
             }
-            ForEach(Array(analysis.conflicts.prefix(3))) { conflict in
-                Text(
-                    "\(conflict.shankId) · depth "
-                        + "\(conflict.insertionDepthMicrometres.formatted(.number.precision(.fractionLength(1)))) µm · "
-                        + "adjusted \(signedMicrometres(conflict.adjustedClearanceMicrometres))"
-                )
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
+            if !analysis.conflicts.isEmpty {
+                Button(
+                    "Inspect \(analysis.conflicts.count) returned conflict"
+                        + (analysis.conflicts.count == 1 ? "" : "s"),
+                    systemImage: "list.bullet.rectangle"
+                ) {
+                    showingMajorVesselConflictInspector = true
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
             if analysis.conflictsTruncated {
                 Text(
-                    "Showing \(min(3, analysis.conflicts.count)) of at least "
-                        + "\(analysis.conflicts.count) returned conflicts; additional conflicts "
-                        + "were truncated."
+                    "The backend returned \(analysis.conflicts.count) conflicts; additional "
+                        + "conflicts were truncated at the reviewed request limit."
                 )
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            } else if analysis.conflicts.count > 3 {
-                Text("Additional conflicts: \(max(0, analysis.conflicts.count - 3))")
+            }
+            if let error = model.majorVesselNavigationError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ForEach(analysis.warnings, id: \.self) { warning in
                 Label(warning, systemImage: "info.circle")
@@ -819,14 +916,6 @@ struct ProjectSidebar: View {
         }
     }
 
-    private var projectHeader: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Label("Untitled animal plan", systemImage: "cross.case")
-                .font(.title3.weight(.semibold))
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
     private var backendSection: some View {
         SidebarSection(title: "Planning service", systemImage: "point.3.connected.trianglepath.dotted") {
             StatusRow(label: "Connection", value: model.connection.title)
@@ -873,9 +962,6 @@ struct ProjectSidebar: View {
         SidebarSection(title: "Atlas", systemImage: "square.stack.3d.up") {
             StatusRow(label: "Supported", value: SafetyPolicy.supportedAtlasDisplayName)
             StatusRow(label: "Operational", value: model.atlasOperationalStatus)
-            Text("25 µm testing mode. 10 µm is intentionally not offered.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
             if model.canDownloadAtlas {
                 Button("Download reviewed 25 µm atlas", systemImage: "arrow.down.circle") {
                     Task { await model.downloadAndOpenAtlas() }
@@ -887,80 +973,350 @@ struct ProjectSidebar: View {
         }
     }
 
-    private var populationDensitySection: some View {
-        SidebarSection(title: "Population density (optional)", systemImage: "circle.grid.cross") {
-            StatusRow(label: "Reference", value: model.populationDensityStatus)
-            StatusRow(
-                label: "Published source",
-                value: "\(SafetyPolicy.populationReferenceContributor) · "
-                    + SafetyPolicy.populationReferenceRepository
-            )
-            StatusRow(label: "DOI", value: SafetyPolicy.populationReferenceDOI)
-            StatusRow(label: "License", value: SafetyPolicy.populationReferenceLicense)
-            StatusRow(label: "Study basis", value: "Four adult mice · 100 µm local window")
-            HStack(spacing: 14) {
-                Link(
-                    "Open Mendeley dataset",
-                    destination: URL(string: SafetyPolicy.populationReferenceLandingPage)!
-                )
-                Link(
-                    "Open published paper",
-                    destination: URL(string: SafetyPolicy.populationReferencePaperURL)!
-                )
-            }
-            .font(.caption)
+}
 
-            if !model.populationDensityAvailable {
-                Button(
-                    "Download and prepare published reference (~311 MB)",
-                    systemImage: "arrow.down.circle"
-                ) {
-                    Task { await model.preparePopulationDensity() }
+private struct MajorVesselConflictInspectorSheet: View {
+    @ObservedObject var model: PlannerViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    private var result: MajorVesselAnalysisResult? {
+        model.selectedProbeVesselAnalysis
+    }
+
+    private var selectedConflict: MajorVesselConflict? {
+        guard let selected = model.selectedMajorVesselConflict,
+              result?.analysis.conflicts.contains(selected) == true
+        else { return nil }
+        return selected
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+            if let result {
+                provenanceBanner(result)
+                Divider()
+                HSplitView {
+                    conflictList(result.analysis)
+                        .frame(minWidth: 690, idealWidth: 760)
+                    conflictDetail(result)
+                        .frame(minWidth: 430, idealWidth: 500)
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(!model.canPreparePopulationDensity)
-                .help("Downloads the pinned Mendeley Data v1 archive, verifies SHA-256, and prepares the reviewed population density.")
-            }
-            if model.populationDensityPrepareInProgress {
-                ProgressView("Verifying and preparing published density…")
-                    .controlSize(.small)
-            }
-
-            Toggle(
-                "Show population reference density",
-                isOn: Binding(
-                    get: { model.populationDensityVisible },
-                    set: { shouldShow in
-                        Task { await model.setPopulationDensityVisible(shouldShow) }
-                    }
+            } else {
+                ContentUnavailableView(
+                    "No current vessel analysis",
+                    systemImage: "drop.triangle",
+                    description: Text("Run probe clearance analysis before inspecting conflicts.")
                 )
-            )
-            .disabled(!model.populationDensityVisible && !model.canShowPopulationDensity)
-            .help("The density projection is available only in the verified Dorsal view.")
-            if model.populationDensityOverlayInProgress {
-                ProgressView("Rendering dorsal population projection…")
+            }
+        }
+        .frame(minWidth: 1_180, minHeight: 720)
+    }
+
+    private var header: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Major-vessel conflicts")
+                    .font(.title2.weight(.semibold))
+                Text("Select any returned row to atomically localize its probe point in all three atlas views.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if model.majorVesselNavigationInProgress {
+                ProgressView("Navigating all views…")
                     .controlSize(.small)
             }
-            if let error = model.populationDensityError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
+            if selectedConflict != nil {
+                Button("Clear selection") {
+                    model.clearMajorVesselConflictSelection()
+                }
             }
-            if model.populationDensityPreparation != nil || model.populationDensityOverlay != nil {
-                Text(model.populationDensityProvenanceStatus)
-                    .font(.caption2.monospaced())
+            Button("Done") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+        }
+        .padding(16)
+    }
+
+    private func provenanceBanner(_ result: MajorVesselAnalysisResult) -> some View {
+        let source = result.analysis.provenance
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                Label(
+                    "\(result.analysis.conflicts.count) returned"
+                        + (result.analysis.conflictsTruncated ? " · response truncated" : ""),
+                    systemImage: result.analysis.conflictsTruncated
+                        ? "exclamationmark.triangle.fill" : "checklist"
+                )
+                .font(.callout.weight(.semibold))
+                Spacer()
+                Text("Project revision \(result.projectRevision) · plan v\(result.planVersion)")
+                    .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            Text(SafetyPolicy.populationDensityCaveat)
+            Text("\(source.datasetTitle) · specimen \(source.specimenId) · \(source.sourceLicense)")
                 .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            Text(
+                "Reference-only, not subject-specific; pial and choroidal vessels are excluded. "
+                    + "Registration and tissue-distortion bounds are not published."
+            )
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 14) {
+                if let dataset = URL(string: source.sourceRecordUrl) {
+                    Link("Dataset", destination: dataset)
+                }
+                if let paper = URL(string: "https://doi.org/\(source.sourcePaperDoi)") {
+                    Link("Paper", destination: paper)
+                }
+                Text("Asset \(String(source.derivedAssetSha256.prefix(14)))…")
+                    .textSelection(.enabled)
+            }
+            .font(.caption.monospaced())
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(.quaternary.opacity(0.45))
+    }
+
+    private func conflictList(_ analysis: MajorVesselClearanceAnalysis) -> some View {
+        VStack(spacing: 0) {
+            conflictColumnHeader
+            Divider()
+            List(analysis.conflicts) { conflict in
+                Button {
+                    Task { _ = await model.navigateToMajorVesselConflict(conflict) }
+                } label: {
+                    conflictRow(conflict)
+                }
+                .buttonStyle(.plain)
+                .disabled(model.majorVesselNavigationInProgress)
+                .listRowBackground(
+                    selectedConflict?.conflictId == conflict.conflictId
+                        ? Color.accentColor.opacity(0.20) : Color.clear
+                )
+                .accessibilityLabel(
+                    "\(classificationLabel(conflict.classification)), shank "
+                        + "\(conflict.shankId), depth \(micrometres(conflict.insertionDepthMicrometres))"
+                )
+                .accessibilityHint("Select and navigate all atlas views to this conflict")
+            }
+            .listStyle(.inset)
         }
     }
+
+    private var conflictColumnHeader: some View {
+        HStack(spacing: 8) {
+            Text("Status").frame(width: 142, alignment: .leading)
+            Text("Shank").frame(width: 80, alignment: .leading)
+            Text("Depth µm").frame(width: 82, alignment: .trailing)
+            Text("Adjusted µm").frame(width: 92, alignment: .trailing)
+            Text("Centerline µm").frame(width: 100, alignment: .trailing)
+            Text("Vessel Ø µm").frame(width: 90, alignment: .trailing)
+            Spacer(minLength: 4)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 8)
+    }
+
+    private func conflictRow(_ conflict: MajorVesselConflict) -> some View {
+        HStack(spacing: 8) {
+            HStack(spacing: 5) {
+                if selectedConflict?.conflictId == conflict.conflictId {
+                    Image(systemName: "location.fill")
+                        .foregroundStyle(Color.accentColor)
+                }
+                Text(classificationLabel(conflict.classification))
+                    .lineLimit(1)
+            }
+            .frame(width: 142, alignment: .leading)
+            Text(conflict.shankId)
+                .lineLimit(1)
+                .frame(width: 80, alignment: .leading)
+            numericCell(conflict.insertionDepthMicrometres, width: 82)
+            numericCell(conflict.adjustedClearanceMicrometres, width: 92, signed: true)
+            numericCell(conflict.centerlineDistanceMicrometres, width: 100)
+            numericCell(conflict.vesselDiameterMicrometres, width: 90)
+            Spacer(minLength: 4)
+            Image(systemName: "chevron.right")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+        }
+        .font(.caption.monospacedDigit())
+        .contentShape(Rectangle())
+        .padding(.vertical, 4)
+    }
+
+    private func numericCell(
+        _ value: Double,
+        width: CGFloat,
+        signed: Bool = false
+    ) -> some View {
+        Text(String(format: signed ? "%+.2f" : "%.2f", value))
+            .frame(width: width, alignment: .trailing)
+    }
+
+    @ViewBuilder
+    private func conflictDetail(_ result: MajorVesselAnalysisResult) -> some View {
+        if let conflict = selectedConflict {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Label("Selected conflict", systemImage: "location.fill")
+                        .font(.headline)
+                        .foregroundStyle(Color.accentColor)
+                    if let error = model.majorVesselNavigationError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    detailSection("Identity") {
+                        detailRow("Conflict ID", conflict.conflictId)
+                        detailRow("Classification", classificationLabel(conflict.classification))
+                        detailRow("Shank ID", conflict.shankId)
+                        detailRow("Source edge", "\(conflict.vesselSourceEdgeIndex)")
+                        detailRow("Vessel run", "\(conflict.vesselRunIndex)")
+                        detailRow("Segment in run", "\(conflict.vesselSegmentIndexInRun)")
+                    }
+                    detailSection("Measured geometry") {
+                        detailRow("Insertion depth", micrometres(conflict.insertionDepthMicrometres))
+                        detailRow("Vessel diameter", micrometres(conflict.vesselDiameterMicrometres))
+                        detailRow("Probe-envelope radius", micrometres(conflict.probeEnvelopeRadiusMicrometres))
+                        detailRow("Centerline distance", micrometres(conflict.centerlineDistanceMicrometres))
+                        detailRow("Geometric surface clearance", signedMicrometres(conflict.geometricSurfaceClearanceMicrometres))
+                        detailRow("Required margin", micrometres(conflict.requiredMarginMicrometres))
+                        detailRow("Registration uncertainty", micrometres(conflict.registrationUncertaintyMicrometres))
+                        detailRow("Adjusted clearance", signedMicrometres(conflict.adjustedClearanceMicrometres))
+                    }
+                    detailSection("Closest points · physical ASR") {
+                        detailRow("Probe point", pointDescription(conflict.probePoint))
+                        detailRow("Vessel point", pointDescription(conflict.vesselPoint))
+                        detailRow("Frame", conflict.probePoint.frameId)
+                    }
+                    detailSection("Source fields") {
+                        detailRow("Source kind", conflict.sourceKind)
+                        detailRow("Subject-specific", conflict.subjectSpecific ? "yes" : "no")
+                        ForEach(Array(conflict.warnings.enumerated()), id: \.offset) { index, warning in
+                            detailRow("Warning \(index + 1)", warning)
+                        }
+                    }
+                    completeProvenance(result)
+                }
+                .padding(16)
+            }
+        } else {
+            ContentUnavailableView(
+                "Select a conflict",
+                systemImage: "cursorarrow.click.2",
+                description: Text(
+                    "A selected row shows every returned field and moves Coronal, Sagittal, and Horizontal to its probe point in one revision."
+                )
+            )
+        }
+    }
+
+    private func completeProvenance(_ result: MajorVesselAnalysisResult) -> some View {
+        let analysis = result.analysis
+        let source = analysis.provenance
+        let profile = analysis.riskProfile
+        return detailSection("Analysis and source provenance") {
+            detailRow("Algorithm", analysis.algorithmVersion)
+            detailRow("Analysis SHA-256", analysis.inputSha256)
+            detailRow("Plan input SHA-256", result.planInputSha256)
+            detailRow("Risk profile", profile.profileId)
+            detailRow("Lab policy", profile.sourceOrLabPolicy)
+            detailRow("Inputs confirmed", profile.confirmedByUser ? "yes" : "no")
+            detailRow("Reference coverage acknowledged", profile.referenceOnlyCoverageAcknowledged ? "yes" : "no")
+            detailRow("Candidate segments", "\(analysis.candidateSegmentCount)")
+            detailRow("Measured segments", "\(analysis.measuredSegmentCount)")
+            detailRow("Source ID", source.sourceId)
+            detailRow("Dataset", source.datasetTitle)
+            detailRow("Authors", source.authors.joined(separator: "; "))
+            detailRow("Specimen", source.specimenId)
+            detailRow("Dataset DOI", source.sourceDoi)
+            detailRow("Paper DOI", source.sourcePaperDoi)
+            detailRow("Source version", source.sourceVersion)
+            detailRow("License", source.sourceLicense)
+            detailRow("Archive digest", source.sourceArchiveDigest)
+            detailRow("Derived asset SHA-256", source.derivedAssetSha256)
+            detailRow("Extraction algorithm", source.extractionAlgorithmVersion)
+            detailRow("Atlas", "\(source.atlasIdentifier) \(source.atlasVersion)")
+            detailRow("Coordinate frame", source.coordinateFrameId)
+            detailRow("Minimum included diameter", micrometres(source.minimumIncludedDiameterMicrometres))
+            detailRow("Physical units declared", yesNo(source.physicalUnitsDeclared))
+            detailRow("Atlas scale applied", yesNo(source.atlasScaleApplied))
+            detailRow("Geometry source audited", yesNo(source.geometrySourceAudited))
+            detailRow("Subject-specific source", yesNo(source.subjectSpecific))
+            detailRow("Pial vessels excluded", yesNo(source.pialVesselsExcluded))
+            detailRow("Choroidal vessels excluded", yesNo(source.choroidalVesselsExcluded))
+            detailRow("Artery/vein classification", yesNo(source.arteryVeinClassificationAvailable))
+            detailRow("Registration transform", source.registrationTransformId ?? "not published")
+            detailRow("Registration bound", source.registrationUncertaintyBoundMicrometres.map(micrometres) ?? "not published")
+            detailRow("Tissue-distortion bound", source.tissueDistortionUncertaintyBoundMicrometres.map(micrometres) ?? "not published")
+            detailRow("Uncertainty bounds reviewed", yesNo(source.uncertaintyBoundsReviewed))
+            ForEach(Array(result.limitations.enumerated()), id: \.offset) { index, limitation in
+                detailRow("Limitation \(index + 1)", limitation)
+            }
+        }
+    }
+
+    private func detailSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            content()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func detailRow(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(label)
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.monospacedDigit())
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func classificationLabel(
+        _ classification: MajorVesselConflictClassification
+    ) -> String {
+        switch classification {
+        case .intersection: "Intersection"
+        case .marginViolation: "Margin violation"
+        case .uncertaintyViolation: "Uncertainty violation"
+        }
+    }
+
+    private func micrometres(_ value: Double) -> String {
+        String(format: "%.3f µm", value)
+    }
+
+    private func signedMicrometres(_ value: Double) -> String {
+        String(format: "%+.3f µm", value)
+    }
+
+    private func pointDescription(_ point: MajorVesselPhysicalPoint) -> String {
+        "AP \(signedMicrometres(point.apMicrometres)) · "
+            + "DV \(signedMicrometres(point.dvMicrometres)) · "
+            + "ML \(signedMicrometres(point.mlMicrometres))"
+    }
+
+    private func yesNo(_ value: Bool) -> String { value ? "yes" : "no" }
 }
 
 private struct VesselAnalysisDraft: Equatable {

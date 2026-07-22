@@ -123,6 +123,29 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
     public let atlasDorsalRegionPick: Bool?
     public let auditedReferenceMajorVessels: Bool?
     public let radiusAwareReferenceVesselAnalysis: Bool?
+    public let atomicAtlasPointNavigation: Bool?
+
+    private enum CodingKeys: String, CodingKey {
+        case atlas25Micrometre
+        case atlasDownload
+        case atlasSlicePng
+        case animalOnly
+        case projectPersistence
+        case subjectVascularImport
+        case subjectVascularOverlay
+        case subjectVascularRegistration
+        case subjectAtlasCalibration
+        case calibratedTargetProjection
+        case probeCatalog
+        case calibratedProbePlanning
+        case exactProbeRegionTraversal
+        case atlasMeshDescriptor
+        case atlasAnnotationRayPick
+        case atlasDorsalRegionPick
+        case auditedReferenceMajorVessels
+        case radiusAwareReferenceVesselAnalysis
+        case atomicAtlasPointNavigation
+    }
 
     public init(
         atlas25Micrometre: Bool,
@@ -142,7 +165,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         atlasAnnotationRayPick: Bool? = nil,
         atlasDorsalRegionPick: Bool? = nil,
         auditedReferenceMajorVessels: Bool? = nil,
-        radiusAwareReferenceVesselAnalysis: Bool? = nil
+        radiusAwareReferenceVesselAnalysis: Bool? = nil,
+        atomicAtlasPointNavigation: Bool? = nil
     ) {
         self.atlas25Micrometre = atlas25Micrometre
         self.atlasDownload = atlasDownload
@@ -162,6 +186,71 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         self.atlasDorsalRegionPick = atlasDorsalRegionPick
         self.auditedReferenceMajorVessels = auditedReferenceMajorVessels
         self.radiusAwareReferenceVesselAnalysis = radiusAwareReferenceVesselAnalysis
+        self.atomicAtlasPointNavigation = atomicAtlasPointNavigation
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        atlas25Micrometre = try container.decode(Bool.self, forKey: .atlas25Micrometre)
+        atlasDownload = try container.decode(Bool.self, forKey: .atlasDownload)
+        atlasSlicePng = try container.decode(Bool.self, forKey: .atlasSlicePng)
+        animalOnly = try container.decode(Bool.self, forKey: .animalOnly)
+        projectPersistence = try container.decode(Bool.self, forKey: .projectPersistence)
+        // These workflows are archived. A current service omits their keys;
+        // older services may still send explicit false/true values.
+        subjectVascularImport = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .subjectVascularImport
+        ) ?? false
+        subjectVascularOverlay = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .subjectVascularOverlay
+        ) ?? false
+        subjectVascularRegistration = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .subjectVascularRegistration
+        ) ?? false
+        subjectAtlasCalibration = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .subjectAtlasCalibration
+        )
+        calibratedTargetProjection = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .calibratedTargetProjection
+        )
+        probeCatalog = try container.decodeIfPresent(Bool.self, forKey: .probeCatalog)
+        calibratedProbePlanning = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .calibratedProbePlanning
+        )
+        exactProbeRegionTraversal = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .exactProbeRegionTraversal
+        )
+        atlasMeshDescriptor = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasMeshDescriptor
+        )
+        atlasAnnotationRayPick = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasAnnotationRayPick
+        )
+        atlasDorsalRegionPick = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasDorsalRegionPick
+        )
+        auditedReferenceMajorVessels = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .auditedReferenceMajorVessels
+        )
+        radiusAwareReferenceVesselAnalysis = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .radiusAwareReferenceVesselAnalysis
+        )
+        atomicAtlasPointNavigation = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atomicAtlasPointNavigation
+        )
     }
 }
 
@@ -302,6 +391,25 @@ public struct PlannerBridgeState: Codable, Equatable, Sendable {
         self.subjectVessels = subjectVessels
         self.populationDensity = populationDensity
     }
+
+    /// Return the same validated bridge state with a viewer-published project
+    /// revision folded in. Viewer navigation changes only persisted viewer
+    /// state, so all other project metadata must remain byte-for-byte stable.
+    public func updatingProjectRevision(
+        _ revision: Int,
+        isDirty: Bool
+    ) -> PlannerBridgeState {
+        guard let project else { return self }
+        return PlannerBridgeState(
+            protocolVersion: protocolVersion,
+            animalOnly: animalOnly,
+            warning: warning,
+            atlas: atlas,
+            project: project.updatingRevision(revision, isDirty: isDirty),
+            subjectVessels: subjectVessels,
+            populationDensity: populationDensity
+        )
+    }
 }
 
 public struct ProjectBridgeState: Codable, Equatable, Sendable {
@@ -320,6 +428,30 @@ public struct ProjectBridgeState: Codable, Equatable, Sendable {
     public let probePlanCount: Int?
     public let probeRegionAnalysisCount: Int?
     public let rendererAnchor: AtlasPhysicalPoint?
+
+    fileprivate func updatingRevision(
+        _ proposedRevision: Int,
+        isDirty: Bool
+    ) -> ProjectBridgeState {
+        let reconciledRevision = max(revision, proposedRevision)
+        return ProjectBridgeState(
+            projectId: projectId,
+            title: title,
+            subjectId: subjectId,
+            path: path,
+            requiresSaveAs: requiresSaveAs,
+            recoveredFromBackup: recoveredFromBackup,
+            schemaVersion: schemaVersion,
+            revision: reconciledRevision,
+            isDirty: reconciledRevision == revision ? self.isDirty || isDirty : isDirty,
+            animalResearchOnlyAcknowledged: animalResearchOnlyAcknowledged,
+            calibrationCount: calibrationCount,
+            activeCalibrationId: activeCalibrationId,
+            probePlanCount: probePlanCount,
+            probeRegionAnalysisCount: probeRegionAnalysisCount,
+            rendererAnchor: rendererAnchor
+        )
+    }
 }
 
 public struct AtlasOpenParameters: Codable, Equatable, Sendable {
@@ -422,13 +554,17 @@ public struct ProjectNewParameters: Codable, Equatable, Sendable {
     public init?(
         acknowledgement: AnimalOnlyAcknowledgementState,
         title: String? = nil,
-        subjectId: String? = nil
+        subjectId: String
     ) {
-        guard acknowledgement.isExplicitlyAcknowledged else { return nil }
+        let normalizedSubjectId = subjectId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard acknowledgement.isExplicitlyAcknowledged,
+              !normalizedSubjectId.isEmpty,
+              normalizedSubjectId.count <= 200
+        else { return nil }
         protocolVersion = BridgeProtocolVersion.current
         animalResearchOnlyAcknowledged = acknowledgement.isExplicitlyAcknowledged
         self.title = title
-        self.subjectId = subjectId
+        self.subjectId = normalizedSubjectId
     }
 }
 
@@ -444,10 +580,18 @@ public struct ProjectNewResult: Codable, Equatable, Sendable {
 
 public struct ProjectSaveParameters: Codable, Equatable, Sendable {
     public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
     public let path: String?
 
-    public init(path: String? = nil) {
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        path: String? = nil
+    ) {
         protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
         self.path = path
     }
 }
@@ -457,6 +601,7 @@ public struct ProjectSaveResult: Codable, Equatable, Sendable {
     public let status: String
     public let path: String
     public let projectId: String
+    public let projectRevision: Int
 }
 
 public struct ProjectOpenParameters: Codable, Equatable, Sendable {

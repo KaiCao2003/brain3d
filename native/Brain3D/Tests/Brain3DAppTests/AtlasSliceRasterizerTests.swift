@@ -1,0 +1,237 @@
+import Brain3DCore
+import CoreGraphics
+import Foundation
+import Testing
+@testable import Brain3DApp
+
+@Suite("Cached atlas vessel raster")
+struct AtlasSliceRasterizerTests {
+    @Test("A physical segment becomes a transparent, correctly sized vessel raster")
+    func segmentRaster() throws {
+        let overlay = MajorVesselSliceOverlay(
+            orientation: .horizontal,
+            sliceIndex: -1,
+            assetSHA256: String(repeating: "a", count: 64),
+            inPlaneResolutionMicrometres: 25,
+            segments: [
+                MajorVesselSliceSegment(
+                    start: ProbeSliceImagePoint(column: 2, row: 3),
+                    end: ProbeSliceImagePoint(column: 8, row: 3),
+                    startRadiusMicrometres: 20,
+                    endRadiusMicrometres: 20,
+                    sourceEdgeIndex: 1,
+                    runIndex: 0,
+                    segmentIndexInRun: 0
+                ),
+            ]
+        )
+
+        let result = try #require(MajorVesselRasterizer.render(
+            overlay: overlay,
+            imagePixelWidth: 12,
+            imagePixelHeight: 10
+        ))
+        #expect(result.logicalWidth == 12)
+        #expect(result.logicalHeight == 10)
+        #expect(result.image.width == 12)
+        #expect(result.image.height == 10)
+
+        let bytes = try rgbaBytes(result.image)
+        #expect(alpha(in: bytes, image: result.image, x: 5, y: 3) > 0)
+        #expect(alpha(in: bytes, image: result.image, x: 0, y: 9) == 0)
+    }
+
+    @Test("Invalid raster inputs fail closed")
+    func invalidInputs() {
+        let invalid = MajorVesselSliceOverlay(
+            orientation: .coronal,
+            sliceIndex: 0,
+            assetSHA256: "asset",
+            inPlaneResolutionMicrometres: .nan,
+            segments: []
+        )
+        #expect(MajorVesselRasterizer.render(
+            overlay: invalid,
+            imagePixelWidth: 12,
+            imagePixelHeight: 10
+        ) == nil)
+        #expect(MajorVesselRasterizer.render(
+            overlay: invalid,
+            imagePixelWidth: 0,
+            imagePixelHeight: 10
+        ) == nil)
+    }
+
+    private func rgbaBytes(_ image: CGImage) throws -> [UInt8] {
+        let provider = try #require(image.dataProvider)
+        let data = try #require(provider.data)
+        return Array(Data(referencing: data))
+    }
+
+    private func alpha(
+        in bytes: [UInt8],
+        image: CGImage,
+        x: Int,
+        y: Int
+    ) -> UInt8 {
+        bytes[y * image.bytesPerRow + x * 4 + 3]
+    }
+}
+
+@Suite("Atlas viewer interaction policy")
+struct AtlasViewerInteractionPolicyTests {
+    @Test("Only the current authoritative displayed slice accepts a region pick")
+    func authoritativePickGate() {
+        #expect(ViewerInteractionPolicy.allowsRegionPick(
+            orientation: .coronal,
+            displayedSliceIndex: 17,
+            authoritativeSliceIndex: 17,
+            pendingSliceOrientation: nil,
+            atomicNavigationInProgress: false
+        ))
+        #expect(!ViewerInteractionPolicy.allowsRegionPick(
+            orientation: .coronal,
+            displayedSliceIndex: 17,
+            authoritativeSliceIndex: 18,
+            pendingSliceOrientation: nil,
+            atomicNavigationInProgress: false
+        ))
+        #expect(!ViewerInteractionPolicy.allowsRegionPick(
+            orientation: .coronal,
+            displayedSliceIndex: 17,
+            authoritativeSliceIndex: 17,
+            pendingSliceOrientation: .coronal,
+            atomicNavigationInProgress: false
+        ))
+        #expect(!ViewerInteractionPolicy.allowsRegionPick(
+            orientation: .coronal,
+            displayedSliceIndex: 17,
+            authoritativeSliceIndex: 17,
+            pendingSliceOrientation: nil,
+            atomicNavigationInProgress: true
+        ))
+    }
+
+    @Test("A pending slice in another orientation does not block the visible slice")
+    func otherOrientationPendingStillAllowsPick() {
+        #expect(ViewerInteractionPolicy.allowsRegionPick(
+            orientation: .sagittal,
+            displayedSliceIndex: 23,
+            authoritativeSliceIndex: 23,
+            pendingSliceOrientation: .coronal,
+            atomicNavigationInProgress: false
+        ))
+    }
+
+    @Test("A superseded region pick cannot replace the visible selection")
+    func supersededRegionPickDoesNotPublish() {
+        var visibleSelection: String? = "current"
+        let staleWasPublished = ViewerMutationPublicationPolicy.publishRegionSelection(
+            "stale" as String?,
+            requestGeneration: 4,
+            currentGeneration: 5,
+            into: &visibleSelection
+        )
+        #expect(!staleWasPublished)
+        #expect(visibleSelection == "current")
+
+        let latestWasPublished = ViewerMutationPublicationPolicy.publishRegionSelection(
+            "latest" as String?,
+            requestGeneration: 5,
+            currentGeneration: 5,
+            into: &visibleSelection
+        )
+
+        #expect(latestWasPublished)
+        #expect(visibleSelection == "latest")
+    }
+
+    @Test("A superseded orientation response still retains its canonical pixels")
+    func supersededOrientationRetainsFrame() {
+        var frames = TriPlanarFrameSet()
+        frames[.coronal] = frame(.coronal, index: 10)
+        frames[.sagittal] = frame(.sagittal, index: 20)
+
+        let coronalWasLatest = ViewerMutationPublicationPolicy.publishSlice(
+            frame(.coronal, index: 11),
+            requestGeneration: 1,
+            currentGeneration: 2,
+            into: &frames
+        )
+        let sagittalWasLatest = ViewerMutationPublicationPolicy.publishSlice(
+            frame(.sagittal, index: 21),
+            requestGeneration: 2,
+            currentGeneration: 2,
+            into: &frames
+        )
+
+        #expect(!coronalWasLatest)
+        #expect(sagittalWasLatest)
+        #expect(frames.coronal?.index == 11)
+        #expect(frames.sagittal?.index == 21)
+    }
+
+    private func frame(
+        _ orientation: AtlasSliceOrientation,
+        index: Int
+    ) -> VerifiedAtlasSliceFrame {
+        let axes: (
+            fixed: AtlasAnatomicalAxis,
+            row: AtlasAnatomicalAxis,
+            column: AtlasAnatomicalAxis
+        ) = switch orientation {
+        case .coronal: (.ap, .dv, .ml)
+        case .sagittal: (.ml, .dv, .ap)
+        case .horizontal: (.dv, .ap, .ml)
+        }
+        return VerifiedAtlasSliceFrame(
+            orientation: orientation,
+            index: index,
+            sliceCount: 100,
+            width: 20,
+            height: 10,
+            fixedAxis: axes.fixed,
+            rowAxis: axes.row,
+            columnAxis: axes.column,
+            sliceCenterMicrometres: Double(index) * 25 + 12.5,
+            png: Data([UInt8(index & 0xFF)])
+        )
+    }
+}
+
+@Suite("Atlas canvas anatomical orientation labels")
+struct AtlasCanvasAnatomicalLabelTests {
+    @Test("Dorsal and horizontal preserve anterior-posterior and right-left edges")
+    func dorsalAndHorizontal() {
+        #expect(AtlasCanvasAnatomicalLabels.dorsal == AtlasCanvasAnatomicalLabels(
+            top: "A",
+            bottom: "P",
+            left: "R",
+            right: "L"
+        ))
+        #expect(AtlasCanvasAnatomicalLabels.slice(.horizontal) == .dorsal)
+    }
+
+    @Test("Coronal and sagittal labels preserve laterality and depth")
+    func coronalAndSagittal() {
+        #expect(AtlasCanvasAnatomicalLabels.slice(.coronal) == AtlasCanvasAnatomicalLabels(
+            top: "D",
+            bottom: "V",
+            left: "R",
+            right: "L"
+        ))
+        #expect(AtlasCanvasAnatomicalLabels.slice(.sagittal) == AtlasCanvasAnatomicalLabels(
+            top: "D",
+            bottom: "V",
+            left: "A",
+            right: "P"
+        ))
+    }
+
+    @Test("Accessible orientation text expands every edge label")
+    func accessibilityDescription() {
+        #expect(AtlasCanvasAnatomicalLabels.dorsal.accessibilityDescription ==
+            "Anatomical orientation: anterior at top, posterior at bottom, "
+                + "right at left edge, and left at right edge.")
+    }
+}
