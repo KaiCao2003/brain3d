@@ -86,12 +86,3 @@ def configure_brainglobe_environment(paths: AppPaths | None = None) -> AppPaths:
     os.environ["BRAINGLOBE_CONFIG_DIR"] = str(brainglobe_config)
     brainglobe_config.mkdir(parents=True, exist_ok=True)
     return resolved
-
-
-def configure_qt_environment() -> None:
-    """Select PySide6 before QtPy or PyVistaQt performs binding discovery."""
-
-    configured = os.environ.get("QT_API")
-    if configured is not None and configured.lower() != "pyside6":
-        raise RuntimeError(f"QT_API={configured!r} selects another Qt binding; expected 'pyside6'")
-    os.environ["QT_API"] = "pyside6"

@@ -8,12 +8,24 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _line(request_id: str, method: str, params: dict[str, object]) -> str:
     return json.dumps({"id": request_id, "method": method, "params": params}) + "\n"
 
 
-def test_module_entrypoint_keeps_stdout_protocol_only_and_recovers_after_bad_json() -> None:
+@pytest.mark.parametrize(
+    "command",
+    (
+        (sys.executable, "-m", "mouse_brain_planner.bridge.server"),
+        (sys.executable, "-m", "mouse_brain_planner", "bridge"),
+    ),
+    ids=("swift-direct-module", "explicit-cli-command"),
+)
+def test_bridge_entrypoints_keep_stdout_protocol_only_and_recover_after_bad_json(
+    command: tuple[str, ...],
+) -> None:
     repository_root = Path(__file__).resolve().parents[2]
     environment = os.environ.copy()
     environment["PYTHONPATH"] = str(repository_root / "src")
@@ -31,7 +43,7 @@ def test_module_entrypoint_keeps_stdout_protocol_only_and_recovers_after_bad_jso
     )
 
     completed = subprocess.run(
-        [sys.executable, "-m", "mouse_brain_planner.bridge.server"],
+        command,
         cwd=repository_root,
         env=environment,
         input=payload,

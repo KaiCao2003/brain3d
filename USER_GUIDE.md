@@ -159,7 +159,7 @@ discard decision. Choose **Cancel** to keep working or save first when the chang
 Validate a package without opening the UI:
 
 ```bash
-uv run --frozen mouse-brain-planner validate /absolute/path/Plan.mouseplan
+uv run --frozen mouse-brain-planner validate-project /absolute/path/Plan.mouseplan
 ```
 
 ## What not to infer

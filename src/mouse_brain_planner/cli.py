@@ -1,4 +1,4 @@
-"""Command-line interface for GUI, atlas cache, and project validation."""
+"""Explicit command-line entry points for the headless scientific service."""
 
 from __future__ import annotations
 
@@ -15,17 +15,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(prog="mouse-brain-planner")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument(
-        "--smoke-test",
-        action="store_true",
-        help="launch the GUI and close automatically after the first event-loop cycle",
-    )
-    parser.add_argument(
-        "--no-download",
-        action="store_true",
-        help="disable atlas downloads for this GUI session",
-    )
     subparsers = parser.add_subparsers(dest="command")
+
+    subparsers.add_parser("bridge", help="run the NDJSON scientific service on stdin/stdout")
 
     atlas_parser = subparsers.add_parser("atlas", help="inspect or download atlases")
     atlas_subparsers = atlas_parser.add_subparsers(dest="atlas_command", required=True)
@@ -33,7 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     download_parser = atlas_subparsers.add_parser("download", help="download one atlas")
     download_parser.add_argument("atlas_name")
 
-    validate_parser = subparsers.add_parser("validate", help="validate a project package")
+    validate_parser = subparsers.add_parser(
+        "validate-project",
+        help="validate a project package",
+    )
     validate_parser.add_argument("project")
     return parser
 
@@ -43,9 +38,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
-    configure_brainglobe_environment()
+    if args.command is None:
+        parser.print_help(sys.stderr)
+        return 2
 
-    if args.command == "validate":
+    if args.command == "bridge":
+        from mouse_brain_planner.bridge.server import main as bridge_main
+
+        return bridge_main()
+
+    if args.command == "validate-project":
         from mouse_brain_planner.persistence.project_io import validate_project
 
         errors = validate_project(args.project)
@@ -57,6 +59,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "atlas":
+        configure_brainglobe_environment()
         from mouse_brain_planner.atlas.brainglobe_adapter import BrainGlobeAtlasRepository
 
         repository = BrainGlobeAtlasRepository()
@@ -78,6 +81,5 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Downloaded and opened atlas: {selected.name} v{selected.latest_version}")
         return 0
 
-    from mouse_brain_planner.app import run
-
-    return run(smoke_test=args.smoke_test, no_download=args.no_download)
+    parser.error(f"unsupported command: {args.command}")
+    return 2

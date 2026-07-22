@@ -108,8 +108,8 @@ subject-anatomical, or vascular safety accuracy.
 - SwiftPM is sufficient for development tests but not distribution. The release requires a real
   `.app` bundle, deterministic backend discovery, bundled-runtime review, nested code signing,
   hardened-runtime validation, notarization, and a clean-account Finder launch.
-- The Qt shell remains a diagnostic/reference implementation until removed in a later cleanup;
-  it is not the qualified macOS surgery-planning entry point.
+- The Qt shell was removed from the package and dependency graph during the audited Phase 1
+  cleanup; Git commit `51fe26d` preserves it for historical investigation.
 - Python and Swift tests both cover protocol result/error exclusivity, IDs, framing, timeouts,
   process termination, exact atlas identity, animal-only invariants, and honest vascular state.
 - A change on either side of the bridge requires compatibility tests against protocol version 1

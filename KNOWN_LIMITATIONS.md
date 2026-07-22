@@ -34,8 +34,8 @@ navigation system. These limitations are part of its scientific contract.
 - The supported native workspace provides dorsal, coronal, sagittal, and horizontal raster
   views. Bridge protocol v1 does not expose a 3D renderer; the 3D tab is intentionally
   unavailable.
-- The former Qt/PySide6/PyVista viewer remains diagnostic/reference code, not the supported
-  surgery-planning UI. Its historical 3D evidence does not make 3D available in SwiftUI.
+- The former Qt/PySide6/PyVista viewer was removed from the product package. Its historical Git
+  snapshot does not make 3D available in SwiftUI.
 - Arbitrary oblique slices, stereotaxic grids, scale bars, high-resolution vector export, and
   comprehensive visual-regression coverage are not implemented or release-qualified.
 - Screen appearance alone must not be used to infer left/right correctness.

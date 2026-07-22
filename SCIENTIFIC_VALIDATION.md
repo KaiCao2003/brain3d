@@ -186,10 +186,10 @@ overlay, save/reopen, backup-aware project loading, and unsaved-change prompts. 
 typed bridge responses, strict population-density semantics, alpha-compositing requirements, and
 termination policy decisions.
 
-The repository also contains earlier Qt/PyVista viewer tests and one historical normal-Cocoa Qt
-atlas session. Those remain useful diagnostic evidence for the Python rendering core, but the Qt
-accessibility crash that motivated ADR-004 means they are not qualification of the supported UI.
-Likewise, a standalone PyVista 3D render does not make 3D available in the SwiftUI bridge.
+Git history contains earlier Qt/PyVista viewer tests and one historical normal-Cocoa Qt atlas
+session. They motivated parts of the renderer and the ADR-004 migration, but the legacy code and
+dependencies are no longer in the product package. Historical PyVista 3D evidence does not make
+3D available in the SwiftUI bridge.
 
 ## Automated engineering gates
 
@@ -197,11 +197,11 @@ Run the exact release candidate from the repository root:
 
 ```bash
 uv lock --check
-uv sync --frozen --all-groups
+uv sync --frozen --group dev
 uv run --frozen ruff format --check .
 uv run --frozen ruff check .
 uv run --frozen mypy --no-incremental
-QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true uv run --frozen pytest -q
+uv run --frozen pytest -q
 swift test --package-path native/Brain3D
 native/Brain3D/Scripts/build-app.sh
 codesign --verify --deep --strict native/Brain3D/build/Brain3D.app

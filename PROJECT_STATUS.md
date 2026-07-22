@@ -26,9 +26,9 @@ inspect an arbitrary coordinate.
 ### 3D
 
 The same view model rejects the 3D mode with the explicit message that bridge protocol v1 does
-not expose a renderer. `WorkspaceView.swift` displays an unavailable-state card. The VTK/PyVista
-classes under `src/mouse_brain_planner/gui/` belong to a legacy Qt interface and do not make 3D
-available in the supported SwiftUI app.
+not expose a renderer. `WorkspaceView.swift` displays an unavailable-state card. Historical
+Qt/VTK code is available only in Git commit `51fe26d`; it does not make 3D available in the
+supported SwiftUI app.
 
 ### Blood vessels
 
@@ -60,12 +60,12 @@ validated bregma/skull-to-Allen calibration exists.
 | `src/mouse_brain_planner/coordinates/` | Named frames and transform utilities | Mixed current infrastructure and future groundwork |
 | `src/mouse_brain_planner/domain/` | Project models plus probe/stereotaxy/craniotomy types | Mixed; many types are not exposed in the app |
 | `src/mouse_brain_planner/surgery/` | Trajectory, craniotomy, stereotaxy, and measurement algorithms | Experimental groundwork, not a usable workflow |
-| `src/mouse_brain_planner/gui/` | Older PySide6/PyVista/VTK desktop interface | Legacy/reference, unsupported |
+| Git commit `51fe26d` | Last complete PySide6/PyVista/VTK implementation | Historical only; removed from current package |
 
 The large number of functions is therefore not evidence of a large working feature set. The
-tree combines the current hybrid prototype, an older UI stack, and future domain groundwork.
-The installed `mouse-brain-planner` command still launches the legacy Qt interface when no
-subcommand is supplied; that entry point is another unresolved product-boundary inconsistency.
+current tree combines the hybrid prototype with future domain groundwork. Phase 1 removed the
+older UI stack and its dependencies; `mouse-brain-planner` now requires an explicit command and
+cannot launch a second GUI.
 
 ## What has engineering coverage
 

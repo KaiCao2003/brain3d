@@ -71,8 +71,8 @@ is `uint32`, so the minimum raw array calculation is six bytes per voxel:
 | `allen_mouse_25um` | 77,045,760 | 462,274,560 bytes | 0.462 GB / 0.43 GiB |
 
 These are lower bounds. Python objects, temporary operations, display composites, selected-region
-masks, and VTK meshes raise peak resident memory. The application must not combine arrays and
-meshes from different packages. The 25 µm spacing is sampling resolution, not a claim of 25 µm
+masks, and future display meshes raise peak resident memory. The application must not combine
+arrays and meshes from different packages. The 25 µm spacing is sampling resolution, not a claim of 25 µm
 targeting accuracy; atlas variation, registration, skull landmarks, manipulator error,
 deformation, and operator effects are outside that number.
 
@@ -101,8 +101,8 @@ must resolve beneath the app-owned atlas directory. Before a package is reported
 adapter parses `metadata.json` and `structures.json`, validates the reviewed mouse/ASR identity and
 hierarchy, requires the exact reviewed table shape, and inspects both TIFF headers for the reviewed
 uint16/uint32 types and matching shape without loading the voxel arrays. Once cached, a selected
-package opens without an update check. Use the GUI's `--no-download` mode to forbid acquisition of
-missing data.
+package opens without an update check. Ordinary open calls are cache-only; acquiring missing data
+requires the native app's explicit download action or `atlas download` CLI command.
 
 The remote catalog uses BrainGlobe's official `last_versions.conf` endpoint through an
 application-owned bounded transport: short socket waits, a 15-second total deadline, cancellation

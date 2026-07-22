@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -51,10 +52,58 @@ def test_module_version_command() -> None:
     assert completed.stderr == ""
 
 
+def test_no_subcommand_prints_help_without_launching_a_gui(capsys: object) -> None:
+    result = main([])
+
+    assert result == 2
+    captured = capsys.readouterr()  # type: ignore[attr-defined]
+    assert captured.out == ""
+    assert "usage: mouse-brain-planner" in captured.err
+    assert "bridge" in captured.err
+    assert "validate-project" in captured.err
+
+
+def test_bridge_subcommand_delegates_to_explicit_server(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mouse_brain_planner.bridge import server
+
+    monkeypatch.setattr(server, "main", lambda: 17)
+
+    assert main(["bridge"]) == 17
+
+
+def test_cli_and_bridge_import_without_qt_or_vtk_modules() -> None:
+    script = """
+import json
+import sys
+import mouse_brain_planner.cli
+import mouse_brain_planner.bridge.server
+
+forbidden = sorted(
+    name for name in sys.modules
+    if name.split('.', 1)[0].lower() in {
+        'pyside6', 'pyvista', 'pyvistaqt', 'vtk', 'vtkmodules'
+    }
+)
+print(json.dumps(forbidden))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == []
+
+
 def test_validate_command_accepts_valid_project(tmp_path: Path, capsys: object) -> None:
     path = save_project(PlannerProject(title="CLI validation"), tmp_path / "valid.mouseplan")
 
-    result = main(["validate", str(path)])
+    result = main(["validate-project", str(path)])
 
     assert result == 0
     captured = capsys.readouterr()  # type: ignore[attr-defined]
@@ -62,7 +111,7 @@ def test_validate_command_accepts_valid_project(tmp_path: Path, capsys: object) 
 
 
 def test_validate_command_rejects_missing_project(tmp_path: Path, capsys: object) -> None:
-    result = main(["validate", str(tmp_path / "missing.mouseplan")])
+    result = main(["validate-project", str(tmp_path / "missing.mouseplan")])
 
     assert result == 1
     captured = capsys.readouterr()  # type: ignore[attr-defined]

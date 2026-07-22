@@ -1,120 +1,95 @@
 # Installation
 
-Mouse Brain Surgery Planner currently builds a native SwiftUI development `.app` that launches a
-separate Python scientific service from the repository environment. The supported development
-target is **Apple Silicon (`arm64`), macOS 14 or later, CPython 3.12, and Swift**. The development
-bundle is ad-hoc signed; a Developer ID-signed and notarized release is not available yet. See
-[Packaging](PACKAGING.md).
+Brain3D currently builds a native SwiftUI development `.app` that launches a separate Python
+scientific service from the repository environment. The supported development target is Apple
+Silicon (`arm64`), macOS 14 or later, CPython 3.12, and Swift.
 
-> **Animal-research-only warning:** This application is for mouse animal-research planning only,
-> never human or clinical use. It is not a certified surgical-navigation, medical, or veterinary
-> device. Independently verify all coordinates before every animal procedure.
+> **Animal research only:** this is not a certified medical, veterinary, or surgical-navigation
+> device. The current alpha is not usable to guide an animal procedure.
 
 ## Prerequisites
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and make sure the repository
-is on a local volume with enough space for the environment and any selected atlas. Either let uv
-install CPython 3.12 or provide a compatible Python yourself:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and ensure the checkout has
+space for the Python environment and selected atlas data:
 
 ```bash
 uv python install 3.12
 ```
 
-The repository's `.python-version` and `pyproject.toml` constrain the environment to Python
-3.12. Do not substitute Python 3.11, 3.13, or 3.14 without creating and validating a separate
-lockfile and platform matrix.
+The `.python-version`, `pyproject.toml`, and `uv.lock` define the Python 3.12 contract. Do not use
+the system Python when it is 3.11, 3.13, or 3.14.
 
 ## Install the locked environment
 
-From the repository root:
+The supported application needs only the default runtime dependencies:
 
 ```bash
 uv lock --check
-uv sync --frozen
+uv sync --frozen --no-dev
 ```
 
-`uv.lock` is the reproducible dependency record. `--frozen` installs from that record without
-changing it. Developers and package builders should install every dependency group instead:
+For tests, lint, and type checking, install the development group:
 
 ```bash
-uv sync --frozen --all-groups
+uv sync --frozen --group dev
 ```
 
-## Launch
+Qt, PyVista, PyVistaQt, and VTK are not part of either supported path. Verify a minimal install
+and a real bridge handshake with:
 
-Build and start the supported native application from the repository root:
+```bash
+.venv/bin/python scripts/verify_minimal_runtime.py
+```
+
+## Build and launch
 
 ```bash
 native/Brain3D/Scripts/build-app.sh
 open native/Brain3D/build/Brain3D.app
 ```
 
-The app discovers `.venv/bin/python` and `src/mouse_brain_planner/bridge/server.py`
-deterministically. If discovery fails, it reports **Backend not configured** and does not display
-demo scientific state. Environment overrides for a managed development launch are documented in
-[`native/Brain3D/README.md`](native/Brain3D/README.md).
+The development app discovers `.venv/bin/python` and
+`src/mouse_brain_planner/bridge/server.py`. If discovery fails, it reports **Backend not
+configured** and does not display fabricated anatomy. Managed launches may use the explicit
+environment described in [the native package README](native/Brain3D/README.md).
 
-The older Python command starts the diagnostic Qt shell, not the supported SwiftUI workflow:
-
-```bash
-uv run --frozen mouse-brain-planner --no-download
-```
-
-Use it only for explicitly scoped diagnostic tests. Confirm the Python package version, run the
-bounded Qt smoke check, and test the native package separately with:
+There is no second Python GUI. Running the CLI without a command prints help and exits nonzero.
+Available commands are explicit:
 
 ```bash
-uv run --frozen mouse-brain-planner --version
-QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true \
-  uv run --frozen mouse-brain-planner --smoke-test --no-download
-swift test --package-path native/Brain3D
-```
-
-The Qt smoke check only proves that its diagnostic event loop opens and closes. The Swift test
-suite checks native protocol/UI policy code. Neither validates anatomy or surgical accuracy.
-
-## Acquire an atlas
-
-Atlas data is not included in the repository or application bundle. List the BrainGlobe catalog
-and locally cached packages with:
-
-```bash
+uv run --frozen mouse-brain-planner bridge
 uv run --frozen mouse-brain-planner atlas list
-```
-
-Download the only current package, the 25 µm Allen atlas, from the native **Download reviewed
-25 µm atlas** control or by CLI:
-
-```bash
 uv run --frozen mouse-brain-planner atlas download allen_mouse_25um
+uv run --frozen mouse-brain-planner validate-project /absolute/path/Plan.mouseplan
 ```
 
-Read [Atlas Data](ATLAS_DATA.md) and the
-[Allen Institute Terms of Use](https://alleninstitute.org/legal/terms-of-use) before downloading.
-The two arrays loaded by stable BrainGlobe AtlasAPI require approximately:
+The SwiftUI app normally launches the `bridge` process itself; do not start another copy for an
+ordinary UI session.
 
-| Atlas | Reference + annotation raw bytes | Approximate raw memory |
-| --- | ---: | ---: |
-| `allen_mouse_25um` | 462,274,560 | 0.462 GB / 0.43 GiB |
+## Acquire the atlas
 
-Actual peak memory is higher because these figures exclude Python objects, temporary arrays,
-slice composites, and VTK meshes. The application rejects other resolutions rather than silently
-substituting or mixing them. Existing 10 µm cache data is left untouched but ignored.
+Atlas data is not included in Git or the `.app`. The only accepted package is BrainGlobe
+`allen_mouse_25um` version `1.2`. Download it from the native app or the explicit CLI command
+above after reviewing [Atlas Data](ATLAS_DATA.md) and the
+[Allen Institute Terms of Use](https://alleninstitute.org/legal/terms-of-use).
 
-## Application-owned data locations
+| Data | Raw/download size |
+| --- | ---: |
+| 25 µm reference plus annotation arrays | 462,274,560 bytes / 0.43 GiB |
+| Optional pinned population-density archive | 311,493,514 bytes |
 
-On macOS, the default locations are:
+Peak memory and temporary disk use are higher. Existing 10 µm cache data is ignored.
+
+## Application-owned locations
 
 | Purpose | Default path |
 | --- | --- |
-| Configuration and application data | `~/Library/Application Support/Mouse Brain Surgery Planner` |
+| Configuration and data | `~/Library/Application Support/Mouse Brain Surgery Planner` |
 | Installed atlases | `~/Library/Application Support/Mouse Brain Surgery Planner/atlases` |
-| Temporary atlas downloads | `~/Library/Caches/Mouse Brain Surgery Planner/atlas-downloads` |
+| Temporary downloads | `~/Library/Caches/Mouse Brain Surgery Planner/atlas-downloads` |
 | BrainGlobe configuration | `~/Library/Application Support/Mouse Brain Surgery Planner/brainglobe/bg_config.conf` |
 
-The application configures BrainGlobe before importing it, then passes the application-owned
-atlas and staging locations explicitly. Tests and managed installations may override the three
-base locations before launch:
+Tests and managed installs may set absolute, user-writable locations before launch:
 
 ```bash
 export MOUSE_BRAIN_PLANNER_CONFIG_DIR=/absolute/path/to/config
@@ -122,53 +97,34 @@ export MOUSE_BRAIN_PLANNER_DATA_DIR=/absolute/path/to/data
 export MOUSE_BRAIN_PLANNER_CACHE_DIR=/absolute/path/to/cache
 ```
 
-Use absolute, user-writable paths. Do not change these variables between downloading an atlas
-and reopening a project unless the atlas cache is deliberately being relocated. Project packages
-store atlas provenance and a cache path but do not embed the atlas arrays.
+Do not change those locations between atlas download and project reopen unless the cache is being
+deliberately relocated. Projects record provenance and references; they do not embed atlas
+volumes.
 
 ## Troubleshooting
 
-### The native app reports Backend not configured
+### Backend not configured
 
-Run `uv sync --frozen --all-groups` from the repository root and confirm that both
-`.venv/bin/python` and `src/mouse_brain_planner/bridge/server.py` exist. Launch the `.app` from
-this checkout so deterministic development discovery can find them. Do not point the UI at an
-unreviewed backend.
+Run `uv sync --frozen --no-dev` at the repository root and confirm `.venv/bin/python` and
+`src/mouse_brain_planner/bridge/server.py` exist. Launch the development `.app` from this checkout.
 
-### A different Qt binding is selected in diagnostic tests
+### Atlas download unavailable
 
-The diagnostic Qt shell requires PySide6. If it reports that `QT_API` selects a different binding,
-remove that override or set it explicitly:
+Confirm the service is connected and the application-owned directories are writable. An
+uncached atlas needs an explicit networked download; a validated cached atlas can open offline.
 
-```bash
-export QT_API=pyside6
-```
+### 3D unavailable
 
-Do not install PyQt alongside this locked environment.
-
-### Atlas download is unavailable
-
-Confirm that the native planning service is connected and that the app-owned data/cache
-directories are writable. A cached atlas can be opened without a network connection; an uncached
-atlas requires an explicit download and network access. The diagnostic Qt shell additionally
-honors `--no-download`.
-
-### The 3D view is unavailable
-
-This is expected in the current supported app: bridge protocol v1 exposes dorsal, coronal,
-sagittal, and horizontal raster views but no native 3D renderer. Do not use the diagnostic Qt 3D
-viewer as a substitute for a qualified surgery-planning view.
+This is expected. The supported app currently exposes fixed raster views and no 3D renderer. The
+removed Qt renderer is not a fallback product.
 
 ### Project validation fails
 
-Run the non-mutating validator:
-
 ```bash
-uv run --frozen mouse-brain-planner validate /absolute/path/Plan.mouseplan
+uv run --frozen mouse-brain-planner validate-project /absolute/path/Plan.mouseplan
 ```
 
-The validator checks the project package structure, JSON models, and recorded checksums. It does
-not establish that the scientific coordinates are anatomically correct.
+Validation checks structure, models, and checksums. It does not establish anatomical accuracy.
 
-For operating instructions, continue to the [User Guide](USER_GUIDE.md). For reproducible
-development commands, see [Development](DEVELOPMENT.md).
+Continue with the [User Guide](USER_GUIDE.md), [Development](DEVELOPMENT.md), and
+[Packaging](PACKAGING.md).

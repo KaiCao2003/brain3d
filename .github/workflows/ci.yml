@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python-minimal:
+    name: Python minimal runtime
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.10.6"
+          enable-cache: true
+      - run: uv sync --frozen --no-dev
+      - run: .venv/bin/python scripts/verify_minimal_runtime.py
+
+  python-quality:
+    name: Python quality and tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v9
+        with:
+          version: "0.10.6"
+          enable-cache: true
+      - run: uv lock --check
+      - run: uv sync --frozen --group dev
+      - run: uv run --frozen ruff format --check .
+      - run: uv run --frozen ruff check .
+      - run: uv run --frozen mypy --no-incremental
+      - run: uv run --frozen pytest -q
+
+  swift:
+    name: Swift tests and development app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+      - run: swift test --package-path native/Brain3D
+      - run: native/Brain3D/Scripts/build-app.sh
+      - run: codesign --verify --deep --strict native/Brain3D/build/Brain3D.app

@@ -118,7 +118,8 @@ replacement prevents a redownload loop.
 Cached-only open uses BrainGlobe's low-level local reader, cannot call its downloader, and must
 validate the exact requested version. Cache-removal and quarantine-management UI are deferred.
 
-Catalog work is backgrounded by the application worker and local-only under `--no-download`.
+Catalog work is invoked only by explicit native/CLI acquisition operations; ordinary atlas open
+is cache-only.
 Production does not call AtlasAPI 2.3.1's timeout-less catalog helper or abandon it in a daemon
 thread. The adapter fetches the same official `last_versions.conf` endpoint directly with a short
 socket timeout, a 15-second total deadline, cooperative checks between bounded reads, and a 1 MiB

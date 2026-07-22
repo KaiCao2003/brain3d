@@ -20,21 +20,15 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-  "PySide6==6.10.3",
   "brainglobe-atlasapi==2.3.1",
   "nibabel==5.4.2",
   "numpy==2.5.1",
-  "pandas==3.0.3",
   "Pillow==12.3.0",
   "platformdirs==4.11.0",
-  "pooch==1.9.0",
   "pydantic==2.13.4",
-  "pyvista==0.48.4",
-  "pyvistaqt==0.12.0",
   "scikit-image==0.26.0",
   "scipy==1.18.0",
   "tifffile==2026.7.14",
-  "vtk==9.6.2",
 ]
 
 [project.scripts]
@@ -45,10 +39,8 @@ dev = [
   "mypy==2.3.0",
   "pytest==9.1.1",
   "pytest-cov==7.1.0",
-  "pytest-qt==4.5.0",
   "ruff==0.15.22",
 ]
-packaging = ["pyinstaller==6.21.0"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mouse_brain_planner"]
@@ -58,7 +50,6 @@ addopts = "--strict-config --strict-markers -ra"
 minversion = "9.0"
 testpaths = ["tests"]
 markers = [
-  "gui: tests that create Qt widgets",
   "integration: tests that cross module or external API boundaries",
   "atlas_download: tests that download a real atlas and are disabled by default",
 ]
@@ -85,8 +76,5 @@ warn_unused_configs = true
 [[tool.mypy.overrides]]
 module = [
   "brainglobe_atlasapi.*",
-  "pyvista.*",
-  "pyvistaqt.*",
-  "vtkmodules.*",
 ]
 ignore_missing_imports = true

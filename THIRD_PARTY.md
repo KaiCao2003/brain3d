@@ -16,28 +16,22 @@ The classification column is intentional:
 - **Concept only:** documentation or workflow reviewed as prior art; no code or assets copied.
 
 The supported interactive shell uses Apple SwiftUI/AppKit system frameworks and a versioned
-subprocess bridge to the Python scientific service. PySide6/PyVistaQt remain in the repository
-for diagnostic/reference tooling; they are not the supported native surgery-planning UI.
+subprocess bridge to the Python scientific service. The former PySide6/PyVista/VTK application
+was removed from the package and lockfile after the Phase 1 reachability audit.
 
 ## Direct runtime dependencies
 
 | Package/version | License | Purpose | Classification / source |
 |---|---|---|---|
-| PySide6 6.10.3 | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only; commercial alternative | Diagnostic/reference Qt UI and tests; not the supported SwiftUI shell | Code — dependency; [PyPI](https://pypi.org/project/PySide6/6.10.3/), [license terms](https://doc.qt.io/qtforpython-6/licenses.html) |
 | brainglobe-atlasapi 2.3.1 | BSD-3-Clause | Atlas discovery, download, metadata, arrays | Code — dependency; [PyPI](https://pypi.org/project/brainglobe-atlasapi/2.3.1/), [source](https://github.com/brainglobe/brainglobe-atlasapi/tree/v2.3.1) |
 | nibabel 5.4.2 | MIT | Strict NIfTI header/data access for the pinned population-density source | Code — dependency; [PyPI](https://pypi.org/project/nibabel/5.4.2/) |
 | numpy 2.5.1 | BSD-3-Clause | N-dimensional arrays | Code — dependency; [PyPI](https://pypi.org/project/numpy/2.5.1/) |
-| pandas 3.0.3 | BSD-3-Clause | Future coordinate/report tables; not imported by the current workflow | Code — declared dependency; [PyPI](https://pypi.org/project/pandas/3.0.3/) |
 | platformdirs 4.11.0 | MIT | macOS application/cache paths | Code — dependency; [PyPI](https://pypi.org/project/platformdirs/4.11.0/) |
-| pooch 1.9.0 | BSD-3-Clause | Future hash-verified non-atlas downloads; not imported by the current workflow | Code — declared dependency; [PyPI](https://pypi.org/project/pooch/1.9.0/) |
 | pydantic 2.13.4 | MIT | Validated settings and project models | Code — dependency; [PyPI](https://pypi.org/project/pydantic/2.13.4/) |
 | Pillow 12.3.0 | MIT-CMU | Image decoding, validation, and raster output | Code — dependency; [PyPI](https://pypi.org/project/pillow/12.3.0/) |
-| pyvista 0.48.4 | MIT | Diagnostic/reference 3D geometry and rendering API | Code — dependency; [PyPI](https://pypi.org/project/pyvista/0.48.4/) |
-| pyvistaqt 0.12.0 | MIT | Diagnostic/reference Qt-embedded PyVista interactor | Code — dependency; [PyPI](https://pypi.org/project/pyvistaqt/0.12.0/) |
-| scikit-image 0.26.0 | BSD-3-Clause | Future subject-image processing; not imported by the current workflow | Code — declared dependency; [PyPI](https://pypi.org/project/scikit-image/0.26.0/) |
+| scikit-image 0.26.0 | BSD-3-Clause | Similarity/affine registration of subject dorsal images | Code — dependency; [PyPI](https://pypi.org/project/scikit-image/0.26.0/) |
 | scipy 1.18.0 | BSD-3-Clause | Population-density resampling and overlay operations | Code — dependency; [PyPI](https://pypi.org/project/scipy/1.18.0/) |
-| tifffile 2026.7.14 | BSD-3-Clause | Atlas TIFF loading through BrainGlobe; not imported directly by application code | Code — declared dependency; [PyPI](https://pypi.org/project/tifffile/2026.7.14/) |
-| vtk 9.6.2 | BSD-3-Clause | 3D geometry and rendering | Code — dependency; [PyPI](https://pypi.org/project/vtk/9.6.2/), [license](https://vtk.org/about/#license) |
+| tifffile 2026.7.14 | BSD-3-Clause | Validated atlas TIFF loading | Code — dependency; [PyPI](https://pypi.org/project/tifffile/2026.7.14/) |
 
 ## Build and test dependencies
 
@@ -50,10 +44,7 @@ the generated bundle.
 | mypy 2.3.0 | MIT | Static type checking | [PyPI](https://pypi.org/project/mypy/2.3.0/) |
 | pytest 9.1.1 | MIT | Test runner | [PyPI](https://pypi.org/project/pytest/9.1.1/) |
 | pytest-cov 7.1.0 | MIT | Coverage integration | [PyPI](https://pypi.org/project/pytest-cov/7.1.0/) |
-| pytest-qt 4.5.0 | MIT | Qt GUI tests | [PyPI](https://pypi.org/project/pytest-qt/4.5.0/) |
 | ruff 0.15.22 | MIT | Linting and formatting checks | [PyPI](https://pypi.org/project/ruff/0.15.22/) |
-| PyInstaller 6.21.0 | GPL-2.0-or-later with bootloader exception | macOS application bundling | [PyPI](https://pypi.org/project/pyinstaller/6.21.0/), [license](https://pyinstaller.org/en/stable/license.html) |
-| pyinstaller-hooks-contrib 2026.6 | Standard hooks GPL-2.0-or-later; runtime hooks Apache-2.0 | Packaging hooks, including scientific packages | [PyPI](https://pypi.org/project/pyinstaller-hooks-contrib/2026.6/), [license](https://github.com/pyinstaller/pyinstaller-hooks-contrib/blob/v2026.6/LICENSE) |
 
 ## Material transitive dependencies
 
@@ -61,13 +52,11 @@ This is a review aid, not a substitute for the full lockfile/SBOM.
 
 | Package/version | License | Why material | Source |
 |---|---|---|---|
-| PySide6-Essentials / PySide6-Addons / shiboken6 6.10.3 | LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only; commercial alternative | Qt libraries in the diagnostic Python environment; final release bundling is undecided | [Qt for Python](https://doc.qt.io/qtforpython-6/licenses.html) |
-| QtPy 2.4.3 | MIT | Binding-selection layer used by PyVistaQt | [PyPI](https://pypi.org/project/QtPy/2.4.3/) |
 | brainglobe-space 1.0.3 | BSD-3-Clause | Atlas axis/orientation conversions | [PyPI](https://pypi.org/project/brainglobe-space/1.0.3/) |
+| pandas 3.0.3 | BSD-3-Clause | BrainGlobe tabular dependency; not directly declared by this project | [PyPI](https://pypi.org/project/pandas/3.0.3/) |
 | pyarrow 25.0.0 | Apache-2.0 | pandas columnar/serialization dependency in the resolved set | [PyPI](https://pypi.org/project/pyarrow/25.0.0/) |
-| meshio 5.3.5 | MIT | Mesh-format support pulled by the rendering stack | [PyPI](https://pypi.org/project/meshio/5.3.5/) |
+| meshio 5.3.5 | MIT | Mesh-format support pulled by BrainGlobe AtlasAPI | [PyPI](https://pypi.org/project/meshio/5.3.5/) |
 | pydantic-core 2.46.4 | MIT | Native validation engine bundled with Pydantic | [PyPI](https://pypi.org/project/pydantic-core/2.46.4/) |
-| matplotlib 3.11.1 | PSF-based | PyVista plotting dependency | [PyPI](https://pypi.org/project/matplotlib/3.11.1/) |
 
 ## Downloaded data and cited prior art
 
@@ -99,8 +88,7 @@ model.
 
 1. Build only from the reviewed lockfile and record Python, architecture, package, and atlas
    versions in release metadata.
-2. Bundle required copyright notices and license texts. In particular, satisfy Qt LGPL
-   notice/replacement requirements or use appropriate commercial Qt terms.
+2. Bundle required copyright notices and license texts for every exact release artifact.
 3. Keep downloaded Allen and Mendeley data outside the signed application and installer;
    preserve each source, terms, citation, version, and recorded digest.
 4. Re-review this file when a dependency, atlas version, packaging mode, copied asset, or

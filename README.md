@@ -43,22 +43,21 @@ trajectory planning, or vessel-clearance calculation.
 Automated tests can verify software invariants; they do not turn a missing interaction into a
 working feature and do not establish anatomical or surgical accuracy.
 
-## Why the repository is larger than the usable product
+## One supported product path
 
-The repository currently contains three different maturity levels:
+The repository now contains two maturity levels:
 
 - **Current experimental path:** `native/Brain3D/` is the SwiftUI shell and
   `src/mouse_brain_planner/bridge/` is its Python NDJSON service.
-- **Legacy/reference path:** `src/mouse_brain_planner/gui/` is the older Qt/PyVista/VTK interface.
-  It is not the supported application. Its historical 3D code does not provide 3D in SwiftUI.
 - **Unexposed groundwork:** `src/mouse_brain_planner/surgery/` and several `domain/` models contain
   trajectory, stereotaxy, craniotomy, probe, and measurement algorithms. They are research code
   and tests, not wired, calibrated, or validated user-facing features.
 
-This split explains the excess functions and dependencies. The next product pass should keep one
-UI/rendering path and move or remove code that is not part of an executable workflow. See
-[Project Status](PROJECT_STATUS.md) for the full inventory and [Plan](PLAN.md) for the recovery
-roadmap.
+The former Qt/PyVista/VTK application, its test suite, and the 10 µm-only sagittal cache were
+removed from the default package after a reachability audit. Git commit `51fe26d` preserves that
+historical implementation. The default environment no longer installs Qt or VTK, and the CLI
+cannot launch a second GUI. See [Code Audit](docs/CODE_AUDIT.md) and
+[Legacy Removal](docs/LEGACY_REMOVAL.md).
 
 ## Architecture
 
@@ -116,7 +115,7 @@ Requirements: Apple Silicon Mac, macOS 14 or later, Python 3.12, Swift, and
 
 ```bash
 uv python install 3.12
-uv sync --frozen --all-groups
+uv sync --frozen --group dev
 native/Brain3D/Scripts/build-app.sh
 open native/Brain3D/build/Brain3D.app
 ```
@@ -133,17 +132,19 @@ Useful CLI operations:
 ```bash
 uv run --frozen mouse-brain-planner atlas list
 uv run --frozen mouse-brain-planner atlas download allen_mouse_25um
-uv run --frozen mouse-brain-planner validate /absolute/path/Plan.mouseplan
+uv run --frozen mouse-brain-planner validate-project /absolute/path/Plan.mouseplan
 ```
 
 ## Development checks
 
 ```bash
 uv lock --check
+uv sync --frozen --group dev
 uv run --frozen ruff format --check .
 uv run --frozen ruff check .
 uv run --frozen mypy --no-incremental
-QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true uv run --frozen pytest -q
+uv run --frozen pytest -q
+.venv/bin/python scripts/verify_minimal_runtime.py
 swift test --package-path native/Brain3D
 native/Brain3D/Scripts/build-app.sh
 codesign --verify --deep --strict native/Brain3D/build/Brain3D.app
@@ -162,7 +163,6 @@ src/mouse_brain_planner/
   rendering/                    raster slice and dorsal projection generation
   vasculature/                  density preparation and subject-image registration
   surgery/                      lower-level research algorithms; not a usable workflow
-  gui/                          legacy Qt/PyVista/VTK interface; unsupported
 tests/                          software tests and fixtures
 docs/                           architecture decisions
 ```
@@ -170,6 +170,9 @@ docs/                           architecture decisions
 ## Documentation
 
 - [Project Status](PROJECT_STATUS.md) — candid implementation inventory and evidence
+- [Architecture](docs/ARCHITECTURE.md)
+- [Code Audit](docs/CODE_AUDIT.md)
+- [Legacy Removal](docs/LEGACY_REMOVAL.md)
 - [Recovery Roadmap](PLAN.md)
 - [Known Limitations](KNOWN_LIMITATIONS.md)
 - [User Guide](USER_GUIDE.md)

@@ -15,7 +15,8 @@ build path that can be signed and notarized.
 > **2026-07-21 revision:** repeated native Cocoa accessibility crashes demonstrated the blocking
 > compatibility issue anticipated below. [ADR-004](ADR-004-swiftui-hybrid-shell.md) replaces the
 > Qt application shell with SwiftUI while retaining this ADR's Python, BrainGlobe, NumPy/SciPy,
-> PyVista/VTK, validation, and data-source decisions as the scientific backend.
+> validation, and data-source decisions as the scientific backend. ADR-005 and the Phase 1 audit
+> subsequently removed PyVista/VTK and the Qt application from the default package.
 
 The remainder of this ADR records the original Qt decision and its evidence. It is historical,
 not a current launch, UI, or packaging instruction; ADR-004 and [Packaging](../PACKAGING.md) are
