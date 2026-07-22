@@ -27,10 +27,14 @@ from mouse_brain_planner.bridge.server import (
     LoadedAtlasProtocol,
     encode_rgb_png,
 )
+from mouse_brain_planner.bridge.viewer_state import (
+    ViewerStateBridge,
+    register_viewer_state_handlers,
+)
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobeVoxelIndex
-from mouse_brain_planner.domain.project_models import PlannerProject
+from mouse_brain_planner.domain.project_models import PlannerProject, ViewerSliceDepths
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
     DorsalVascularLandmark,
@@ -107,6 +111,7 @@ class PlanningBridgeSession:
     _working_package: Path | None = None
     _reference_density_cache: CachedReferenceDensity | None = None
     _reference_density_cache_error: str | None = None
+    _viewer_state: ViewerStateBridge | None = None
 
     def register(self) -> None:
         """Install project handlers and replace the placeholder state snapshot."""
@@ -127,6 +132,12 @@ class PlanningBridgeSession:
             self.dispatcher,
             get_project=self._require_project,
             replace_project=self._replace_project_after_implant_mutation,
+        )
+        self._viewer_state = register_viewer_state_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_viewer_mutation,
         )
         self.dispatcher.declare_capability("populationReferenceDensityPrepare")
         self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
@@ -254,6 +265,14 @@ class PlanningBridgeSession:
                 project.atlas,
             )
         )
+        viewer = None
+        if project is not None:
+            if self._viewer_state is None:
+                raise BridgeError(
+                    "VIEWER_STATE_UNAVAILABLE",
+                    "The independent slice viewer handlers are not registered.",
+                )
+            viewer = self._viewer_state.snapshot(project, self.project_revision)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "animalOnly": True,
@@ -275,6 +294,7 @@ class PlanningBridgeSession:
                     "animalResearchOnlyAcknowledged": (project.scientific_disclaimer_acknowledged),
                 }
             ),
+            "viewer": viewer,
             "subjectVessels": {
                 "imported": bool(images),
                 "registered": any(bool(item["registered"]) for item in images),
@@ -345,6 +365,11 @@ class PlanningBridgeSession:
                 atlas=atlas.metadata,
                 linked_cursor=centre,
                 renderer_anchor=centre,
+                viewer_slice_depths=ViewerSliceDepths(
+                    coronal=centre_index.ap,
+                    sagittal=centre_index.ml,
+                    horizontal=centre_index.dv,
+                ),
                 scientific_disclaimer_acknowledged=True,
             )
         except ValidationError as error:  # defensive atlas/project integration boundary
@@ -407,6 +432,24 @@ class PlanningBridgeSession:
             raise BridgeError(
                 "ANIMAL_ONLY_ACKNOWLEDGEMENT_REQUIRED",
                 "The project does not record the required animal-only acknowledgement.",
+            )
+        if project.viewer_slice_depths is None:
+            anchor = project.linked_cursor or project.renderer_anchor
+            if anchor is None:  # guarded by the project model, retained defensively
+                raise BridgeError(
+                    "VIEWER_STATE_UNAVAILABLE",
+                    "The atlas-bound project cannot initialize independent slice depths.",
+                )
+            anchor_index = BrainGlobeAtlasSpace(atlas.metadata).physical_to_index(anchor)
+            project = project.model_copy(
+                update={
+                    "viewer_slice_depths": ViewerSliceDepths(
+                        coronal=anchor_index.ap,
+                        sagittal=anchor_index.ml,
+                        horizontal=anchor_index.dv,
+                    ),
+                    "viewer_region_selection": None,
+                }
             )
         self.project = project
         self.project_path = result.writable_path
@@ -1009,6 +1052,13 @@ class PlanningBridgeSession:
 
         self.project = project
         self.project_revision += 1
+
+    def _replace_project_after_viewer_mutation(self, project: PlannerProject) -> int:
+        """Publish one independent viewer mutation and return its new revision."""
+
+        self.project = project
+        self.project_revision += 1
+        return self.project_revision
 
     def _find_image(self, raw_image_id: object) -> SubjectVascularImage:
         project = self._require_project()

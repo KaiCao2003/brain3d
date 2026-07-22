@@ -8,7 +8,7 @@ Backend classes or passing legacy tests are not product completion.
 | --- | --- | --- | --- |
 | 0 | Baseline, reachability audit, risk inventory, architecture ADR | **Complete** | `docs/CODE_AUDIT.md`, baseline commands/results, symbol classifications, ADR-005, rollback points |
 | 1 | One product path and minimal dependencies | **Complete** | Explicit CLI, legacy Qt/VTK removed, default environment has no Qt/VTK, headless bridge verification and CI |
-| 2 | Linked tri-planar viewer | **In progress** | One AP/ML/DV cursor; every legal slice reachable; click/wheel/slider/keyboard/pan/zoom; crosshairs, region readout, persisted view state |
+| 2 | Independent atlas-slice viewer | **Complete** | One full-size mode; every legal slice reachable; independent persisted depths; click/wheel/slider/buttons/pan/zoom; compact region readout |
 | 3 | Calibration and target projection | Not started | Calibration CRUD/QC, active transform, legacy-target conversion, AP/ML/DV projection, fail-closed Swift workflow |
 | 4 | Probe catalog and placement | Not started | Sourced/custom profiles, placement modes, entry/target/tip/shanks/sites, multi-shank-ready API and overlays |
 | 5 | Region traversal | Not started | 3D voxel DDA, exact depth segments, site assignments, inspector/export, synthetic thin-region tests and atlas smoke |
@@ -23,7 +23,7 @@ Backend classes or passing legacy tests are not product completion.
 - Entry-point, handler, runtime-import, and enumerated-symbol audit in
   [Code Audit](docs/CODE_AUDIT.md).
 - Canonical architecture in [Architecture](docs/ARCHITECTURE.md) and
-  [ADR-005](docs/ADR-005-linked-triplanar-mvp.md).
+  [ADR-005](docs/ADR-005-independent-slice-viewer.md).
 
 ## Phase 1 result
 
@@ -38,22 +38,28 @@ Backend classes or passing legacy tests are not product completion.
 - Retained gate: Python 377 passed/1 external archive skipped, Swift 42/42, static checks/build/
   signature verification passed.
 
-## Phase 2 — linked tri-planar viewer
+## Phase 2 — independent atlas-slice viewer
 
-1. Define one typed atlas-native cursor with named physical AP/DV/ML components, voxel indices,
-   bounds, anchor convention, atlas identity, selected region, and project revision.
-2. Add strict bridge methods for cursor set/pick and publish cursor/view state through `state.get`.
-3. Extend slice results with validated orientation, index, slice count, row/column axes, physical
-   plane coordinate, atlas identity, and image dimensions.
-4. Replace the single Swift raster state with simultaneous coronal, sagittal, and horizontal
-   plane models synchronized to the cursor.
-5. Add slider, wheel, click, keyboard, pan, zoom, reset, crosshair, orientation labels, index,
-   atlas coordinate, and region readout.
-6. Use latest-request tokens/debounce so rapid navigation cannot publish stale images.
-7. Persist and reopen cursor, slice, zoom, and layer state with deterministic migration fixtures.
+Completed behavior:
 
-Acceptance requires every legal index on every axis to be reachable and any cursor change to
-update the other two views without order, laterality, boundary, or off-by-one errors.
+1. The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, with one full-size
+   selected view rather than a 2×2 grid.
+2. Coronal, sagittal, and horizontal each persist an independent zero-based depth. Changing one
+   never changes either of the others.
+3. Slider, previous/next buttons, wheel stepping, drag pan, anchored zoom, and reset are wired to
+   the same full-resolution lossless 25 µm slice state.
+4. A click replaces one region selection and compact acronym/name label. It never changes a
+   depth or opens additional interaction state.
+5. Strict methods are `viewer.state.get`, `viewer.slice.set`, `viewer.slice.render`, and
+   `viewer.region.pick`; stale revisions, stale slice clicks, malformed pixels, and render
+   failures are fail-closed and atomic.
+6. Project persistence restores all three depths and the optional selection. Older schema-3
+   projects migrate deterministically.
+7. Rapid input is debounced/latest-wins while the last verified frame remains visible.
+
+Verified evidence at completion: Python `389 passed, 1 skipped`; Swift `62` tests; cached Allen
+25 µm fused-render medians of 3.10 ms coronal, 4.92 ms sagittal, and 4.94 ms horizontal. Native UI
+automation exercised independent depth changes, tab switching, and replacement region clicks.
 
 ## Phase 3 — calibration and AP/ML/DV projection
 
@@ -85,10 +91,10 @@ update the other two views without order, laterality, boundary, or off-by-one er
 
 ## Phase 6 — evidence-layer semantics
 
-- Population density remains scalar context and gains orthogonal slices/opacity/threshold without
-  vessel IDs or collision claims.
-- Subject dorsal imagery becomes an explicitly reviewed 2D mask workflow with physical scale,
-  entry distance, optional craniotomy overlap, and a permanent deep-vessels-not-evaluated flag.
+- Population density and subject-image registration remain archived backend groundwork and are
+  removed from the primary planning UI.
+- The product path exposes major-vessel geometry only after exact registration, path, radius,
+  provenance, and review gates pass; until then it reports the layer as unavailable.
 
 ## Phase 7 — vessel graph and clearance
 

@@ -111,27 +111,31 @@ interaction. Most of the 487 warnings come from tests of the legacy VTK path.
 The Python dispatcher registers more methods than Swift currently calls. This is deliberate
 dynamic usage and must not be inferred from Python imports alone.
 
-Swift currently requests: `hello`, `state.get`, `atlas.open`, `atlas.slice`, `atlas.dorsal`,
-`project.new`, `project.open`, `project.save`, `implant.list`, `implant.add`, `implant.remove`,
-`vascular.import`, `vascular.preview`, `vascular.register`, `vascular.overlay`,
-`vascular.reference.prepare`, `vascular.reference.display`, and
-`vascular.reference.overlay`.
+The supported primary Swift workspace currently requests: `hello`, `state.get`, `atlas.open`,
+`atlas.slice`, `atlas.dorsal`, `project.new`, `project.open`, `project.save`, `implant.list`,
+`implant.add`, `implant.remove`, `viewer.state.get`, `viewer.slice.set`,
+`viewer.slice.render`, and `viewer.region.pick`.
 
-Registered but not currently requested by Swift include `atlas.list`, `atlas.regions`,
-`atlas.search`, `atlas.point`, `atlas.mesh`, and `shutdown`. `atlas.point` and region lookup are
-`ORPHANED_BUT_REUSABLE` for the linked cursor. `atlas.mesh` remains non-product until the optional
-3D renderer has an approved architecture. `shutdown` is a transport/control method rather than a
+Legacy population-density and subject-image bridge calls remain implemented behind archived
+ViewModel paths, but the primary UI no longer exposes them. Their presence is migration and
+research-code retention, not evidence that they are supported surgical-planning inputs.
+
+Registered but not currently requested by the primary Swift workspace include `atlas.list`,
+`atlas.regions`, `atlas.search`, `atlas.point`, `atlas.mesh`, and `shutdown`. The independent
+viewer now performs region lookup through `viewer.region.pick`; the older `atlas.point` handler
+is retained for protocol compatibility. `atlas.mesh` remains non-product until the optional 3D
+renderer has an approved architecture. `shutdown` is a transport/control method rather than a
 visible UI feature.
 
 ## Known product contradictions
 
-- The backend accepts arbitrary orthogonal indices, but Swift hard-codes `shape[axis] / 2`.
-- The project model contains linked-cursor/region state that the supported UI does not control.
+- The project schema retains legacy linked-cursor fields for migration; the supported viewer uses
+  independent slice depths plus a replace-only region selection.
 - Swift exposes an unavailable 3D button while real rendering code exists only in the unsupported
   Qt path.
 - Base installation includes Qt/VTK because legacy code remains inside the default package.
 - The console command without a subcommand launches the unsupported application.
-- The density overlay is reproducible population context, not individual blood vessels.
+- The archived density overlay is reproducible population context, not individual blood vessels.
 - Passing Python GUI tests primarily proves the removed Qt path, not the Swift product.
 
 ## Scientific and data risks to keep fail-closed

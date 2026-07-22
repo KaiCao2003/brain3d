@@ -12,6 +12,8 @@ from mouse_brain_planner.domain.project_models import (
     MAX_PROJECT_EVENTS,
     PlannerProject,
     ProjectEvent,
+    ViewerRegionSelection,
+    ViewerSliceDepths,
 )
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
@@ -118,6 +120,109 @@ def test_renderer_anchor_requires_matching_atlas_identity_and_bounds() -> None:
         PlannerProject(
             atlas=metadata,
             renderer_anchor=valid.model_copy(update={"ml_um": metadata.extent_um[2]}),
+        )
+
+
+def test_independent_viewer_state_is_atlas_bound_and_bounded() -> None:
+    metadata = make_allen_metadata_test_double(25)
+    anchor = BrainGlobePhysicalPoint(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=12.5,
+        dv_um=12.5,
+        ml_um=12.5,
+    )
+    depths = ViewerSliceDepths(coronal=1, sagittal=3, horizontal=2)
+
+    project = PlannerProject(
+        atlas=metadata,
+        renderer_anchor=anchor,
+        viewer_slice_depths=depths,
+    )
+    assert project.viewer_slice_depths == depths
+    with pytest.raises(ValueError, match="viewer slice state requires atlas metadata"):
+        PlannerProject(viewer_slice_depths=depths)
+    with pytest.raises(ValueError, match=r"coronal viewer slice .* outside"):
+        PlannerProject(
+            atlas=metadata,
+            renderer_anchor=anchor,
+            viewer_slice_depths=depths.model_copy(
+                update={"coronal": metadata.shape_voxels[0]}
+            ),
+        )
+
+
+def test_viewer_selection_must_match_its_persisted_slice_and_intrinsic_pixel() -> None:
+    metadata = make_allen_metadata_test_double(25)
+    anchor = BrainGlobePhysicalPoint(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=12.5,
+        dv_um=12.5,
+        ml_um=12.5,
+    )
+    depths = ViewerSliceDepths(coronal=1, sagittal=3, horizontal=2)
+    point = BrainGlobePhysicalPoint(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=37.5,
+        dv_um=62.5,
+        ml_um=87.5,
+    )
+    selection = ViewerRegionSelection(
+        orientation="coronal",
+        index=1,
+        column=3,
+        row=2,
+        atlas_point=point,
+    )
+    project = PlannerProject(
+        atlas=metadata,
+        renderer_anchor=anchor,
+        viewer_slice_depths=depths,
+        viewer_region_selection=selection,
+    )
+    assert project.viewer_region_selection == selection
+
+    with pytest.raises(ValueError, match="requires persisted slice depths"):
+        PlannerProject(
+            atlas=metadata,
+            renderer_anchor=anchor,
+            viewer_region_selection=selection,
+        )
+    with pytest.raises(ValueError, match="does not belong to the persisted slice"):
+        PlannerProject(
+            atlas=metadata,
+            renderer_anchor=anchor,
+            viewer_slice_depths=depths,
+            viewer_region_selection=selection.model_copy(update={"index": 0}),
+        )
+    with pytest.raises(ValueError, match="outside the slice image"):
+        PlannerProject(
+            atlas=metadata,
+            renderer_anchor=anchor,
+            viewer_slice_depths=depths,
+            viewer_region_selection=selection.model_copy(
+                update={"column": metadata.shape_voxels[2]}
+            ),
+        )
+    with pytest.raises(ValueError, match="point does not match its intrinsic pixel"):
+        PlannerProject(
+            atlas=metadata,
+            renderer_anchor=anchor,
+            viewer_slice_depths=depths,
+            viewer_region_selection=selection.model_copy(update={"row": 3}),
+        )
+    with pytest.raises(ValueError, match="atlas identity does not match"):
+        PlannerProject(
+            atlas=metadata,
+            renderer_anchor=anchor,
+            viewer_slice_depths=depths,
+            viewer_region_selection=selection.model_copy(
+                update={
+                    "atlas_point": point.model_copy(update={"atlas_version": "wrong"})
+                }
+            ),
         )
 
 

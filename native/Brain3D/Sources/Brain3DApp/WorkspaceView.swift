@@ -13,27 +13,37 @@ struct WorkspaceView: View {
 
             Divider()
 
-            WorkspaceModeBar(selection: $model.workspaceMode)
-                .padding(.horizontal, 18)
-                .padding(.vertical, 12)
+            Picker("View", selection: $model.workspaceMode) {
+                ForEach(WorkspaceMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 18)
+            .padding(.vertical, 12)
 
-            PlanningCanvas(
-                mode: model.workspaceMode,
-                atlasStatus: model.atlasOperationalStatus,
-                sliceStatus: model.sliceStatus,
-                atlasPNG: model.atlasSlicePNG,
-                subjectPreviewPNG: model.subjectPreviewPNG,
-                populationDensityPNG: model.populationDensityPNG,
-                populationDensityOverlay: model.populationDensityOverlay,
-                populationDensityDisclosure: model.populationDensityDisclosure,
-                subjectOverlayPNG: model.subjectOverlayPNG,
-                subjectVesselsRegistered: model.backendState?.subjectVessels.primaryImage?.registered == true,
-                populationDensityVisible: model.populationDensityVisible
-            )
-            .padding([.horizontal, .bottom], 18)
+            selectedWorkspace
+                .padding([.horizontal, .bottom], 18)
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(model.workspaceMode.rawValue)
+    }
+
+    @ViewBuilder
+    private var selectedWorkspace: some View {
+        switch model.workspaceMode {
+        case .dorsal:
+            DorsalVesselWorkspace(model: model)
+        case .coronal:
+            AtlasSliceWorkspace(model: model, orientation: .coronal)
+        case .sagittal:
+            AtlasSliceWorkspace(model: model, orientation: .sagittal)
+        case .horizontal:
+            AtlasSliceWorkspace(model: model, orientation: .horizontal)
+        case .threeDimensional:
+            ThreeDimensionalWorkspace(model: model)
+        }
     }
 }
 
@@ -50,128 +60,233 @@ struct SafetyNotice: View {
     }
 }
 
-private struct WorkspaceModeBar: View {
-    @Binding var selection: WorkspaceMode
+private struct AtlasSliceWorkspace: View {
+    @ObservedObject var model: PlannerViewModel
+    let orientation: AtlasSliceOrientation
+    @State private var resetGeneration = 0
+
+    private var frame: VerifiedAtlasSliceFrame? {
+        model.viewerFrame(for: orientation)
+    }
+
+    private var requestedIndex: Int {
+        model.requestedViewerIndex(for: orientation) ?? frame?.index ?? 0
+    }
 
     var body: some View {
-        HStack(spacing: 8) {
-            ForEach(WorkspaceMode.allCases, id: \.self) { mode in
-                Button {
-                    selection = mode
-                } label: {
-                    Text(mode.rawValue)
-                        .frame(maxWidth: .infinity)
+        VStack(spacing: 10) {
+            header
+
+            ZStack {
+                AtlasSliceCanvas(
+                    imageData: frame?.png,
+                    imagePixelWidth: frame?.width ?? 0,
+                    imagePixelHeight: frame?.height ?? 0,
+                    viewportIdentity: orientation.rawValue,
+                    selection: canvasSelection,
+                    accessibilityLabel: "\(orientation.displayName) atlas slice",
+                    accessibilityValue: accessibilityValue,
+                    resetGeneration: resetGeneration,
+                    onPick: { column, row in
+                        model.pickViewerRegion(
+                            orientation: orientation,
+                            column: column,
+                            row: row
+                        )
+                    },
+                    onSliceStep: { delta in
+                        model.stepViewerSlice(orientation, delta: delta)
+                    }
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+
+                if frame == nil {
+                    ContentUnavailableView(
+                        "No verified \(orientation.displayName.lowercased()) slice",
+                        systemImage: "brain.head.profile",
+                        description: Text(model.viewerPhase.message)
+                    )
+                    .allowsHitTesting(false)
+                } else if isPending {
+                    ProgressView()
+                        .controlSize(.small)
+                        .padding(7)
+                        .background(.black.opacity(0.7), in: Circle())
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .padding(8)
+                        .allowsHitTesting(false)
                 }
-                .buttonStyle(WorkspaceModeButtonStyle(isCurrent: selection == mode))
-                .accessibilityLabel(mode.accessibilityDescription)
-                .accessibilityValue(
-                    selection == mode
-                        ? "Current view"
-                        : (mode == .threeDimensional ? "Unavailable view" : "Available view")
-                )
-                .help(
-                    mode == .threeDimensional
-                        ? "3D rendering is unavailable in this testing build."
-                        : "Show the verified \(mode.rawValue.lowercased()) atlas view."
-                )
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 9))
+
+            sliceControl
+            if case let .failed(message) = model.viewerPhase {
+                Label(message, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(3)
+                    .accessibilityLabel("Atlas view error")
             }
         }
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.24))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-}
 
-private struct WorkspaceModeButtonStyle: ButtonStyle {
-    let isCurrent: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.callout.weight(isCurrent ? .semibold : .regular))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .foregroundStyle(isCurrent ? Color.white : Color.primary)
-            .background(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(isCurrent ? Color.accentColor : Color.secondary.opacity(configuration.isPressed ? 0.18 : 0.10))
-            )
-            .overlay {
-                if !isCurrent {
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .strokeBorder(Color.secondary.opacity(0.18))
-                }
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Label("\(orientation.displayName) atlas slice", systemImage: "brain.head.profile")
+                .font(.headline)
+            if let frame {
+                Text(
+                    "\(frame.fixedAxis.rawValue) "
+                        + "\((frame.sliceCenterMicrometres / 1000).formatted(.number.precision(.fractionLength(3)))) mm"
+                )
+                .font(.callout.monospacedDigit())
+                .foregroundStyle(.secondary)
+                Spacer()
+            } else {
+                Spacer()
             }
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+            Button("Reset view", systemImage: "arrow.counterclockwise") {
+                resetGeneration += 1
+            }
+            .labelStyle(.iconOnly)
+            .help("Reset pan and zoom")
+        }
+    }
+
+    @ViewBuilder
+    private var sliceControl: some View {
+        if let frame {
+            HStack(spacing: 10) {
+                Button {
+                    model.stepViewerSlice(orientation, delta: -1)
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .disabled(requestedIndex <= 0)
+                .accessibilityLabel("Previous \(orientation.displayName) slice")
+
+                Slider(
+                    value: Binding(
+                        get: { Double(requestedIndex) },
+                        set: { model.requestViewerSlice(orientation, index: Int($0.rounded())) }
+                    ),
+                    in: 0 ... Double(frame.sliceCount - 1),
+                    step: 1
+                )
+                .accessibilityLabel("\(orientation.displayName) slice index")
+                .accessibilityValue("\(requestedIndex + 1) of \(frame.sliceCount)")
+
+                Button {
+                    model.stepViewerSlice(orientation, delta: 1)
+                } label: {
+                    Image(systemName: "chevron.right")
+                }
+                .disabled(requestedIndex >= frame.sliceCount - 1)
+                .accessibilityLabel("Next \(orientation.displayName) slice")
+
+                Text("\(requestedIndex + 1) / \(frame.sliceCount)")
+                    .font(.callout.monospacedDigit())
+                    .frame(minWidth: 84, alignment: .trailing)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        } else {
+            Text(model.viewerPhase.message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var isPending: Bool {
+        guard let pending = model.pendingViewerSlice else { return false }
+        return pending.orientation == orientation && pending.index != frame?.index
+    }
+
+    private var accessibilityValue: String {
+        guard let frame else { return model.viewerPhase.message }
+        let region = canvasSelection?.acronym ?? "no selected region"
+        return "Slice \(frame.index + 1) of \(frame.sliceCount), \(region)"
+    }
+
+    private var canvasSelection: AtlasSliceSelection? {
+        guard
+            let selection = model.viewerRegionSelection,
+            selection.orientation == orientation,
+            selection.index == frame?.index
+        else { return nil }
+        if let region = selection.region {
+            return AtlasSliceSelection(
+                column: selection.column,
+                row: selection.row,
+                acronym: region.acronym,
+                name: region.name,
+                color: NSColor(
+                    srgbRed: CGFloat(region.rgb[0]) / 255,
+                    green: CGFloat(region.rgb[1]) / 255,
+                    blue: CGFloat(region.rgb[2]) / 255,
+                    alpha: 1
+                )
+            )
+        }
+        return AtlasSliceSelection(
+            column: selection.column,
+            row: selection.row,
+            acronym: "Outside",
+            name: "Outside annotated brain",
+            color: .secondaryLabelColor
+        )
     }
 }
 
-private struct PlanningCanvas: View {
-    let mode: WorkspaceMode
-    let atlasStatus: String
-    let sliceStatus: String
-    let atlasPNG: Data?
-    let subjectPreviewPNG: Data?
-    let populationDensityPNG: Data?
-    let populationDensityOverlay: ReferenceDensityOverlayResult?
-    let populationDensityDisclosure: String
-    let subjectOverlayPNG: Data?
-    let subjectVesselsRegistered: Bool
-    let populationDensityVisible: Bool
+private struct DorsalVesselWorkspace: View {
+    @ObservedObject var model: PlannerViewModel
 
     private var atlasImage: NSImage? {
-        atlasPNG.flatMap(NSImage.init(data:))
-    }
-
-    private var subjectImage: NSImage? {
-        subjectPreviewPNG.flatMap(NSImage.init(data:))
-    }
-
-    private var subjectOverlayImage: NSImage? {
-        subjectOverlayPNG.flatMap(NSImage.init(data:))
-    }
-
-    private var populationDensityImage: NSImage? {
-        populationDensityPNG.flatMap(NSImage.init(data:))
+        model.dorsalSurfacePNG.flatMap(NSImage.init(data:))
     }
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 12) {
-                AtlasImagePanel(
-                    mode: mode,
-                    image: atlasImage,
-                    populationDensityOverlay: mode == .dorsal && populationDensityVisible
-                        ? populationDensityImage
-                        : nil,
-                    populationDensityResult: populationDensityOverlay,
-                    populationDensityDisclosure: populationDensityDisclosure,
-                    subjectOverlay: mode == .dorsal ? subjectOverlayImage : nil,
-                    status: sliceStatus
-                )
-                if mode == .dorsal {
-                    SubjectVesselPreviewPanel(
-                        image: subjectImage,
-                        registered: subjectVesselsRegistered
-                    )
-                    .frame(minWidth: 260, idealWidth: 340, maxWidth: 420)
-                }
+        VStack(spacing: 10) {
+            HStack {
+                Label("Dorsal atlas surface", systemImage: "brain.head.profile")
+                    .font(.headline)
+                Spacer()
+                Text("Major vessels only")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.orange)
             }
 
-            HStack(spacing: 8) {
-                StatusPill(text: atlasStatus, good: atlasStatus == "Loaded and verified")
-                if mode == .dorsal {
-                    StatusPill(
-                        text: subjectVesselsRegistered
-                            ? "Subject image registered"
-                            : "Subject image not registered",
-                        good: subjectVesselsRegistered
-                    )
-                    if populationDensityVisible, populationDensityImage != nil {
-                        StatusPill(
-                            text: "Published population density visible — not subject-specific",
-                            good: false
-                        )
-                    }
+            if let atlasImage {
+                ZStack(alignment: .bottomLeading) {
+                    Image(nsImage: atlasImage)
+                        .resizable()
+                        .interpolation(.none)
+                        .aspectRatio(contentMode: .fit)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+            } else {
+                ContentUnavailableView(
+                    "No verified dorsal surface",
+                    systemImage: "brain.head.profile",
+                    description: Text(model.dorsalSurfaceStatus)
+                )
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
         }
         .padding(12)
         .background(Color(nsColor: .controlBackgroundColor))
@@ -184,164 +299,29 @@ private struct PlanningCanvas: View {
     }
 }
 
-private struct AtlasImagePanel: View {
-    let mode: WorkspaceMode
-    let image: NSImage?
-    let populationDensityOverlay: NSImage?
-    let populationDensityResult: ReferenceDensityOverlayResult?
-    let populationDensityDisclosure: String
-    let subjectOverlay: NSImage?
-    let status: String
+private struct ThreeDimensionalWorkspace: View {
+    @ObservedObject var model: PlannerViewModel
 
     var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Label(
-                    mode == .dorsal ? "Verified Allen dorsal surface" : "Verified atlas slice",
-                    systemImage: "brain.head.profile"
-                )
-                .font(.headline)
-                Spacer()
-                Text(mode.rawValue)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-            if let image {
-                ZStack(alignment: .bottomLeading) {
-                    Image(nsImage: image)
-                        .resizable()
-                        .interpolation(.none)
-                        .aspectRatio(contentMode: .fit)
-                    if let populationDensityOverlay {
-                        Image(nsImage: populationDensityOverlay)
-                            .resizable()
-                            .interpolation(.high)
-                            .aspectRatio(contentMode: .fit)
-                            .accessibilityLabel(
-                                "Published population reference vascular length density; not subject-specific vessels"
-                            )
-                    }
-                    if let subjectOverlay {
-                        Image(nsImage: subjectOverlay)
-                            .resizable()
-                            .interpolation(.high)
-                            .aspectRatio(contentMode: .fit)
-                            .accessibilityLabel("Registered user-supplied dorsal image overlay")
-                    }
-                    if populationDensityOverlay != nil, let result = populationDensityResult {
-                        PopulationDensityLegend(
-                            result: result,
-                            disclosure: populationDensityDisclosure
-                        )
-                        .padding(10)
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Color.black.opacity(0.88))
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            } else {
-                ContentUnavailableView(
-                    mode == .threeDimensional ? "3D renderer unavailable" : "No verified slice",
-                    systemImage: mode == .threeDimensional ? "cube.transparent" : "brain.head.profile",
-                    description: Text(status)
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            Text(status)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+        ContentUnavailableView(
+            "3D scene is not implemented yet",
+            systemImage: "cube.transparent",
+            description: Text(
+                "This mode will render the same verified slice depths, selected region, probe, and radius-bearing vessel geometry. It will not invent geometry from the 2D dorsal image or density layer."
+            )
+        )
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(12)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .strokeBorder(Color.secondary.opacity(0.24))
         }
-        .padding(10)
-        .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
+        .accessibilityValue(model.viewerPhase.message)
     }
 }
 
-private struct PopulationDensityLegend: View {
-    let result: ReferenceDensityOverlayResult
-    let disclosure: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("Published population vascular length density")
-                .font(.caption.weight(.semibold))
-            LinearGradient(
-                colors: [.black.opacity(0.15), .red, Color(red: 1, green: 0, blue: 1)],
-                startPoint: .leading,
-                endPoint: .trailing
-            )
-            .frame(width: 190, height: 8)
-            .clipShape(Capsule())
-            Text(
-                "\(result.window.low.formatted())–\(result.window.high.formatted()) "
-                    + "\(result.window.units) · DV maximum projection"
-            )
-            .font(.caption2.monospacedDigit())
-            Text(disclosure)
-                .font(.caption2)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .foregroundStyle(.white)
-        .padding(9)
-        .frame(maxWidth: 360, alignment: .leading)
-        .background(.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 8))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Population reference density legend")
-        .accessibilityValue(disclosure)
-    }
-}
-
-private struct SubjectVesselPreviewPanel: View {
-    let image: NSImage?
-    let registered: Bool
-
-    var body: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Label("Subject dorsal image", systemImage: "photo")
-                    .font(.headline)
-                Spacer()
-            }
-            if let image {
-                Image(nsImage: image)
-                    .resizable()
-                    .interpolation(.high)
-                    .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .background(Color.black.opacity(0.88))
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            } else {
-                ContentUnavailableView(
-                    "No subject dorsal image",
-                    systemImage: "photo.badge.plus",
-                    description: Text("Use Import image in the persistent project sidebar.")
-                )
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-            Text(
-                registered
-                    ? "Registered user-supplied image — vessel segmentation is not validated"
-                    : "Preview only — not registered; do not infer vessel clearance"
-            )
-            .font(.caption.weight(.medium))
-            .foregroundStyle(registered ? .green : .orange)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .padding(10)
-        .background(.background.opacity(0.65), in: RoundedRectangle(cornerRadius: 10))
-    }
-}
-
-private struct StatusPill: View {
-    let text: String
-    let good: Bool
-
-    var body: some View {
-        Label(text, systemImage: good ? "checkmark.circle.fill" : "exclamationmark.circle")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(good ? .green : .secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
-            .background(.quaternary, in: Capsule())
-    }
+private extension AtlasSliceOrientation {
+    var displayName: String { rawValue.capitalized }
 }

@@ -4,8 +4,6 @@ import SwiftUI
 
 struct ProjectSidebar: View {
     @ObservedObject var model: PlannerViewModel
-    let importVesselImage: () -> Void
-    let registerVesselImage: () -> Void
     let saveProject: () -> Void
     let openProject: () -> Void
     let reconnect: () -> Void
@@ -22,8 +20,7 @@ struct ProjectSidebar: View {
                     backendSection
                     atlasSection
                     implantTargetSection
-                    subjectVesselsSection
-                    populationDensitySection
+                    majorVesselsSection
                 }
                 .padding(16)
             }
@@ -32,6 +29,21 @@ struct ProjectSidebar: View {
                 .background(.bar)
         }
         .background(.thinMaterial)
+    }
+
+    private var majorVesselsSection: some View {
+        SidebarSection(title: "Major vessels", systemImage: "drop.triangle") {
+            StatusRow(label: "Geometry", value: "No reviewed 3D vessel graph loaded")
+            StatusRow(label: "Display", value: "Major vessels only — capillaries excluded")
+            StatusRow(label: "Deep clearance", value: "Unavailable until radius-bearing geometry is loaded")
+            Text(
+                "This product path accepts published or subject-specific 3D centerlines only when "
+                    + "their physical radii, atlas registration, version, and source hash are known."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var implantTargetSection: some View {
@@ -180,12 +192,9 @@ struct ProjectSidebar: View {
     }
 
     private var projectHeader: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        VStack(alignment: .leading, spacing: 0) {
             Label("Untitled animal plan", systemImage: "cross.case")
                 .font(.title3.weight(.semibold))
-            Text("Mouse stereotaxic planning workspace")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -247,88 +256,6 @@ struct ProjectSidebar: View {
                 .controlSize(.small)
                 .help("Downloads only allen_mouse_25um v1.2, then validates it before use.")
             }
-        }
-    }
-
-    private var subjectVesselsSection: some View {
-        SidebarSection(title: "Subject dorsal image", systemImage: "photo") {
-            Text("Optional user-supplied image of this animal. Import does not prove that pixels are blood vessels; use a transparent, independently reviewed vessel mask when available.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            StatusRow(label: "Image", value: model.subjectImportStatus)
-            StatusRow(label: "Registration", value: model.subjectRegistrationStatus)
-            StatusRow(label: "Residual", value: model.residualStatus)
-            StatusRow(label: "Laterality", value: model.lateralityStatus)
-
-            if let provenance = model.localVessel {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Local provenance")
-                        .font(.caption.weight(.semibold))
-                    Text(provenance.fileName)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(provenance.byteCount), countStyle: .file))
-                    Text("SHA-256 \(provenance.sha256)")
-                        .font(.caption2.monospaced())
-                        .lineLimit(2)
-                        .textSelection(.enabled)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if let imported = model.backendState?.subjectVessels.primaryImage {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Persisted backend byte provenance")
-                        .font(.caption.weight(.semibold))
-                    Text("\(imported.widthPixels) × \(imported.heightPixels) px · "
-                        + ByteCountFormatter.string(
-                            fromByteCount: Int64(imported.byteSize),
-                            countStyle: .file
-                        ))
-                    Text("SHA-256 \(imported.sourceSha256)")
-                        .font(.caption2.monospaced())
-                        .lineLimit(2)
-                        .textSelection(.enabled)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if let error = model.vesselImportError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-
-            HStack {
-                Button("Import subject image", systemImage: "photo.badge.plus") {
-                    importVesselImage()
-                }
-                .disabled(!model.canImportSubjectVessels)
-                Button("Register") {
-                    registerVesselImage()
-                }
-                    .disabled(!model.canRegisterSubjectVessels)
-                    .help("Requires at least two enabled landmarks and explicit laterality confirmation.")
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            if model.vesselImportInProgress {
-                ProgressView("Importing and verifying subject image…")
-                    .controlSize(.small)
-            }
-            if let error = model.registrationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-            }
-            Text("Registration remains locked until ≥2 enabled landmarks are entered and laterality is explicitly confirmed. Registration does not validate vessel segmentation.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
         }
     }
 

@@ -1,19 +1,24 @@
-# Brain3D native macOS shell
+# Brain3D native macOS app
 
-> **Early alpha:** the current shell shows only fixed midpoint orthogonal slices. It has no
-> movable x/y/z cursor, linked tri-planar navigation, pan/zoom, supported 3D renderer, individual
-> vessel paths, target projection, or vessel-clearance workflow.
+> **Research prototype:** the app has an interactive 25 µm Allen atlas browser, but it does not
+> yet have calibrated target projection, probe planning, a supported 3D renderer, or a verified
+> major-vessel clearance workflow.
 
 This package is the SwiftUI half of the hybrid animal-surgery planner. It keeps the
 Python scientific implementation behind a typed, versioned NDJSON subprocess boundary.
 
 The application is restricted to **animal research only — not for human or clinical
 use**. It accepts only `allen_mouse_25um` version `1.2` in the current testing phase.
-The Dorsal view can composite the pinned Mendeley Data v1 four-mouse population
-vascular length density and a separately registered user-supplied subject image. The
-population layer is not vessel paths or subject-specific anatomy and cannot establish
-clearance. Bregma-relative AP/ML/DV entries remain unprojected until calibration, and
-3D rendering is unavailable in bridge protocol v1.
+The primary workspace provides `Dorsal / Coronal / Sagittal / Horizontal / 3D` modes.
+Coronal, sagittal, and horizontal slices retain independent depths. A click replaces the
+current region selection without moving any slice; drag, pinch, scroll, and the explicit
+controls provide direct navigation. The product path has no focus mode or crosshair.
+
+Population vascular density and user subject-image registration remain archived in the
+backend and are intentionally absent from the primary workflow. Neither is a set of
+individual vessels, and neither can establish deep clearance. Bregma-relative AP/ML/DV
+entries remain unprojected until calibration. The 3D mode is an explicit unavailable state
+until a renderer shares the same validated scene state.
 
 ## Development
 

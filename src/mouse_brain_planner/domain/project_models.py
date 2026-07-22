@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -24,6 +24,28 @@ MAX_PROJECT_EVENTS = 1_000
 MAX_SUBJECT_VASCULAR_IMAGES = 128
 MAX_DORSAL_VASCULAR_REGISTRATIONS = 1_024
 MAX_UNPROJECTED_BREGMA_TARGETS = 256
+
+
+class ViewerSliceDepths(BaseModel):
+    """Independent zero-based slice indices for the three orthogonal views."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    coronal: int = Field(ge=0)
+    sagittal: int = Field(ge=0)
+    horizontal: int = Field(ge=0)
+
+
+class ViewerRegionSelection(BaseModel):
+    """One explicit region pick on one persisted slice image."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    orientation: Literal["coronal", "sagittal", "horizontal"]
+    index: int = Field(ge=0)
+    column: int = Field(ge=0)
+    row: int = Field(ge=0)
+    atlas_point: BrainGlobePhysicalPoint
 
 
 def utc_now() -> datetime:
@@ -77,6 +99,8 @@ class PlannerProject(BaseModel):
     atlas: AtlasMetadata | None = None
     linked_cursor: BrainGlobePhysicalPoint | None = None
     renderer_anchor: BrainGlobePhysicalPoint | None = None
+    viewer_slice_depths: ViewerSliceDepths | None = None
+    viewer_region_selection: ViewerRegionSelection | None = None
     selected_region_id: int | None = Field(default=None, gt=0)
     region_display: list[RegionDisplayState] = Field(default_factory=list)
     subject_vascular_images: list[SubjectVascularImage] = Field(
@@ -125,6 +149,8 @@ class PlannerProject(BaseModel):
                 raise ValueError("a linked atlas cursor requires atlas metadata")
             if self.renderer_anchor is not None:
                 raise ValueError("a renderer anchor requires atlas metadata")
+            if self.viewer_slice_depths is not None or self.viewer_region_selection is not None:
+                raise ValueError("viewer slice state requires atlas metadata")
             if self.selected_region_id is not None or self.region_display:
                 raise ValueError("atlas region state requires atlas metadata")
             if (
@@ -137,7 +163,7 @@ class PlannerProject(BaseModel):
             return self
 
         for label, point in (
-            ("linked cursor", self.linked_cursor),
+            ("legacy atlas point", self.linked_cursor),
             ("renderer anchor", self.renderer_anchor),
         ):
             if point is None:
@@ -170,6 +196,59 @@ class PlannerProject(BaseModel):
 
         if self.renderer_anchor is None:
             raise ValueError("an atlas-bound project requires a renderer anchor")
+
+        if self.viewer_slice_depths is not None:
+            depth_limits = {
+                "coronal": self.atlas.shape_voxels[0],
+                "sagittal": self.atlas.shape_voxels[2],
+                "horizontal": self.atlas.shape_voxels[1],
+            }
+            for orientation, limit in depth_limits.items():
+                depth = getattr(self.viewer_slice_depths, orientation)
+                if depth < 0 or depth >= limit:
+                    raise ValueError(
+                        f"{orientation} viewer slice {depth} is outside [0, {limit})"
+                    )
+
+        if self.viewer_region_selection is not None:
+            if self.viewer_slice_depths is None:
+                raise ValueError("a viewer region selection requires persisted slice depths")
+            selection = self.viewer_region_selection
+            if selection.atlas_point.atlas_key != self.atlas.atlas_key or (
+                selection.atlas_point.atlas_version != self.atlas.atlas_package_version
+            ):
+                raise ValueError("viewer region selection atlas identity does not match project")
+            orientation_axes = {
+                "coronal": (0, 1, 2),
+                "sagittal": (2, 1, 0),
+                "horizontal": (1, 0, 2),
+            }
+            if selection.orientation not in orientation_axes:
+                raise ValueError("viewer region selection orientation is unsupported")
+            fixed_axis, row_axis, column_axis = orientation_axes[selection.orientation]
+            expected_depth = getattr(self.viewer_slice_depths, selection.orientation)
+            if selection.index < 0 or selection.row < 0 or selection.column < 0:
+                raise ValueError("viewer region selection indices must be nonnegative")
+            if selection.index != expected_depth:
+                raise ValueError("viewer region selection does not belong to the persisted slice")
+            if selection.row >= self.atlas.shape_voxels[row_axis] or (
+                selection.column >= self.atlas.shape_voxels[column_axis]
+            ):
+                raise ValueError("viewer region selection pixel is outside the slice image")
+            point_voxel = tuple(
+                math.floor(value / resolution)
+                for value, resolution in zip(
+                    selection.atlas_point.as_tuple(),
+                    self.atlas.resolution_um,
+                    strict=True,
+                )
+            )
+            expected_voxel = [0, 0, 0]
+            expected_voxel[fixed_axis] = selection.index
+            expected_voxel[row_axis] = selection.row
+            expected_voxel[column_axis] = selection.column
+            if point_voxel != tuple(expected_voxel):
+                raise ValueError("viewer region selection point does not match its intrinsic pixel")
 
         region_ids = [state.structure_id for state in self.region_display]
         if len(region_ids) != len(set(region_ids)):

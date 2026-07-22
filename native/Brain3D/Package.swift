@@ -19,7 +19,8 @@ let package = Package(
         ),
         .testTarget(
             name: "Brain3DCoreTests",
-            dependencies: ["Brain3DCore"]
+            dependencies: ["Brain3DCore"],
+            resources: [.copy("Fixtures")]
         ),
     ]
 )

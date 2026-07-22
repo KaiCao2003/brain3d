@@ -39,11 +39,79 @@ enum AtlasLoadPhase: Equatable {
     case failed(String)
 }
 
-enum SliceLoadPhase: Equatable {
+enum DorsalLoadPhase: Equatable {
     case unavailable(String)
     case loading
     case ready
     case failed(String)
+}
+
+enum ViewerLoadPhase: Equatable {
+    case unavailable(String)
+    case loading
+    case ready
+    case updating
+    case failed(String)
+
+    var message: String {
+        switch self {
+        case let .unavailable(message), let .failed(message): message
+        case .loading: "Loading atlas views…"
+        case .ready: "Atlas views ready"
+        case .updating: "Updating atlas view…"
+        }
+    }
+}
+
+struct VerifiedAtlasSliceFrame: Equatable {
+    let orientation: AtlasSliceOrientation
+    let index: Int
+    let sliceCount: Int
+    let width: Int
+    let height: Int
+    let fixedAxis: AtlasAnatomicalAxis
+    let rowAxis: AtlasAnatomicalAxis
+    let columnAxis: AtlasAnatomicalAxis
+    let sliceCenterMicrometres: Double
+    let png: Data
+}
+
+struct TriPlanarFrameSet: Equatable {
+    var coronal: VerifiedAtlasSliceFrame?
+    var sagittal: VerifiedAtlasSliceFrame?
+    var horizontal: VerifiedAtlasSliceFrame?
+
+    subscript(_ orientation: AtlasSliceOrientation) -> VerifiedAtlasSliceFrame? {
+        get {
+            switch orientation {
+            case .coronal: coronal
+            case .sagittal: sagittal
+            case .horizontal: horizontal
+            }
+        }
+        set {
+            switch orientation {
+            case .coronal: coronal = newValue
+            case .sagittal: sagittal = newValue
+            case .horizontal: horizontal = newValue
+            }
+        }
+    }
+}
+
+struct PendingViewerSlice: Equatable {
+    let orientation: AtlasSliceOrientation
+    let index: Int
+}
+
+private enum ViewerMutation: Sendable {
+    case slice(orientation: AtlasSliceOrientation, index: Int)
+    case regionPick(
+        orientation: AtlasSliceOrientation,
+        index: Int,
+        column: Int,
+        row: Int
+    )
 }
 
 struct LocalVesselProvenance: Equatable {
@@ -58,15 +126,20 @@ final class PlannerViewModel: ObservableObject {
     @Published var workspaceMode: WorkspaceMode = .dorsal
     @Published private(set) var connection: BridgeConnectionPhase
     @Published private(set) var atlasLoadPhase: AtlasLoadPhase = .idle
-    @Published private(set) var sliceLoadPhase: SliceLoadPhase = .unavailable(
+    @Published private(set) var dorsalLoadPhase: DorsalLoadPhase = .unavailable(
         "Connect to the planning service"
     )
     @Published private(set) var backendState: PlannerBridgeState?
     @Published private(set) var atlasProvenance: AtlasProvenance?
-    @Published private(set) var atlasSlice: AtlasSliceResult?
     @Published private(set) var dorsalSurface: AtlasDorsalResult?
     @Published private(set) var dorsalSurfacePNG: Data?
-    @Published private(set) var atlasSlicePNG: Data?
+    @Published private(set) var viewerPhase: ViewerLoadPhase = .unavailable(
+        "Create or open an animal plan to browse atlas slices"
+    )
+    @Published private(set) var viewerSnapshot: ViewerCanonicalSnapshot?
+    @Published private(set) var triPlanarFrames = TriPlanarFrameSet()
+    @Published private(set) var pendingViewerSlice: PendingViewerSlice?
+    @Published private(set) var viewerRegionSelection: Brain3DCore.ViewerRegionSelection?
     @Published private(set) var localVessel: LocalVesselProvenance?
     @Published private(set) var importedVessel: ImportedVascularImage?
     @Published private(set) var subjectPreviewPNG: Data?
@@ -95,6 +168,10 @@ final class PlannerViewModel: ObservableObject {
     private var bridgeClient: BridgeClient?
     private var helloResult: HelloResult?
     private var hasAttemptedConnection = false
+    private var authoritativeViewerSnapshot: ViewerCanonicalSnapshot?
+    private var pendingViewerMutation: ViewerMutation?
+    private var viewerMutationWorker: Task<Void, Never>?
+    private var viewerGeneration = 0
 
     init(launchConfiguration: BridgeLaunchConfiguration?) {
         self.launchConfiguration = launchConfiguration
@@ -276,19 +353,14 @@ final class PlannerViewModel: ObservableObject {
         importedVessel?.imageId ?? backendState?.subjectVessels.primaryImage?.imageId
     }
 
-    var sliceStatus: String {
-        switch sliceLoadPhase {
+    var dorsalSurfaceStatus: String {
+        switch dorsalLoadPhase {
         case let .unavailable(message), let .failed(message):
             return message
         case .loading:
-            return "Rendering verified atlas slice…"
+            return "Rendering verified dorsal surface…"
         case .ready:
-            if let dorsalSurface {
-                return dorsalSurface.displayLabel
-            }
-            guard let atlasSlice else { return "Verified slice ready" }
-            return "\(atlasSlice.orientation.capitalized) \(atlasSlice.index) — "
-                + "\(atlasSlice.fixedAxis) \(atlasSlice.sliceCenterMicrometres.formatted()) µm"
+            return dorsalSurface?.displayLabel ?? "Verified dorsal surface ready"
         }
     }
 
@@ -299,6 +371,15 @@ final class PlannerViewModel: ObservableObject {
     }
 
     func reconnect() async {
+        viewerMutationWorker?.cancel()
+        viewerMutationWorker = nil
+        pendingViewerMutation = nil
+        pendingViewerSlice = nil
+        authoritativeViewerSnapshot = nil
+        viewerSnapshot = nil
+        viewerRegionSelection = nil
+        triPlanarFrames = TriPlanarFrameSet()
+        viewerPhase = .unavailable("Connect to the planning service")
         if let bridgeClient {
             await bridgeClient.close()
         }
@@ -306,10 +387,8 @@ final class PlannerViewModel: ObservableObject {
         helloResult = nil
         backendState = nil
         atlasProvenance = nil
-        atlasSlice = nil
         dorsalSurface = nil
         dorsalSurfacePNG = nil
-        atlasSlicePNG = nil
         importedVessel = nil
         subjectPreviewPNG = nil
         subjectOverlayPNG = nil
@@ -321,7 +400,7 @@ final class PlannerViewModel: ObservableObject {
         implantTargets = []
         implantOperationError = nil
         atlasLoadPhase = .idle
-        sliceLoadPhase = .unavailable("Connect to the planning service")
+        dorsalLoadPhase = .unavailable("Connect to the planning service")
         clearPopulationDensity(clearPreparation: true)
         await connect()
     }
@@ -491,11 +570,19 @@ final class PlannerViewModel: ObservableObject {
             }
             await loadSubjectPreviewIfAvailable(using: bridgeClient, state: state)
             await loadRegisteredOverlayIfAvailable(using: bridgeClient, state: state)
+            if state.project != nil {
+                await refreshViewerState(using: bridgeClient)
+            } else {
+                clearViewerState(
+                    message: "Create or open an animal plan to browse atlas slices"
+                )
+            }
         } catch {
             connection = .failed(error.localizedDescription)
             backendState = nil
             implantTargets = []
             clearPopulationDensity(clearPreparation: true)
+            clearViewerState(message: "Planning state is unavailable")
         }
     }
 
@@ -574,112 +661,353 @@ final class PlannerViewModel: ObservableObject {
         }
     }
 
-    func loadSlice(for mode: WorkspaceMode) async {
-        let shouldReloadPopulationDensity =
-            mode == .dorsal && backendState?.populationDensity.visible == true
-        if mode == .dorsal, shouldReloadPopulationDensity {
+    func viewerMetadata(for orientation: AtlasSliceOrientation) -> TriPlanarSliceMetadata? {
+        guard let slices = viewerSnapshot?.slices else { return nil }
+        switch orientation {
+        case .coronal: return slices.coronal
+        case .sagittal: return slices.sagittal
+        case .horizontal: return slices.horizontal
+        }
+    }
+
+    func viewerFrame(for orientation: AtlasSliceOrientation) -> VerifiedAtlasSliceFrame? {
+        triPlanarFrames[orientation]
+    }
+
+    func requestedViewerIndex(for orientation: AtlasSliceOrientation) -> Int? {
+        if let pendingViewerSlice, pendingViewerSlice.orientation == orientation {
+            return pendingViewerSlice.index
+        }
+        return viewerFrame(for: orientation)?.index ?? viewerMetadata(for: orientation)?.index
+    }
+
+    func requestViewerSlice(_ orientation: AtlasSliceOrientation, index: Int) {
+        guard let frame = viewerFrame(for: orientation) else { return }
+        let clamped = min(frame.sliceCount - 1, max(0, index))
+        if requestedViewerIndex(for: orientation) == clamped { return }
+        viewerRegionSelection = nil
+        pendingViewerSlice = PendingViewerSlice(orientation: orientation, index: clamped)
+        enqueueViewerMutation(.slice(orientation: orientation, index: clamped))
+    }
+
+    func stepViewerSlice(_ orientation: AtlasSliceOrientation, delta: Int) {
+        guard delta != 0, let current = requestedViewerIndex(for: orientation) else { return }
+        requestViewerSlice(orientation, index: current + delta)
+    }
+
+    func pickViewerRegion(
+        orientation: AtlasSliceOrientation,
+        column: Int,
+        row: Int
+    ) {
+        guard
+            let frame = viewerFrame(for: orientation),
+            column >= 0, column < frame.width,
+            row >= 0, row < frame.height
+        else { return }
+        pendingViewerSlice = nil
+        enqueueViewerMutation(
+            .regionPick(
+                orientation: orientation,
+                index: frame.index,
+                column: column,
+                row: row
+            )
+        )
+    }
+
+    private func enqueueViewerMutation(_ mutation: ViewerMutation) {
+        guard bridgeClient != nil, authoritativeViewerSnapshot != nil else { return }
+        viewerGeneration += 1
+        pendingViewerMutation = mutation
+        viewerPhase = .updating
+        guard viewerMutationWorker == nil else { return }
+        viewerMutationWorker = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .milliseconds(12))
+            } catch {
+                return
+            }
+            await self?.processViewerMutationQueue()
+        }
+    }
+
+    private func processViewerMutationQueue() async {
+        defer { viewerMutationWorker = nil }
+        while !Task.isCancelled, let mutation = pendingViewerMutation {
+            pendingViewerMutation = nil
+            let generation = viewerGeneration
+            guard let bridgeClient, let base = authoritativeViewerSnapshot else {
+                clearViewerState(message: "The atlas-slice viewer has no active project")
+                return
+            }
+            do {
+                switch mutation {
+                case let .slice(orientation, index):
+                    let result: ViewerSliceRenderResult = try await bridgeClient.request(
+                        method: ViewerBridgeMethod.sliceRender.rawValue,
+                        params: try ViewerSliceRenderParameters(
+                            projectId: base.projectId,
+                            expectedProjectRevision: base.projectRevision,
+                            orientation: orientation,
+                            index: index
+                        )
+                    )
+                    authoritativeViewerSnapshot = result.snapshot
+                    hasUnsavedChanges = true
+                    let frame = try verifiedFrame(
+                        from: result.renderedSlice,
+                        expected: sliceMetadata(orientation, in: result.snapshot),
+                        snapshot: result.snapshot
+                    )
+                    guard generation == viewerGeneration else { continue }
+                    viewerSnapshot = result.snapshot
+                    triPlanarFrames[orientation] = frame
+                    viewerRegionSelection = nil
+                case let .regionPick(orientation, index, column, row):
+                    let result: ViewerRegionPickResult = try await bridgeClient.request(
+                        method: ViewerBridgeMethod.regionPick.rawValue,
+                        params: try ViewerRegionPickParameters(
+                            projectId: base.projectId,
+                            expectedProjectRevision: base.projectRevision,
+                            orientation: orientation,
+                            index: index,
+                            column: column,
+                            row: row
+                        )
+                    )
+                    authoritativeViewerSnapshot = result.snapshot
+                    hasUnsavedChanges = true
+                    guard generation == viewerGeneration else { continue }
+                    viewerSnapshot = result.snapshot
+                    viewerRegionSelection = result.snapshot.selection
+                }
+                pendingViewerSlice = nil
+                viewerPhase = .ready
+            } catch {
+                guard generation == viewerGeneration else { continue }
+                pendingViewerSlice = nil
+                viewerPhase = .failed(error.localizedDescription)
+            }
+        }
+        if pendingViewerMutation == nil, case .updating = viewerPhase {
+            viewerPhase = viewerSnapshot == nil
+                ? .unavailable("The atlas-slice viewer has no active project")
+                : .ready
+        }
+    }
+
+    private func refreshViewerState(using bridgeClient: BridgeClient) async {
+        viewerGeneration += 1
+        let generation = viewerGeneration
+        pendingViewerMutation = nil
+        pendingViewerSlice = nil
+        viewerRegionSelection = nil
+        viewerPhase = .loading
+        do {
+            let result: ViewerStateResult = try await bridgeClient.request(
+                method: ViewerBridgeMethod.stateGet.rawValue,
+                params: ViewerStateParameters()
+            )
+            guard generation == viewerGeneration else { return }
+            if authoritativeViewerSnapshot?.projectId != result.snapshot.projectId {
+                triPlanarFrames = TriPlanarFrameSet()
+            }
+            authoritativeViewerSnapshot = result.snapshot
+            viewerSnapshot = result.snapshot
+            viewerRegionSelection = result.snapshot.selection
+            try await loadTriPlanarFrames(
+                for: result.snapshot,
+                using: bridgeClient,
+                generation: generation
+            )
+            guard generation == viewerGeneration else { return }
+            viewerPhase = .ready
+        } catch {
+            guard generation == viewerGeneration else { return }
+            authoritativeViewerSnapshot = nil
+            viewerSnapshot = nil
+            viewerRegionSelection = nil
+            triPlanarFrames = TriPlanarFrameSet()
+            viewerPhase = .failed(error.localizedDescription)
+        }
+    }
+
+    private func loadTriPlanarFrames(
+        for snapshot: ViewerCanonicalSnapshot,
+        using bridgeClient: BridgeClient,
+        generation: Int
+    ) async throws {
+        var frames = triPlanarFrames
+        for orientation in AtlasSliceOrientation.allCases {
+            guard generation == viewerGeneration else { return }
+            let metadata = sliceMetadata(orientation, in: snapshot)
+            if let frame = frames[orientation],
+               frame.index == metadata.index,
+               frame.sliceCount == metadata.sliceCount,
+               frame.fixedAxis == metadata.fixedAxis,
+               frame.rowAxis == metadata.rowAxis,
+               frame.columnAxis == metadata.columnAxis
+            {
+                continue
+            }
+            let result: AtlasSliceResult = try await bridgeClient.request(
+                method: "atlas.slice",
+                params: AtlasSliceParameters(
+                    orientation: orientation.rawValue,
+                    index: metadata.index
+                )
+            )
+            let png = try verifiedPNG(base64: result.pngBase64, mimeType: result.mimeType)
+            try validate(
+                slice: result,
+                expected: metadata,
+                snapshot: snapshot
+            )
+            guard generation == viewerGeneration else { return }
+            frames[orientation] = VerifiedAtlasSliceFrame(
+                orientation: orientation,
+                index: result.index,
+                sliceCount: result.sliceCount,
+                width: result.width,
+                height: result.height,
+                fixedAxis: metadata.fixedAxis,
+                rowAxis: metadata.rowAxis,
+                columnAxis: metadata.columnAxis,
+                sliceCenterMicrometres: result.sliceCenterMicrometres,
+                png: png
+            )
+            triPlanarFrames = frames
+        }
+    }
+
+    private func validate(
+        slice: AtlasSliceResult,
+        expected: TriPlanarSliceMetadata,
+        snapshot: ViewerCanonicalSnapshot
+    ) throws {
+        let expectedWidth = voxelCount(expected.columnAxis, in: snapshot)
+        let expectedHeight = voxelCount(expected.rowAxis, in: snapshot)
+        guard
+            slice.protocolVersion == BridgeProtocolVersion.current,
+            slice.orientation == expected.orientation.rawValue,
+            slice.index == expected.index,
+            slice.sliceCount == expected.sliceCount,
+            slice.fixedAxis == expected.fixedAxis.rawValue,
+            slice.rowAxis == expected.rowAxis.rawValue,
+            slice.columnAxis == expected.columnAxis.rawValue,
+            abs(slice.sliceCenterMicrometres - expected.sliceCenterMicrometres) <= 1e-9,
+            slice.width == expectedWidth,
+            slice.height == expectedHeight,
+            slice.atlas.identifier == snapshot.atlas.identifier,
+            slice.atlas.version == snapshot.atlas.version,
+            slice.atlas.metadataSha256 == snapshot.atlas.metadataSha256
+        else {
+            throw ViewerContractError.invalid(
+                "Rendered slice metadata does not match the independent viewer state."
+            )
+        }
+    }
+
+    private func verifiedFrame(
+        from slice: AtlasSliceResult,
+        expected: TriPlanarSliceMetadata,
+        snapshot: ViewerCanonicalSnapshot
+    ) throws -> VerifiedAtlasSliceFrame {
+        try validate(slice: slice, expected: expected, snapshot: snapshot)
+        let png = try verifiedPNG(base64: slice.pngBase64, mimeType: slice.mimeType)
+        return VerifiedAtlasSliceFrame(
+            orientation: expected.orientation,
+            index: slice.index,
+            sliceCount: slice.sliceCount,
+            width: slice.width,
+            height: slice.height,
+            fixedAxis: expected.fixedAxis,
+            rowAxis: expected.rowAxis,
+            columnAxis: expected.columnAxis,
+            sliceCenterMicrometres: slice.sliceCenterMicrometres,
+            png: png
+        )
+    }
+
+    private func voxelCount(
+        _ axis: AtlasAnatomicalAxis,
+        in snapshot: ViewerCanonicalSnapshot
+    ) -> Int {
+        switch axis {
+        case .ap: snapshot.atlas.shapeVoxels.apVoxels
+        case .dv: snapshot.atlas.shapeVoxels.dvVoxels
+        case .ml: snapshot.atlas.shapeVoxels.mlVoxels
+        }
+    }
+
+    private func sliceMetadata(
+        _ orientation: AtlasSliceOrientation,
+        in snapshot: ViewerCanonicalSnapshot
+    ) -> TriPlanarSliceMetadata {
+        switch orientation {
+        case .coronal: snapshot.slices.coronal
+        case .sagittal: snapshot.slices.sagittal
+        case .horizontal: snapshot.slices.horizontal
+        }
+    }
+
+    private func clearViewerState(message: String) {
+        viewerMutationWorker?.cancel()
+        viewerMutationWorker = nil
+        pendingViewerMutation = nil
+        pendingViewerSlice = nil
+        authoritativeViewerSnapshot = nil
+        viewerSnapshot = nil
+        viewerRegionSelection = nil
+        triPlanarFrames = TriPlanarFrameSet()
+        viewerPhase = .unavailable(message)
+    }
+
+    private func loadDorsalSurface() async {
+        let shouldReloadPopulationDensity = backendState?.populationDensity.visible == true
+        if shouldReloadPopulationDensity {
             populationDensityPNG = nil
             populationDensityOverlay = nil
         }
-        guard let bridgeClient, let provenance = atlasProvenance else {
-            atlasSlicePNG = nil
-            if mode == .dorsal {
-                populationDensityPNG = nil
-                populationDensityOverlay = nil
-            }
-            sliceLoadPhase = .unavailable("The reviewed atlas is not open")
+        guard let bridgeClient, atlasProvenance != nil else {
+            populationDensityPNG = nil
+            populationDensityOverlay = nil
+            dorsalLoadPhase = .unavailable("The reviewed atlas is not open")
             return
         }
-        guard mode != .threeDimensional else {
-            atlasSlicePNG = nil
-            atlasSlice = nil
-            dorsalSurface = nil
-            sliceLoadPhase = .unavailable(
-                "3D rendering is not exposed by bridge protocol v1; use verified slice views"
-            )
-            return
-        }
-        if mode == .dorsal {
-            sliceLoadPhase = .loading
-            do {
-                let result: AtlasDorsalResult = try await bridgeClient.request(
-                    method: "atlas.dorsal",
-                    params: AtlasDorsalParameters()
-                )
-                guard
-                    result.atlas.identifier == SafetyPolicy.supportedAtlasIdentifier,
-                    result.atlas.version == SafetyPolicy.supportedAtlasVersion,
-                    result.atlas.resolutionMicrometres == [25, 25, 25],
-                    result.rowAxis == "AP",
-                    result.columnAxis == "ML",
-                    result.displayLabel
-                        == "Allen atlas dorsal surface projection — not a subject skull surface"
-                else {
-                    throw StateValidationFailure.unsupportedAtlas
-                }
-                let png = try verifiedPNG(base64: result.pngBase64, mimeType: result.mimeType)
-                guard workspaceMode == mode else { return }
-                dorsalSurface = result
-                dorsalSurfacePNG = png
-                atlasSlice = nil
-                atlasSlicePNG = png
-                sliceLoadPhase = .ready
-                if shouldReloadPopulationDensity, let state = backendState {
-                    await synchronizePopulationDensity(using: bridgeClient, state: state)
-                }
-            } catch {
-                guard workspaceMode == mode else { return }
-                dorsalSurface = nil
-                dorsalSurfacePNG = nil
-                atlasSlice = nil
-                atlasSlicePNG = nil
-                populationDensityPNG = nil
-                populationDensityOverlay = nil
-                sliceLoadPhase = .failed(error.localizedDescription)
-            }
-            return
-        }
-        guard provenance.shapeVoxels.count == 3 else {
-            atlasSlicePNG = nil
-            sliceLoadPhase = .failed("Atlas provenance has an invalid voxel shape")
-            return
-        }
-        let orientation: String
-        let index: Int
-        switch mode {
-        case .horizontal:
-            orientation = "horizontal"
-            index = provenance.shapeVoxels[1] / 2
-        case .coronal:
-            orientation = "coronal"
-            index = provenance.shapeVoxels[0] / 2
-        case .sagittal:
-            orientation = "sagittal"
-            index = provenance.shapeVoxels[2] / 2
-        case .threeDimensional:
-            return
-        case .dorsal:
-            return
-        }
-
-        sliceLoadPhase = .loading
+        dorsalLoadPhase = .loading
         do {
-            let result: AtlasSliceResult = try await bridgeClient.request(
-                method: "atlas.slice",
-                params: AtlasSliceParameters(orientation: orientation, index: index)
+            let result: AtlasDorsalResult = try await bridgeClient.request(
+                method: "atlas.dorsal",
+                params: AtlasDorsalParameters()
             )
-            let png = try verifiedPNG(base64: result.pngBase64, mimeType: result.mimeType)
-            guard workspaceMode == mode else { return }
-            atlasSlice = result
-            dorsalSurface = nil
-            atlasSlicePNG = png
-            sliceLoadPhase = .ready
+            guard
+                result.atlas.identifier == SafetyPolicy.supportedAtlasIdentifier,
+                result.atlas.version == SafetyPolicy.supportedAtlasVersion,
+                result.atlas.resolutionMicrometres == [25, 25, 25],
+                result.rowAxis == "AP",
+                result.columnAxis == "ML",
+                result.displayLabel
+                    == "Allen atlas dorsal surface projection — not a subject skull surface"
+            else {
+                throw StateValidationFailure.unsupportedAtlas
+            }
+            dorsalSurfacePNG = try verifiedPNG(
+                base64: result.pngBase64,
+                mimeType: result.mimeType
+            )
+            dorsalSurface = result
+            dorsalLoadPhase = .ready
+            if shouldReloadPopulationDensity, let state = backendState {
+                await synchronizePopulationDensity(using: bridgeClient, state: state)
+            }
         } catch {
-            guard workspaceMode == mode else { return }
-            atlasSlice = nil
             dorsalSurface = nil
-            atlasSlicePNG = nil
-            sliceLoadPhase = .failed(error.localizedDescription)
+            dorsalSurfacePNG = nil
+            populationDensityPNG = nil
+            populationDensityOverlay = nil
+            dorsalLoadPhase = .failed(error.localizedDescription)
         }
     }
 
@@ -980,19 +1308,19 @@ final class PlannerViewModel: ObservableObject {
                 throw StateValidationFailure.animalOnlyContractMissing
             }
             atlasLoadPhase = .ready
-            await loadSlice(for: workspaceMode)
+            await loadDorsalSurface()
         } catch let error as BridgeClientError {
             if case let .remote(remote) = error, remote.code == "ATLAS_NOT_CACHED" {
                 atlasLoadPhase = .needsDownload
-                sliceLoadPhase = .unavailable("The reviewed atlas is not cached")
+                dorsalLoadPhase = .unavailable("The reviewed atlas is not cached")
                 await refreshState()
                 return
             }
             atlasLoadPhase = .failed(error.localizedDescription)
-            sliceLoadPhase = .unavailable("Atlas validation did not complete")
+            dorsalLoadPhase = .unavailable("Atlas validation did not complete")
         } catch {
             atlasLoadPhase = .failed(error.localizedDescription)
-            sliceLoadPhase = .unavailable("Atlas validation did not complete")
+            dorsalLoadPhase = .unavailable("Atlas validation did not complete")
         }
     }
 
@@ -1017,7 +1345,6 @@ final class PlannerViewModel: ObservableObject {
             return
         }
         guard
-            workspaceMode == .dorsal,
             let dorsalSurface,
             let atlasProvenance
         else {

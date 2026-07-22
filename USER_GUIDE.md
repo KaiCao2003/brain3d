@@ -1,9 +1,8 @@
 # User Guide
 
-Mouse Brain Surgery Planner is a native SwiftUI workspace backed by a Python scientific service.
-The current testing build displays one reviewed 25 µm mouse atlas, can overlay a published
-population vascular length-density field, can register a user-supplied dorsal image, and can
-preserve unprojected bregma-relative implant coordinates.
+Brain3D is a native SwiftUI workspace backed by a Python scientific service. The current testing
+build browses one reviewed 25 µm mouse atlas, retains independent slice depths and region
+selections, and preserves unprojected bregma-relative implant coordinates.
 
 > **Animal-research-only warning:** This application is for mouse animal-research planning only,
 > never human or clinical use. It is not a certified surgical-navigation, medical, or veterinary
@@ -47,17 +46,21 @@ are ignored and not deleted.
 
 The mode bar exposes:
 
-- **Dorsal** — the atlas dorsal surface on an AP-by-ML grid; this is where vascular density and a
-  registered subject dorsal image are composited over the brain;
+- **Dorsal** — the atlas dorsal surface on an AP-by-ML grid; only reviewed major-vessel geometry
+  may be overlaid, and no such graph is currently loaded;
 - **Coronal** — fixed AP plane, with DV rows and ML columns;
 - **Sagittal** — fixed ML plane, with DV rows and AP columns;
 - **Horizontal** — fixed DV plane, with AP rows and ML columns; and
 - **3D** — an honest unavailable state in bridge protocol v1, not a placeholder rendering.
 
-The coronal, sagittal, and horizontal modes each display only the atlas midpoint. There is no
-slice slider, mouse-wheel stepping, index field, pan/zoom interaction, linked crosshair, or shared
-tri-planar cursor in the current SwiftUI build. The mode buttons change fixed images; they do not
-let the user navigate through x/y/z.
+Only one selected mode fills the workspace. The coronal, sagittal, and horizontal modes each
+retain their own depth. Use the slider, previous/next
+buttons, or mouse wheel to change only that view. Drag to pan, pinch to zoom, and use the reset
+button to return to aspect-fit.
+
+Click a brain region to show a compact acronym/name label beside that point. Clicking elsewhere
+replaces the label. Clicking never moves any slice, and switching modes restores the exact depth
+and selection for the persisted viewer state.
 
 Atlas values are BrainGlobe physical coordinates in micrometres. They are not bregma-relative
 stereotaxic coordinates. See [Coordinate Systems](COORDINATE_SYSTEMS.md).
@@ -81,61 +84,21 @@ operations remain locked until an explicit bregma/skull-to-atlas calibration wit
 landmarks, transform, units, atlas identity, and validation exists. An unprojected entry is not
 usable for navigation.
 
-## Show the published population density
+## Major vessels
 
-The optional **Population density** layer uses the pinned source:
+The primary UI does not expose population density, subject registration, or capillaries. Those
+earlier evidence-layer functions remain archived in the backend so their tested provenance logic
+is not lost, but they are not part of the current workflow.
 
-- Yongsoo Kim, *Cerebrovascular, pericyte, and neuronal cell type mapping data 2022*;
-- [Mendeley Data v1, DOI 10.17632/stxvn5sv44.1](https://data.mendeley.com/datasets/stxvn5sv44/1),
-  CC BY 4.0; and
-- associated paper: Wu et al., *Quantitative relationship between cerebrovascular network and
-  neuronal cell types in mice*, Cell Reports 2022,
-  [doi:10.1016/j.celrep.2022.110978](https://doi.org/10.1016/j.celrep.2022.110978).
+The **Major vessels** status remains unavailable until a source provides all of the following:
 
-Choose **Download and prepare published reference (~311 MB)**. The service accepts only the
-pinned version-1 archive, verifies its exact byte count and SHA-256, extracts only the reviewed
-density and template members, validates their headers, and binds the prepared result to the exact
-open atlas metadata. Preparation is cached after successful validation.
+- individual branch paths rather than endpoint chords or a scalar density field;
+- source-preserved physical radii and units;
+- exact atlas identity, axes, origin, voxel anchoring, and registration transforms;
+- pinned bytes, hashes, license, specimen/reference identity, and review evidence; and
+- enough registration and geometry information to avoid false slice intersections.
 
-Then enable **Show population reference density** in the Dorsal view. The transparent red-to-
-magenta overlay is a DV maximum projection of a scalar vascular length-density field. Its display
-legend declares the value window and units. Overlay alpha rises with the windowed density value,
-and pixels outside the nonzero Allen annotation footprint remain fully transparent so the layer
-stays over the displayed brain rather than tinting the surrounding canvas.
-
-Interpret this layer narrowly:
-
-- it summarizes four fixed adult C57BL/6 mouse brains using a 100 µm local window;
-- it is a population reference, not an image of the current animal;
-- it contains no individual vessel centerlines, diameters, or paths;
-- the source ML polarity is not documented, so the reviewed conversion is explicitly
-  symmetrized; and
-- it cannot calculate or prove vessel clearance, safe entry, or collision avoidance.
-
-Turning the layer off removes the transparent density composite; it does not change the atlas or
-subject image.
-
-## Import and register a subject dorsal image
-
-The **Subject dorsal image** layer is separate from the published population density.
-
-1. Choose **Import subject image** and select one PNG, JPEG, or TIFF.
-2. Confirm the displayed filename, dimensions, byte count, and SHA-256 provenance.
-3. Choose **Register**.
-4. Enter at least two distinct correspondences between subject-image pixel column/row and atlas
-   dorsal AP/ML physical coordinates in micrometres.
-5. Explicitly confirm laterality, then run the registration.
-6. Review the returned residuals and the composite in the Dorsal view.
-
-The registration maps the user-supplied pixels onto the atlas dorsal grid. It does not perform or
-validate vessel segmentation. If the source image has an opaque background, that background may
-also cover the atlas; a transparent, independently reviewed vessel mask is preferable when the
-goal is to view subject surface vessels. A registered image still does not establish depth,
-diameter, identity, or clearance for any vessel.
-
-In the dorsal composite, the published population density is drawn over the atlas and the
-registered subject image is drawn above the density. These are different evidence layers and must
-not be described as one combined vascular truth.
+The app must not interpret “no reviewed graph loaded” as “no vessels present.”
 
 ## Save and reopen a project
 
@@ -144,9 +107,9 @@ backend, not the SwiftUI presentation layer, is authoritative for scientific sta
 revision tracking. Saved state can include:
 
 - exact atlas identity and metadata digest;
-- the currently selected fixed atlas-view mode;
-- byte-preserved subject image provenance, landmarks, transform, laterality, and residuals;
-- prepared population-density provenance and visibility state; and
+- independent coronal, sagittal, and horizontal depths plus the optional region selection;
+- archived subject-image and population-density state from older projects, without exposing it in
+  the primary UI; and
 - unprojected bregma-relative implant targets.
 
 Project JSON is checksummed, and replacement is atomic. A previous package may be retained as the

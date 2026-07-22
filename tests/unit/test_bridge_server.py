@@ -11,6 +11,7 @@ from io import BytesIO, StringIO
 from typing import Any, NoReturn
 
 import numpy as np
+from PIL import Image
 from tests.fixtures.atlas_factory import make_allen_metadata_test_double
 
 from mouse_brain_planner.bridge.server import (
@@ -18,6 +19,7 @@ from mouse_brain_planner.bridge.server import (
     BridgeContext,
     BridgeDispatcher,
     BridgeServer,
+    encode_rgb_png,
 )
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 
@@ -301,12 +303,30 @@ def test_repeated_slices_are_valid_deterministic_pngs_with_provenance() -> None:
     assert (first["width"], first["height"]) == (456, 320)
     assert first["orientation"] == "coronal"
     assert first["fixedAxis"] == "AP"
+    assert first["rowAxis"] == "DV"
+    assert first["columnAxis"] == "ML"
+    assert first["sliceCount"] == 528
     assert first["sliceCenterMicrometres"] == 112.5
     assert first["atlas"]["identifier"] == "allen_mouse_25um"
     assert first["atlas"]["version"] == "1.2"
     assert first["atlas"]["resolutionMicrometres"] == [25.0, 25.0, 25.0]
     assert responses[2]["error"]["code"] == "SLICE_OUT_OF_RANGE"
     assert responses[2]["error"]["details"]["sliceCount"] == 528
+
+
+def test_navigation_png_compression_is_full_resolution_and_pixel_lossless() -> None:
+    expected = np.arange(7 * 11 * 3, dtype=np.uint8).reshape(7, 11, 3)
+
+    fast = encode_rgb_png(expected, compression_level=1)
+    archival = encode_rgb_png(expected, compression_level=6)
+
+    assert fast.startswith(b"\x89PNG\r\n\x1a\n")
+    assert archival.startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(BytesIO(fast)) as decoded:
+        assert decoded.size == (11, 7)
+        np.testing.assert_array_equal(np.asarray(decoded.convert("RGB")), expected)
+    with Image.open(BytesIO(archival)) as decoded:
+        np.testing.assert_array_equal(np.asarray(decoded.convert("RGB")), expected)
 
 
 def test_slice_requires_an_open_atlas_and_exact_orientation_and_index_types() -> None:

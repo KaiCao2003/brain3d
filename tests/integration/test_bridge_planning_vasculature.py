@@ -16,7 +16,8 @@ from mouse_brain_planner.bridge.planning import (
     register_planning_handlers,
 )
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
-from mouse_brain_planner.domain.atlas_models import AtlasAxis, AtlasMetadata
+from mouse_brain_planner.domain.atlas_models import AtlasAxis, AtlasMetadata, RegionRecord
+from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.vasculature.reference_density import (
     BRAINGLOBE_ASR_FRAME_AP_DV_ML,
     STXVN5SV44_V1_SOURCE,
@@ -33,6 +34,22 @@ class _FakeAtlas:
     reference: NDArray[np.uint16]
     annotation: NDArray[np.int32]
     brainglobe_atlasapi_version: str = "2.3.1"
+
+    @property
+    def regions(self) -> list[RegionRecord]:
+        return [
+            RegionRecord(
+                structure_id=1,
+                acronym="TEST",
+                name="Test region",
+                structure_id_path=(1,),
+                rgb=(12, 34, 56),
+            )
+        ]
+
+    def region_at(self, point: BrainGlobePhysicalPoint) -> RegionRecord | None:
+        del point
+        return self.regions[0]
 
 
 def _metadata() -> AtlasMetadata:

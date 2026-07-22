@@ -48,5 +48,5 @@ unregistered vessel geometry, missing radius, subject mismatch, stale inputs, an
 revision conflicts fail closed. The product never substitutes another atlas, invents bregma,
 extrudes 2D evidence, or emits “safe.”
 
-See [ADR-005](ADR-005-linked-triplanar-mvp.md), [Code Audit](CODE_AUDIT.md), and
+See [ADR-005](ADR-005-independent-slice-viewer.md), [Code Audit](CODE_AUDIT.md), and
 [Legacy Removal](LEGACY_REMOVAL.md).

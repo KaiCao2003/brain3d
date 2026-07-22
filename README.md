@@ -1,21 +1,23 @@
 # Brain3D
 
-> **Status: early research alpha.** This repository is public for technical transparency. The
-> current application is **not usable as surgical navigation** and has not been validated for
-> animal procedures.
+> **Status: early research alpha.** The current build is usable for mouse-atlas browsing and
+> preserving unprojected implant coordinates. It is **not validated as surgical navigation** or
+> for animal procedures.
 
 Brain3D explores a native macOS interface for the Allen Mouse Brain Common Coordinate Framework.
 SwiftUI provides the application shell, while a Python service uses BrainGlobe for atlas access,
 coordinate handling, external-data verification, image registration, and project persistence.
 
-The current build can load the pinned 25 µm Allen mouse atlas, display a dorsal projection and one
-fixed midpoint slice in each orthogonal orientation, preserve unprojected bregma-relative AP/ML/DV
-entries, register a user-supplied dorsal image, and display a published four-mouse vascular
-length-density projection.
+The current build loads the pinned 25 µm Allen mouse atlas into one full-size selected view with
+exactly five modes: **Dorsal, Coronal, Sagittal, Horizontal, and 3D**. The three slice modes support
+independent depth sliders, previous/next buttons, wheel stepping, pan, zoom, and click-to-identify
+region labels. Each mode retains its own depth; a region click never changes any depth. The build
+also preserves named bregma-relative AP/ML/DV implant entries without pretending that they are
+already projected into the atlas.
 
-It does **not** currently provide interactive x/y/z slice navigation, linked tri-planar
-crosshairs, a supported 3D view, individual vessel paths, subject-specific vessel geometry,
-trajectory planning, or vessel-clearance calculation.
+It does **not** currently provide a supported 3D scene, a calibrated bregma-to-atlas projection,
+probe placement/traversal UI, or trustworthy individual vessel paths and clearance. Vessel display
+stays unavailable instead of drawing an unregistered graph.
 
 > **Animal research only — never human or clinical use.** This is not a medical, veterinary, or
 > surgical-navigation device. Do not use this build to guide a live procedure. Independently
@@ -27,14 +29,14 @@ trajectory planning, or vessel-clearance calculation.
 | --- | --- | --- |
 | Allen 25 µm atlas | Available | Accepts only BrainGlobe `allen_mouse_25um` package `1.2`; 10 µm is intentionally excluded |
 | Dorsal view | Available | Static atlas dorsal projection |
-| Coronal, sagittal, horizontal | Limited | One fixed midpoint slice per orientation |
-| Arbitrary x/y/z slice movement | **Missing** | No sliders, wheel stepping, index field, click navigation, or movable crosshair |
-| Linked tri-planar navigation | **Missing** | The three orthogonal views are separate static images |
-| Pan and zoom | **Missing** | The native canvas only fits a raster image to the available space |
+| Coronal, sagittal, horizontal | Available | One full-size mode at a time; each depth is independent and persisted |
+| Arbitrary x/y/z slice movement | Available | Slider, previous/next buttons, precise wheel stepping, and full legal index range |
+| Region identification | Available | Click replaces one compact acronym/name label without changing slice depth |
+| Pan and zoom | Available | Direct drag, anchored pinch zoom, reset, bounded scroll accumulation, and stale-frame protection |
 | Supported 3D view | **Missing** | The SwiftUI application explicitly shows an unavailable state |
-| Population vascular density | Limited | Dorsal DV maximum projection of a scalar field summarized from four mice |
-| Vessel centerlines, branches, or diameters | **Missing** | The integrated density field is not a vessel graph or image of individual vessels |
-| Subject surface image | Limited | A user image can be imported and registered; there is no automatic vessel segmentation |
+| Population vascular density | Archived | Backend capability retained, removed from the primary planning UI |
+| Subject image registration | Archived | Backend capability retained, removed from the primary planning UI |
+| Major-vessel centerlines and radii | **Unavailable** | No reviewed graph with sufficient Allen registration and branch-path provenance is loaded |
 | Bregma AP/ML/DV entry | Limited | Exact values are stored but not projected into the atlas without calibration |
 | Project save/open | Available | Checksummed `.mouseplan` package with provenance and backup recovery |
 | Probe trajectory and vessel clearance | **Missing** | Lower-level Python models are not a usable planning workflow |
@@ -66,9 +68,9 @@ SwiftUI macOS development app
         ↕ typed NDJSON protocol v1
 Python 3.12 scientific service
   ├─ BrainGlobe: pinned atlas access and provenance
-  ├─ NumPy / Pillow / SciPy: raster slices and density preparation
+  ├─ NumPy / Pillow / SciPy: raster slices and archived evidence-layer preparation
   ├─ Pydantic: coordinate and project models
-  ├─ registration: user-provided dorsal image
+  ├─ registration: archived subject-image groundwork
   └─ persistence: checksummed .mouseplan packages
 ```
 
@@ -92,21 +94,22 @@ atlas location or navigation-ready trajectory because a validated skull/bregma-t
 calibration does not exist. BrainGlobe atlas coordinates use a different `[AP, DV, ML]` frame in
 micrometres. See [Coordinate Systems](COORDINATE_SYSTEMS.md).
 
-## Vascular data: what the red overlay is
+## Vascular data boundary
 
-The optional built-in overlay is derived from
-[Kim 2022, Mendeley Data v1](https://data.mendeley.com/datasets/stxvn5sv44/1), associated with
-[Wu et al., Cell Reports 2022](https://doi.org/10.1016/j.celrep.2022.110978). The implementation
-pins the archive identity and prepares a transparent dorsal overlay.
+The primary UI shows **major vessels only** and currently reports that no reviewed graph is
+loaded. It does not substitute population density, a subject photograph, endpoint chords, or a
+manually digitized diagram for vessel paths.
 
-It is a symmetrized four-mouse population **vascular length-density** scalar field using a
-100 µm local window, displayed as a DV maximum projection. It contains no individual vessel
-centerlines, paths, diameters, or depth. It cannot show where a vessel is in the current animal
-and cannot establish probe-to-vessel clearance.
+The archived backend can verify and prepare the published
+[Kim 2022 Mendeley dataset](https://data.mendeley.com/datasets/stxvn5sv44/1), but that source is a
+20 µm voxel field of population vascular **length density**. It has no individual centerlines,
+paths, diameters, or depth and therefore remains outside the primary planning UI.
 
-A user-supplied dorsal image is a separate layer. Registration maps its pixels onto the atlas;
-it does not prove that those pixels are segmented vessels and cannot recover a validated 3D
-vascular graph.
+VesSAP/VesselGraph is also not overlaid: the public graph is in a 3 µm cleared-specimen voxel
+grid, while the released files do not establish an exact inverse subject-to-Allen mapping or
+edge-linked branch polylines. Enabling it would create false slice intersections. A future source
+must provide pinned geometry, physical radii, complete axis/frame metadata, exact atlas
+registration, hashes, and review evidence before the app will render it.
 
 ## Quick start for developers
 
@@ -124,8 +127,8 @@ The development app discovers the repository `.venv` and Python bridge. If disco
 reports **Backend not configured** rather than substituting demo anatomy.
 
 The supported atlas is large: the raw 25 µm reference plus annotation require about 0.43 GiB
-before rendering overhead. The optional pinned vascular-density archive is about 311 MB and is
-downloaded to the user cache, not stored in this repository.
+before rendering overhead. The archived vascular-density source is not downloaded by the primary
+planning UI.
 
 Useful CLI operations:
 

@@ -340,7 +340,10 @@ public struct AtlasSliceResult: Codable, Equatable, Sendable {
     public let height: Int
     public let orientation: String
     public let index: Int
+    public let sliceCount: Int
     public let fixedAxis: String
+    public let rowAxis: String
+    public let columnAxis: String
     public let sliceCenterMicrometres: Double
     public let atlas: AtlasProvenance
 }

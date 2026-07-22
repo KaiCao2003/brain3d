@@ -6,7 +6,7 @@ and persistence stay in Python; Swift owns presentation, input, accessibility, a
 handling.
 
 Start with [Architecture](docs/ARCHITECTURE.md), [Code Audit](docs/CODE_AUDIT.md),
-[ADR-005](docs/ADR-005-linked-triplanar-mvp.md), and
+[ADR-005](docs/ADR-005-independent-slice-viewer.md), and
 [Scientific Validation](SCIENTIFIC_VALIDATION.md).
 
 ## Environment
