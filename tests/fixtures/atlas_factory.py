@@ -51,6 +51,7 @@ def make_allen_metadata_test_double(resolution_um: AllenResolution) -> AtlasMeta
         source_annotation="annotation/ccf_2017",
         framework_name="Allen CCFv3",
         symmetric=True,
+        midline_ml_um=5700.0,
         axes=(
             AtlasAxis(
                 array_axis=0,

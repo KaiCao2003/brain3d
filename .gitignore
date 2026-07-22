@@ -12,5 +12,25 @@ build/
 dist/
 htmlcov/
 .coverage
-*.mouseplan.bak
 
+# Local logs and configuration/credentials
+*.log
+.env
+.env.*
+!.env.example
+
+# Plans and animal/subject data must remain local
+*.mouseplan
+*.mouseplan.bak
+private-data/
+local-data/
+subject-data/
+
+# Downloaded atlas, vascular, and derived scientific data
+atlas-cache/
+data-cache/
+*.7z
+*.nii
+*.nii.gz
+*.npy
+*.npz

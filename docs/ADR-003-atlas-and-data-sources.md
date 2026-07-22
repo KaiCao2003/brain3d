@@ -7,23 +7,25 @@
 ## Decision
 
 Use [BrainGlobe AtlasAPI 2.3.1](https://pypi.org/project/brainglobe-atlasapi/2.3.1/)
-as the authoritative atlas access layer. The default atlas is `allen_mouse_10um`; expose
-`allen_mouse_25um` as an explicit lower-memory choice. Other BrainGlobe atlases may be added
-through the same adapter only after their coordinates, version, citation, and data terms have
-been reviewed.
+as the authoritative atlas access layer. `allen_mouse_25um` package version `1.2` is the only
+runtime-allowlisted identity in the current build, for both remote and local-only catalog views. The 10 µm
+identity is deferred until the lower-memory path is release-qualified; existing cache data is
+ignored and not deleted. Arbitrary BrainGlobe keys, non-mouse atlases, and future unreviewed
+versions fail closed. Other identities may be added through the same adapter only after their
+coordinates, version, schema, citation, data terms, and native acceptance evidence are reviewed.
 
 Never silently substitute one resolution or atlas for another, and never combine annotation,
 reference, mesh, or coordinate metadata from different atlas versions. Every saved project
 records the atlas identifier, installed atlas version, resolution, shape, orientation, framework,
 source annotation, source URL, cache path, SHA-256 of the installed `metadata.json`, and
-application version. Phase 1 does **not** claim to record the install time or a package-wide
+application version. The current build does **not** claim to record the install time or a package-wide
 content digest.
 
 ## Atlas identity and coordinate metadata
 
 As checked on 2026-07-21, BrainGlobe's
 [`last_versions.conf`](https://gin.g-node.org/brainglobe/atlases/raw/master/last_versions.conf)
-lists version `1.2` for both `allen_mouse_10um` and `allen_mouse_25um`. The generator uses Allen
+lists version `1.2` for `allen_mouse_25um`. The generator uses Allen
 CCF 2017 annotations (`annotation/ccf_2017`) and BrainGlobe orientation `asr`: array axes are
 `[AP,DV,ML]`, the origin lies toward anterior/superior/right, and increasing indices move toward
 posterior/inferior/left. Treat those values as discovered metadata, not permanent constants:
@@ -50,19 +52,47 @@ declare uint16 reference and uint32 annotation arrays.
 
 | Atlas | Shape | Reference + annotation raw bytes | Approx. raw memory |
 |---|---:|---:|---:|
-| `allen_mouse_10um` | `1320 × 800 × 1140` | uint16 + uint32 | 7.223 GB / 6.73 GiB |
 | `allen_mouse_25um` | `528 × 320 × 456` | uint16 + uint32 | 0.462 GB / 0.43 GiB |
 
 These figures exclude Python objects, temporary copies, derived masks, and VTK meshes, so peak
-resident memory is higher. Before loading 10 µm data, show the estimate and check available
-memory; recommend 25 µm on 16 GB systems. A change of resolution requires explicit user consent
-and is persisted in the project. Load structures and meshes on demand, release intermediates
-promptly, and never create an unbounded full-volume copy merely for display.
+resident memory is higher. Load structures and meshes on demand, release intermediates promptly,
+and never create an unbounded resident full-volume copy merely for display. Adding another
+resolution is a separate product/validation decision; no silent substitution is allowed.
 
 [BrainGlobe AtlasAPI 3.0.0rc1](https://pypi.org/project/brainglobe-atlasapi/3.0.0rc1/)
 introduces a newer storage path, but it is a prerelease and is not the production dependency. The
 adapter boundary exists so a future chunked implementation can be evaluated without changing
 project coordinates or provenance.
+
+## Population vascular-density decision
+
+The optional population layer uses exactly Yongsoo Kim's *Cerebrovascular, pericyte, and
+neuronal cell type mapping data 2022*,
+[Mendeley Data v1, DOI 10.17632/stxvn5sv44.1](https://data.mendeley.com/datasets/stxvn5sv44/1),
+licensed CC BY 4.0 and associated with
+[Wu et al., Cell Reports 2022](https://doi.org/10.1016/j.celrep.2022.110978).
+
+Acquisition is fail-closed. The accepted archive is
+`NVU_mapping_Adult_mouse_brain (1).7z`, exactly 311,493,514 bytes, SHA-256
+`c715c92ad153bff7f676b883f47108f886147e5d6fcd4502bcc04a0f92ed98fe`. Only two exact members are
+streamed into application-owned staging: the vascular length-density NIfTI and its Allen template.
+Their names, sizes, SHA-256 values, NIfTI header evidence, and the derived-cache manifest are
+validated before an atomic promotion.
+
+The reviewed source contract is a 20 µm `(570,400,660)` `[ML,DV,AP]` field with values in
+`m/mm^3`, four fixed adult mice, and a 100 µm local window. The density NIfTI itself has unit
+zooms, unknown units, and no qform/sform, so the implementation validates that exact caveat and
+uses the pinned README/template contract rather than treating the header as authoritative. AP is
+reversed into BrainGlobe ASR, ML is deliberately symmetrized because source polarity is not
+documented, and the prepared result is a 50 µm `[AP,DV,ML]` scalar field. Preparation requires an
+exact target-atlas identity and template correlation of at least 0.99.
+
+The SwiftUI layer receives only a declared transparent AP-by-ML DV maximum projection with the
+source, atlas binding, units, display window, and limitations intact. Alpha scales with the
+windowed density value, and the bridge clips it to the current atlas's exact nonzero annotation
+footprint before transport. This is a population scalar density, not individual vessel paths,
+not subject-specific anatomy, and not usable for vessel clearance. The separate simulation-ready
+graph deposit `10.17632/mjtyry6v85.1` is not integrated.
 
 ## Cache, download, and offline behavior
 
@@ -73,27 +103,37 @@ reads it during module initialization; pass the application-owned atlas and inte
 directories explicitly where the API permits. The relevant behavior is documented in
 [`config.py`](https://github.com/brainglobe/brainglobe-atlasapi/blob/v2.3.1/brainglobe_atlasapi/config.py#L16-L25).
 
-Downloads run outside the GUI thread, report progress, and support cancellation. Exact-version
-acquisition uses BrainGlobe inside unique application-owned archive and atlas staging directories;
-the adapter validates core files, identity, package version, orientation, shape, resolution,
-metadata, and path containment before atomically renaming the package into the visible cache.
-Existing versions are preserved, and a concurrent target is never overwritten. Cached-only open
-uses BrainGlobe's low-level local reader, cannot call its downloader, and must validate the exact
-requested version. Cache removal UI is deferred; Phase 1 never deletes an installed atlas
-implicitly during upgrade or failure recovery.
+Downloads run outside the GUI thread. The supported SwiftUI shell currently shows indeterminate
+download/preparation progress and does not expose a cancellation control; cancellation and
+quantitative progress remain future UI work. Exact-version acquisition uses BrainGlobe inside
+unique application-owned archive and atlas staging directories;
+the adapter parses metadata and structures and inspects reference/annotation TIFF headers to
+validate reviewed identity, species, package version, orientation, resolution, hierarchy,
+uint16/uint32 types, volume shapes, and path containment without loading whole arrays. Only
+packages passing that check receive a catalog `downloaded` state. The staged package is then
+atomically renamed into the visible cache. Existing valid versions and valid concurrent targets
+are preserved. An invalid same-name target is atomically moved beneath the app-owned
+`atlases/quarantine/` directory before promotion, so evidence remains recoverable and the valid
+replacement prevents a redownload loop.
+Cached-only open uses BrainGlobe's low-level local reader, cannot call its downloader, and must
+validate the exact requested version. Cache-removal and quarantine-management UI are deferred.
 
-Catalog work is backgrounded, cancellable at the application boundary, local-only under
-`--no-download`, and bounded to 15 seconds. AtlasAPI 2.3.1 contains an upstream HTTP call without
-a timeout; after application cancellation/timeout that call may finish only in an abandoned
-daemon thread, whose result is ignored and which cannot block Qt shutdown or process exit.
+Catalog work is backgrounded by the application worker and local-only under `--no-download`.
+Production does not call AtlasAPI 2.3.1's timeout-less catalog helper or abandon it in a daemon
+thread. The adapter fetches the same official `last_versions.conf` endpoint directly with a short
+socket timeout, a 15-second total deadline, cooperative checks between bounded reads, and a 1 MiB
+response limit. A validated response replaces the app-owned cache atomically; network or deadline
+failure falls back to a previously validated cached catalog. Cancellation returns without leaving
+catalog work running in another thread.
 
 Stable AtlasAPI downloads do not publish or enforce a cryptographic expected hash for each
-atlas archive. Phase 1 records the SHA-256 of the installed `metadata.json` for exact metadata
+atlas archive. The application records the SHA-256 of the installed `metadata.json` for exact metadata
 identity. The separately measured whole-file hashes in `SCIENTIFIC_VALIDATION.md` are validation
 evidence, not persisted project fields and not upstream authentication. A future package-wide
 integrity feature must define and version its manifest before claiming corruption or content
-drift detection. Pooch may be used for other external files only when an authoritative expected
-hash is available.
+drift detection. Structural JSON/TIFF-header validation detects malformed or internally
+inconsistent packages, not anatomically plausible tampering. Pooch may be used for other external
+files only when an authoritative expected hash is available.
 
 ## Code, data, and prior art are separate
 
@@ -106,7 +146,8 @@ hash is available.
 | Neuropixels Trajectory Explorer v2.0.0 | Prior-art workflow reference only | GPL-3.0; no copied code or assets |
 | Pinpoint v2.0.0 | Prior-art workflow reference only | GPL-3.0; no copied code or assets |
 | cortex-lab/allenCCF and SHARP-Track | Prior-art workflow reference only | No repository license found; no copied code or assets |
-| Wu et al. simulation-ready vascular tracing data, DOI `10.17632/mjtyry6v85.1` | Phase 4 candidate data; not downloaded or displayed in Phase 1 | Dataset page identifies four fully traced adult-mouse cerebrovascular graphs in MATLAB format and licenses version 1 under CC BY 4.0. Before ingestion, inspect the included documentation, pin file-level identities and hashes, and validate units, axes, Allen CCF registration, and anatomical suitability. |
+| Kim 2022 population vascular length-density data, DOI `10.17632/stxvn5sv44.1` | Optional downloaded scientific data | Mendeley Data v1, CC BY 4.0; exact archive/member identities are pinned. Displayed only as a symmetrized four-mouse population scalar density; never as vessel paths, a subject layer, or clearance. |
+| Wu et al. simulation-ready vascular tracing data, DOI `10.17632/mjtyry6v85.1` | Candidate data; not integrated | Dataset page identifies four fully traced adult-mouse cerebrovascular graphs in MATLAB format and licenses version 1 under CC BY 4.0. Before any ingestion, inspect documentation, pin file-level identities/hashes, and validate units, axes, Allen registration, and suitability. |
 | VesselGraph | Prior-art vascular graph/data reference only | Software is MIT; data is CC BY-NC 4.0. No code, models, or data copied. The noncommercial restriction prevents treating it as an unrestricted distributable default. |
 | VesSAP | Prior-art vascular workflow/reference only | Repository code is MIT; the paper links public scans and registered atlas data, but the external data terms were not established here. No code, models, or data copied. |
 
@@ -115,21 +156,25 @@ stated. The application must show the source and terms before first download, re
 and avoid redistributing the atlas inside the `.app` or an installer. Commercial distribution,
 hosted redistribution, or a change in Allen terms requires legal review before release.
 
-The Wu et al. Mendeley deposit is the Phase 0 **license-level candidate** for future vascular
-work: its versioned landing page and CC BY 4.0 terms make lawful use with attribution possible.
-It is not yet approved for application ingestion or bundling because its file schema, coordinate
-transform, file-level integrity, and scientific fit have not been validated. Any future source
-must have a stable URL, version, coordinate registration, citation, redistribution terms, and
-integrity strategy before it can be downloaded or displayed. Visual ideas from prior art may
-inform independently written code, but repository code, meshes, screenshots, icons, and other
-assets must not be copied unless their license is explicitly compatible and the reuse is
-recorded in `THIRD_PARTY.md`.
+The integrated `stxvn5sv44.1` density and the candidate `mjtyry6v85.1` vessel graphs are distinct
+deposits and must never be conflated. A new source still needs a stable URL, version, coordinate
+registration, citation, redistribution terms, integrity strategy, scientific semantics, and
+fail-closed UI labeling before it can be displayed. Visual ideas from prior art may inform
+independently written code, but repository code, meshes, screenshots, icons, and other assets
+must not be copied unless their license is explicitly compatible and the reuse is recorded in
+`THIRD_PARTY.md`.
 
 ## Consequences
 
 - First use requires a network download; later use is offline from an application-owned cache.
-- 10 µm fidelity has a material memory cost and needs an explicit preflight path.
+- Only the explicitly reviewed Allen mouse 25 µm package-v1.2 identity is discoverable or
+  openable in the current build.
+- 10 µm is deferred. Existing source or derived cache data is left untouched but cannot enter a
+  current project package.
+- The optional Mendeley density may overlay the dorsal atlas only with its four-mouse population,
+  symmetrization, no-paths, and no-clearance disclosures visible.
 - Project files carry enough provenance to enforce exact metadata identity and prevent silent
-  coordinate reinterpretation; Phase 1 does not claim package-wide content-drift detection.
+  coordinate reinterpretation; the current build does not claim package-wide content-drift
+  detection.
 - Atlas upgrades, new external datasets, or copied prior-art material require a new review of
   scientific provenance, terms, and `THIRD_PARTY.md` before implementation.

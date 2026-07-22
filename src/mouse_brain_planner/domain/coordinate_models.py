@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -43,8 +43,8 @@ class BrainGlobeVoxelPoint(_AtlasPoint):
     ap: FiniteFloat
     dv: FiniteFloat
     ml: FiniteFloat
-    frame_id: str = "BRAINGLOBE_VOXEL_ASR"
-    anchor: VoxelAnchor = VoxelAnchor.CONTINUOUS_INDEX
+    frame_id: Literal["BRAINGLOBE_VOXEL_ASR"] = "BRAINGLOBE_VOXEL_ASR"
+    anchor: Literal[VoxelAnchor.CONTINUOUS_INDEX] = VoxelAnchor.CONTINUOUS_INDEX
 
     def as_tuple(self) -> tuple[float, float, float]:
         """Return the documented ``[AP, DV, ML]`` value tuple."""
@@ -58,7 +58,7 @@ class BrainGlobeVoxelIndex(_AtlasPoint):
     ap: int = Field(ge=0)
     dv: int = Field(ge=0)
     ml: int = Field(ge=0)
-    frame_id: str = "BRAINGLOBE_VOXEL_INDEX_ASR"
+    frame_id: Literal["BRAINGLOBE_VOXEL_INDEX_ASR"] = "BRAINGLOBE_VOXEL_INDEX_ASR"
 
     def as_tuple(self) -> tuple[int, int, int]:
         """Return the documented integer index tuple."""
@@ -76,7 +76,7 @@ class BrainGlobePhysicalPoint(_AtlasPoint):
     ap_um: FiniteFloat
     dv_um: FiniteFloat
     ml_um: FiniteFloat
-    frame_id: str = "BRAINGLOBE_PHYSICAL_ASR_UM"
+    frame_id: Literal["BRAINGLOBE_PHYSICAL_ASR_UM"] = "BRAINGLOBE_PHYSICAL_ASR_UM"
 
     def as_tuple(self) -> tuple[float, float, float]:
         """Return the documented ``[AP, DV, ML]`` micrometre tuple."""
@@ -93,7 +93,7 @@ class SurgeryWorldPoint(_AtlasPoint):
     ml_right_um: FiniteFloat
     ap_anterior_um: FiniteFloat
     dv_dorsal_um: FiniteFloat
-    frame_id: str = "SURGERY_WORLD_RAS_UM"
+    frame_id: Literal["SURGERY_WORLD_RAS_UM"] = "SURGERY_WORLD_RAS_UM"
 
     def as_tuple(self) -> tuple[float, float, float]:
         """Return the documented ``[ML, AP, DV]`` world tuple."""

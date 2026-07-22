@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "mouse-brain-planner"
 version = "0.1.0"
-description = "Transparent, reproducible mouse stereotaxic surgery planning for macOS."
+description = "Experimental macOS workspace for pinned mouse-atlas data and static views."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.12,<3.13"
@@ -20,11 +20,12 @@ classifiers = [
   "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-  "PySide6==6.11.1",
+  "PySide6==6.10.3",
   "brainglobe-atlasapi==2.3.1",
   "nibabel==5.4.2",
   "numpy==2.5.1",
   "pandas==3.0.3",
+  "Pillow==12.3.0",
   "platformdirs==4.11.0",
   "pooch==1.9.0",
   "pydantic==2.13.4",

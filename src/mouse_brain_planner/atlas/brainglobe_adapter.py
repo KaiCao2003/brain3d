@@ -9,23 +9,28 @@ time.
 
 from __future__ import annotations
 
+import configparser
 import hashlib
+import json
 import math
 import os
 import re
 import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPException
 from importlib import reload
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as distribution_version
 from numbers import Integral, Real
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from threading import Event, Thread
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Protocol, cast
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import numpy as np
+import tifffile
 from numpy.typing import NDArray
 
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
@@ -45,7 +50,21 @@ _REQUIRED_PACKAGE_FILES = (
     "annotation.tiff",
     "structures.json",
 )
-_CATALOG_TIMEOUT_SECONDS = 15.0
+_CATALOG_TOTAL_TIMEOUT_SECONDS = 15.0
+_CATALOG_SOCKET_TIMEOUT_SECONDS = 2.0
+_CATALOG_MAX_BYTES = 1024 * 1024
+_CATALOG_READ_CHUNK_BYTES = 16 * 1024
+_OFFICIAL_CATALOG_URL = "https://gin.g-node.org/brainglobe/atlases/raw/master/last_versions.conf"
+_SUPPORTED_ATLAS_RESOLUTION_UM = {
+    "allen_mouse_25um": (25.0, 25.0, 25.0),
+}
+_SUPPORTED_ATLAS_SHAPE_VOXELS = {
+    "allen_mouse_25um": (528, 320, 456),
+}
+_SUPPORTED_ATLAS_PACKAGE_VERSIONS = {
+    "allen_mouse_25um": frozenset({"1.2"}),
+}
+SUPPORTED_ATLAS_KEYS = frozenset(_SUPPORTED_ATLAS_RESOLUTION_UM)
 
 ProgressCallback = Callable[[int, int], None]
 CancellationCheck = Callable[[], bool]
@@ -79,6 +98,8 @@ class _AtlasLike(Protocol):
     root_dir: Path
     metadata: Mapping[str, object]
     structures_list: Sequence[Mapping[str, object]]
+    left_hemisphere_value: int
+    right_hemisphere_value: int
 
     @property
     def resolution(self) -> tuple[object, object, object]: ...
@@ -135,7 +156,9 @@ class _ConfigApi(Protocol):
 class _BrainGlobeRuntime:
     atlas_factory: _AtlasFactory
     cached_atlas_factory: Callable[[Path], _AtlasLike]
-    catalog_loader: Callable[[], Mapping[str, object]]
+    # Production uses the cancellable stdlib transport below. This hook exists
+    # only for deterministic injected test runtimes.
+    catalog_loader: Callable[[], Mapping[str, object]] | None
     config_api: _ConfigApi
     library_version: str
 
@@ -152,7 +175,6 @@ def _load_runtime() -> _BrainGlobeRuntime:
 
     from brainglobe_atlasapi import BrainGlobeAtlas, config
     from brainglobe_atlasapi.core import Atlas
-    from brainglobe_atlasapi.list_atlases import get_all_atlases_lastversions
 
     expected_config_dir = Path(os.environ["BRAINGLOBE_CONFIG_DIR"]).resolve()
     if Path(config.CONFIG_DIR).resolve() != expected_config_dir:
@@ -169,10 +191,7 @@ def _load_runtime() -> _BrainGlobeRuntime:
     return _BrainGlobeRuntime(
         atlas_factory=cast(_AtlasFactory, BrainGlobeAtlas),
         cached_atlas_factory=cast(Callable[[Path], _AtlasLike], Atlas),
-        catalog_loader=cast(
-            Callable[[], Mapping[str, object]],
-            get_all_atlases_lastversions,
-        ),
+        catalog_loader=None,
         config_api=cast(_ConfigApi, config),
         library_version=installed_version,
     )
@@ -247,10 +266,10 @@ class BrainGlobeAtlasRepository:
     ) -> list[AtlasCatalogRecord]:
         """Return available atlases merged with the application-owned cache.
 
-        AtlasAPI owns retrieval and parsing of the remote catalog.  Local
-        detection is deliberately based on :class:`AppPaths`, rather than on
-        BrainGlobe's process-global default cache.  ``local_only`` never calls
-        upstream network-aware catalog code.
+        The official BrainGlobe catalog endpoint is read through this adapter's
+        bounded transport. Local detection is deliberately based on
+        :class:`AppPaths`, rather than on BrainGlobe's process-global default
+        cache. ``local_only`` never calls network-aware catalog code.
         """
 
         if cancel is not None and cancel():
@@ -269,6 +288,8 @@ class BrainGlobeAtlasRepository:
         remote_versions: dict[str, str] = {}
         for raw_name, raw_version in available.items():
             name = str(raw_name)
+            if name not in SUPPORTED_ATLAS_KEYS:
+                continue
             self._validate_atlas_name(name)
             latest_version = str(raw_version).strip()
             if not latest_version:
@@ -276,6 +297,8 @@ class BrainGlobeAtlasRepository:
                     f"BrainGlobe catalog returned an empty version for {name!r}"
                 )
             self._validate_package_version(latest_version)
+            if latest_version not in _SUPPORTED_ATLAS_PACKAGE_VERSIONS[name]:
+                continue
             remote_versions[name] = latest_version
 
         local_versions = self._local_versions()
@@ -299,43 +322,175 @@ class BrainGlobeAtlasRepository:
         *,
         cancel: CancellationCheck | None,
     ) -> Mapping[str, object]:
-        """Bound an upstream catalog call whose pinned HTTP request lacks a timeout."""
+        """Load the official catalog without leaving uncancellable work behind."""
 
-        finished = Event()
-        outcome: list[Mapping[str, object] | Exception] = []
+        injected_loader = self._runtime.catalog_loader
+        if injected_loader is not None:
+            # Private dependency-injection seam for deterministic unit fakes.
+            # Production runtimes always use the bounded transport below.
+            self._raise_if_catalog_cancelled(cancel)
+            result = injected_loader()
+            self._raise_if_catalog_cancelled(cancel)
+            return result
+        return self._load_official_catalog(cancel=cancel)
 
-        def load() -> None:
+    def _load_official_catalog(
+        self,
+        *,
+        cancel: CancellationCheck | None,
+    ) -> Mapping[str, object]:
+        """Fetch, validate, and atomically cache BrainGlobe's official catalog."""
+
+        try:
+            payload = self._fetch_official_catalog(cancel=cancel)
+            available = self._parse_catalog(payload, source=_OFFICIAL_CATALOG_URL)
+        except AtlasDownloadCancelledError:
+            raise
+        except AtlasAdapterError as fetch_error:
+            self._raise_if_catalog_cancelled(cancel)
             try:
-                outcome.append(self._runtime.catalog_loader())
-            except Exception as error:
-                outcome.append(error)
-            finally:
-                finished.set()
+                cached = self._read_cached_catalog()
+            except FileNotFoundError:
+                raise FileNotFoundError(
+                    "the official BrainGlobe catalog is unavailable and no cached "
+                    "last_versions.conf exists"
+                ) from fetch_error
+            self._raise_if_catalog_cancelled(cancel)
+            return cached
 
-        Thread(
-            target=load,
-            name="brainglobe-catalog-request",
-            daemon=True,
-        ).start()
-        deadline = time.monotonic() + _CATALOG_TIMEOUT_SECONDS
-        while True:
-            if cancel is not None and cancel():
-                raise AtlasDownloadCancelledError("atlas catalog request cancelled")
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise AtlasAdapterError(
-                    "BrainGlobe atlas catalog did not respond within "
-                    f"{_CATALOG_TIMEOUT_SECONDS:g} seconds"
-                )
-            if finished.wait(min(0.1, remaining)):
-                break
+        self._raise_if_catalog_cancelled(cancel)
+        try:
+            self._write_catalog_cache_atomically(payload)
+        except OSError:
+            # A valid live response remains usable when a read-only filesystem
+            # prevents refreshing the optional fallback cache.
+            pass
+        self._raise_if_catalog_cancelled(cancel)
+        return available
 
-        if not outcome:
-            raise BrainGlobeContractError("BrainGlobe catalog loader returned no outcome")
-        result = outcome[0]
-        if isinstance(result, Exception):
-            raise result
-        return result
+    def _fetch_official_catalog(
+        self,
+        *,
+        cancel: CancellationCheck | None,
+    ) -> bytes:
+        """Read a size-limited response with socket and wall-clock bounds."""
+
+        deadline = time.monotonic() + _CATALOG_TOTAL_TIMEOUT_SECONDS
+        self._raise_if_catalog_cancelled(cancel)
+        request = Request(
+            _OFFICIAL_CATALOG_URL,
+            headers={"Accept": "text/plain", "User-Agent": "mouse-brain-planner/1"},
+            method="GET",
+        )
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AtlasAdapterError("BrainGlobe atlas catalog deadline expired before connection")
+        socket_timeout = min(_CATALOG_SOCKET_TIMEOUT_SECONDS, remaining)
+
+        try:
+            with urlopen(request, timeout=socket_timeout) as response:
+                status = getattr(response, "status", 200)
+                if not isinstance(status, int) or status < 200 or status >= 300:
+                    raise AtlasAdapterError(
+                        f"BrainGlobe atlas catalog returned HTTP status {status!r}"
+                    )
+                chunks: list[bytes] = []
+                total = 0
+                while True:
+                    self._raise_if_catalog_cancelled(cancel)
+                    if time.monotonic() >= deadline:
+                        raise AtlasAdapterError(
+                            "BrainGlobe atlas catalog exceeded the "
+                            f"{_CATALOG_TOTAL_TIMEOUT_SECONDS:g}-second deadline"
+                        )
+                    read_size = min(
+                        _CATALOG_READ_CHUNK_BYTES,
+                        _CATALOG_MAX_BYTES - total + 1,
+                    )
+                    chunk = response.read(read_size)
+                    self._raise_if_catalog_cancelled(cancel)
+                    if not isinstance(chunk, bytes):
+                        raise BrainGlobeContractError(
+                            "BrainGlobe atlas catalog response was not bytes"
+                        )
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > _CATALOG_MAX_BYTES:
+                        raise BrainGlobeContractError(
+                            f"BrainGlobe atlas catalog exceeded the {_CATALOG_MAX_BYTES}-byte limit"
+                        )
+                    chunks.append(chunk)
+        except AtlasAdapterError:
+            raise
+        except (HTTPException, URLError, TimeoutError, OSError) as error:
+            raise AtlasAdapterError(
+                "could not fetch the official BrainGlobe atlas catalog"
+            ) from error
+
+        if time.monotonic() >= deadline:
+            raise AtlasAdapterError(
+                "BrainGlobe atlas catalog exceeded the "
+                f"{_CATALOG_TOTAL_TIMEOUT_SECONDS:g}-second deadline"
+            )
+        return b"".join(chunks)
+
+    def _read_cached_catalog(self) -> Mapping[str, object]:
+        cache_path = self.paths.atlas_cache / "last_versions.conf"
+        if cache_path.is_symlink() or not cache_path.is_file():
+            raise FileNotFoundError(cache_path)
+        with cache_path.open("rb") as stream:
+            payload = stream.read(_CATALOG_MAX_BYTES + 1)
+        if len(payload) > _CATALOG_MAX_BYTES:
+            raise BrainGlobeContractError(
+                f"cached BrainGlobe atlas catalog exceeds {_CATALOG_MAX_BYTES} bytes"
+            )
+        return self._parse_catalog(payload, source=str(cache_path))
+
+    def _write_catalog_cache_atomically(self, payload: bytes) -> None:
+        cache_path = self.paths.atlas_cache / "last_versions.conf"
+        temporary_path: Path | None = None
+        try:
+            with NamedTemporaryFile(
+                mode="wb",
+                dir=cache_path.parent,
+                prefix=".last_versions-",
+                suffix=".tmp",
+                delete=False,
+            ) as stream:
+                temporary_path = Path(stream.name)
+                stream.write(payload)
+                stream.flush()
+                os.fsync(stream.fileno())
+            temporary_path.replace(cache_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _parse_catalog(payload: bytes, *, source: str) -> Mapping[str, object]:
+        try:
+            text = payload.decode("utf-8")
+            parsed = configparser.ConfigParser(interpolation=None, strict=True)
+            parsed.read_string(text, source=source)
+        except (UnicodeDecodeError, configparser.Error) as error:
+            raise BrainGlobeContractError(
+                f"BrainGlobe atlas catalog is not valid UTF-8 INI data: {source}"
+            ) from error
+        if not parsed.has_section("atlases"):
+            raise BrainGlobeContractError(
+                f"BrainGlobe atlas catalog has no [atlases] section: {source}"
+            )
+        available = dict(parsed.items("atlases"))
+        if not available:
+            raise BrainGlobeContractError(f"BrainGlobe atlas catalog is empty: {source}")
+        return available
+
+    @staticmethod
+    def _raise_if_catalog_cancelled(cancel: CancellationCheck | None) -> None:
+        if cancel is not None and cancel():
+            raise AtlasDownloadCancelledError("atlas catalog request cancelled")
 
     def is_cached(self, atlas_name: str, package_version: str | None = None) -> bool:
         """Return whether the application cache contains the requested package.
@@ -345,11 +500,11 @@ class BrainGlobeAtlasRepository:
         :meth:`open`.
         """
 
-        self._validate_atlas_name(atlas_name)
+        self._validate_supported_atlas(atlas_name)
         versions = self._local_versions().get(atlas_name, [])
         if package_version is None:
             return bool(versions)
-        self._validate_package_version(package_version)
+        self._validate_supported_package_version(atlas_name, package_version)
         return package_version in versions
 
     def open(
@@ -372,9 +527,9 @@ class BrainGlobeAtlasRepository:
         a second downloader.
         """
 
-        self._validate_atlas_name(atlas_name)
+        self._validate_supported_atlas(atlas_name)
         if package_version is not None:
-            self._validate_package_version(package_version)
+            self._validate_supported_package_version(atlas_name, package_version)
         if cancel is not None and cancel():
             raise AtlasDownloadCancelledError(f"atlas acquisition cancelled: {atlas_name}")
 
@@ -383,41 +538,23 @@ class BrainGlobeAtlasRepository:
             package_version=package_version,
             required=not allow_download,
         )
-        if cached_root is not None and (not allow_download or package_version is not None):
+        if cached_root is not None:
             # The low-level Atlas reader performs no catalog lookup, download,
             # repair, or cache deletion.  This is the only safe implementation
             # of a repository-level no-download guarantee.
             upstream_atlas = self._runtime.cached_atlas_factory(cached_root)
-        elif package_version is not None:
+        else:
+            if package_version is None:
+                package_version = self._remote_package_version(
+                    atlas_name,
+                    cancel=cancel,
+                )
             upstream_atlas = self._acquire_exact_package(
                 atlas_name,
                 package_version=package_version,
                 progress=progress,
                 cancel=cancel,
             )
-        else:
-            update_callback = self._progress_callback(
-                atlas_name=atlas_name,
-                progress=progress,
-                cancel=cancel,
-            )
-            prefix = f"{atlas_name}-"
-            config_file = self.paths.config / "brainglobe" / "bg_config.conf"
-            with TemporaryDirectory(prefix=prefix, dir=self.paths.download_cache) as temporary:
-                upstream_atlas = self._runtime.atlas_factory(
-                    atlas_name,
-                    brainglobe_dir=self.paths.atlas_cache,
-                    interm_download_dir=Path(temporary),
-                    check_latest=False,
-                    config_dir=config_file,
-                    fn_update=update_callback,
-                )
-
-            actual_name = str(upstream_atlas.atlas_name)
-            if actual_name != atlas_name:
-                raise BrainGlobeContractError(
-                    f"requested atlas {atlas_name!r}, but BrainGlobe opened {actual_name!r}"
-                )
         if cancel is not None and cancel():
             raise AtlasDownloadCancelledError(f"atlas acquisition cancelled: {atlas_name}")
         atlas_root = Path(upstream_atlas.root_dir).resolve()
@@ -438,6 +575,20 @@ class BrainGlobeAtlasRepository:
                 f"BrainGlobe opened v{loaded.metadata.atlas_package_version}"
             )
         return loaded
+
+    def _remote_package_version(
+        self,
+        atlas_name: str,
+        *,
+        cancel: CancellationCheck | None,
+    ) -> str:
+        records = self.list_atlases(cancel=cancel)
+        for record in records:
+            if record.name == atlas_name:
+                return record.latest_version
+        raise AtlasAdapterError(
+            f"supported atlas {atlas_name!r} is absent from the BrainGlobe catalog"
+        )
 
     def _acquire_exact_package(
         self,
@@ -481,10 +632,6 @@ class BrainGlobeAtlasRepository:
                 raise BrainGlobeContractError(
                     f"BrainGlobe staged atlas outside the isolated cache: {staged_root}"
                 ) from error
-            if not self._is_complete_package(staged_root):
-                raise BrainGlobeContractError(
-                    f"BrainGlobe staged an incomplete atlas package: {staged_root}"
-                )
             staged_loaded = LoadedAtlas(
                 staged_atlas,
                 atlas_key=atlas_name,
@@ -496,22 +643,92 @@ class BrainGlobeAtlasRepository:
                     f"requested atlas {atlas_name!r} package v{package_version}, but "
                     f"BrainGlobe acquired v{actual_version}"
                 )
+            if not self._is_valid_package(
+                staged_root,
+                atlas_name=atlas_name,
+                package_version=package_version,
+            ):
+                raise BrainGlobeContractError(
+                    f"BrainGlobe staged an invalid atlas package: {staged_root}"
+                )
             if cancel is not None and cancel():
                 raise AtlasDownloadCancelledError(f"atlas acquisition cancelled: {atlas_name}")
 
             target = self.paths.atlas_cache / f"{atlas_name}_v{package_version}"
-            if target.exists():
-                # Another process won the race.  Never overwrite it; the
-                # ordinary read-only validation below decides whether it is
-                # usable as the exact requested package.
-                if not self._is_complete_package(target):
-                    raise BrainGlobeContractError(
-                        f"concurrent atlas package is incomplete: {target.resolve()}"
-                    )
-            else:
-                staged_root.replace(target)
+            self._promote_validated_package(
+                staged_root,
+                target=target,
+                atlas_name=atlas_name,
+                package_version=package_version,
+            )
 
         return self._runtime.cached_atlas_factory(target.resolve())
+
+    def _promote_validated_package(
+        self,
+        staged_root: Path,
+        *,
+        target: Path,
+        atlas_name: str,
+        package_version: str,
+    ) -> None:
+        """Promote staging while preserving invalid targets in quarantine."""
+
+        for _attempt in range(3):
+            if os.path.lexists(target):
+                if self._is_valid_package(
+                    target,
+                    atlas_name=atlas_name,
+                    package_version=package_version,
+                ):
+                    return
+                self._quarantine_invalid_target(target)
+            try:
+                staged_root.rename(target)
+            except OSError:
+                if os.path.lexists(target):
+                    continue
+                raise
+            if not self._is_valid_package(
+                target,
+                atlas_name=atlas_name,
+                package_version=package_version,
+            ):
+                quarantined = self._quarantine_invalid_target(target)
+                raise BrainGlobeContractError(
+                    "promoted atlas package failed validation and was quarantined at "
+                    f"{quarantined.resolve()}"
+                )
+            return
+        raise BrainGlobeContractError(
+            f"could not promote atlas package after concurrent cache changes: {target}"
+        )
+
+    def _quarantine_invalid_target(self, target: Path) -> Path:
+        quarantine = self.paths.atlas_cache / "quarantine"
+        if os.path.lexists(quarantine):
+            if quarantine.is_symlink() or not quarantine.is_dir():
+                raise BrainGlobeContractError(
+                    f"atlas quarantine path is not an app-owned directory: {quarantine}"
+                )
+        else:
+            quarantine.mkdir()
+        quarantine_resolved = quarantine.resolve()
+        try:
+            quarantine_resolved.relative_to(self.paths.atlas_cache.resolve())
+        except ValueError as error:
+            raise BrainGlobeContractError(
+                f"atlas quarantine escapes the application cache: {quarantine_resolved}"
+            ) from error
+
+        base_name = f"{target.name}.invalid-{time.time_ns()}"
+        destination = quarantine / base_name
+        suffix = 0
+        while os.path.lexists(destination):
+            suffix += 1
+            destination = quarantine / f"{base_name}-{suffix}"
+        target.rename(destination)
+        return destination
 
     def _cached_root(
         self,
@@ -537,29 +754,146 @@ class BrainGlobeAtlasRepository:
     def _local_versions(self) -> dict[str, list[str]]:
         versions: dict[str, list[str]] = {}
         for candidate in self.paths.atlas_cache.iterdir():
-            if (
-                not candidate.is_dir()
-                or candidate.is_symlink()
-                or not self._is_complete_package(candidate)
-            ):
-                continue
             match = _LOCAL_ATLAS_PATTERN.fullmatch(candidate.name)
             if match is None:
                 continue
             name = match.group("name")
-            self._validate_atlas_name(name)
-            versions.setdefault(name, []).append(match.group("version"))
+            if name not in SUPPORTED_ATLAS_KEYS:
+                continue
+            version = match.group("version")
+            if self._is_valid_package(
+                candidate,
+                atlas_name=name,
+                package_version=version,
+            ):
+                versions.setdefault(name, []).append(version)
         return versions
 
-    @staticmethod
-    def _is_complete_package(candidate: Path) -> bool:
-        """Return whether stable core atlas files are regular and nonempty."""
+    @classmethod
+    def _is_valid_package(
+        cls,
+        candidate: Path,
+        *,
+        atlas_name: str,
+        package_version: str,
+    ) -> bool:
+        """Validate package identity and cheap JSON/TIFF structure without array loads."""
 
+        try:
+            cls._validate_package(
+                candidate,
+                atlas_name=atlas_name,
+                package_version=package_version,
+            )
+        except (AtlasAdapterError, OSError, TypeError, ValueError, tifffile.TiffFileError):
+            return False
+        return True
+
+    @classmethod
+    def _validate_package(
+        cls,
+        candidate: Path,
+        *,
+        atlas_name: str,
+        package_version: str,
+    ) -> None:
+        cls._validate_supported_atlas(atlas_name)
+        cls._validate_supported_package_version(atlas_name, package_version)
+        if not candidate.is_dir() or candidate.is_symlink():
+            raise BrainGlobeContractError(f"atlas package is not a regular directory: {candidate}")
+        if candidate.name != f"{atlas_name}_v{package_version}":
+            raise BrainGlobeContractError(
+                f"atlas package directory has the wrong identity: {candidate.name!r}"
+            )
         for filename in _REQUIRED_PACKAGE_FILES:
             path = candidate / filename
             if not path.is_file() or path.is_symlink() or path.stat().st_size == 0:
-                return False
-        return True
+                raise BrainGlobeContractError(
+                    f"atlas package file is missing, empty, or non-regular: {path}"
+                )
+
+        metadata = cls._read_json_mapping(candidate / "metadata.json", description="metadata")
+        if _required_text(metadata, "version") != package_version:
+            raise BrainGlobeContractError("atlas metadata version disagrees with its directory")
+        if _required_text(metadata, "name") != "allen_mouse":
+            raise BrainGlobeContractError("supported atlas metadata name must be 'allen_mouse'")
+        if _required_text(metadata, "species").casefold() != "mus musculus":
+            raise BrainGlobeContractError("supported atlas species must be Mus musculus")
+        if _required_text(metadata, "orientation").lower() != "asr":
+            raise BrainGlobeContractError("supported atlas orientation must be ASR")
+        shape = _shape_triplet(metadata.get("shape"), field="metadata.shape")
+        if shape != _SUPPORTED_ATLAS_SHAPE_VOXELS[atlas_name]:
+            raise BrainGlobeContractError(
+                f"atlas shape {shape} disagrees with reviewed key {atlas_name!r}"
+            )
+        resolution = _resolution_triplet(
+            metadata.get("resolution"),
+            field="metadata.resolution",
+        )
+        if resolution != _SUPPORTED_ATLAS_RESOLUTION_UM[atlas_name]:
+            raise BrainGlobeContractError(
+                f"atlas resolution {resolution} disagrees with reviewed key {atlas_name!r}"
+            )
+        _citation_text(metadata.get("citation"))
+        _first_required_text(metadata, "atlas_link", "source_url")
+        if metadata.get("symmetric") is not True:
+            raise BrainGlobeContractError("supported Allen mouse atlas must be symmetric")
+
+        reference_shape, reference_dtype = cls._tiff_header(candidate / "reference.tiff")
+        annotation_shape, annotation_dtype = cls._tiff_header(candidate / "annotation.tiff")
+        if reference_shape != shape or annotation_shape != shape:
+            raise BrainGlobeContractError(
+                "atlas TIFF shapes disagree with metadata: "
+                f"metadata={shape}, reference={reference_shape}, annotation={annotation_shape}"
+            )
+        if reference_dtype != np.dtype(np.uint16):
+            raise BrainGlobeContractError("reviewed Allen reference TIFF must be uint16")
+        if annotation_dtype != np.dtype(np.uint32):
+            raise BrainGlobeContractError("reviewed Allen annotation TIFF must be uint32")
+
+        raw_structures = cls._read_json(candidate / "structures.json", description="structures")
+        if not isinstance(raw_structures, list) or not all(
+            isinstance(structure, Mapping) for structure in raw_structures
+        ):
+            raise BrainGlobeContractError("atlas structures must be a list of mappings")
+        structures = cast(Sequence[Mapping[str, object]], raw_structures)
+        regions = _normalize_regions(structures)
+        region_ids = {region.structure_id for region in regions}
+        if len(region_ids) != len(regions) or len({region.acronym for region in regions}) != len(
+            regions
+        ):
+            raise BrainGlobeContractError("atlas structures contain duplicate IDs or acronyms")
+        if any(
+            ancestor not in region_ids
+            for region in regions
+            for ancestor in region.structure_id_path
+        ):
+            raise BrainGlobeContractError("atlas hierarchy references an unknown structure ID")
+
+    @staticmethod
+    def _read_json(path: Path, *, description: str) -> object:
+        try:
+            with path.open(encoding="utf-8") as stream:
+                return json.load(stream)
+        except (json.JSONDecodeError, UnicodeDecodeError) as error:
+            raise BrainGlobeContractError(
+                f"atlas {description} JSON is not parseable: {path}"
+            ) from error
+
+    @classmethod
+    def _read_json_mapping(cls, path: Path, *, description: str) -> Mapping[str, object]:
+        value = cls._read_json(path, description=description)
+        if not isinstance(value, Mapping):
+            raise BrainGlobeContractError(f"atlas {description} must be a JSON object")
+        return cast(Mapping[str, object], value)
+
+    @staticmethod
+    def _tiff_header(path: Path) -> tuple[tuple[int, ...], np.dtype[np.generic]]:
+        with tifffile.TiffFile(path) as tiff:
+            if len(tiff.series) != 1:
+                raise BrainGlobeContractError(f"atlas TIFF must have one image series: {path}")
+            series = tiff.series[0]
+            return tuple(int(value) for value in series.shape), np.dtype(series.dtype)
 
     @staticmethod
     def _validate_atlas_name(atlas_name: str) -> None:
@@ -567,6 +901,29 @@ class BrainGlobeAtlasRepository:
             raise ValueError(
                 "atlas name must start with an ASCII letter or digit and contain only "
                 "letters, digits, underscores, periods, or hyphens"
+            )
+
+    @classmethod
+    def _validate_supported_atlas(cls, atlas_name: str) -> None:
+        cls._validate_atlas_name(atlas_name)
+        if atlas_name not in SUPPORTED_ATLAS_KEYS:
+            supported = ", ".join(sorted(SUPPORTED_ATLAS_KEYS))
+            raise BrainGlobeContractError(
+                f"atlas {atlas_name!r} has not been reviewed; supported atlases: {supported}"
+            )
+
+    @classmethod
+    def _validate_supported_package_version(
+        cls,
+        atlas_name: str,
+        package_version: str,
+    ) -> None:
+        cls._validate_package_version(package_version)
+        if package_version not in _SUPPORTED_ATLAS_PACKAGE_VERSIONS[atlas_name]:
+            reviewed = ", ".join(sorted(_SUPPORTED_ATLAS_PACKAGE_VERSIONS[atlas_name]))
+            raise BrainGlobeContractError(
+                f"atlas {atlas_name!r} package v{package_version} has not been reviewed; "
+                f"reviewed versions: {reviewed}"
             )
 
     @staticmethod
@@ -620,6 +977,7 @@ class LoadedAtlas:
             )
         self.__atlas = atlas
         self.brainglobe_atlasapi_version = brainglobe_atlasapi_version
+        _validate_hemisphere_constants(atlas)
         self.metadata = _normalize_metadata(atlas, atlas_key=atlas_key)
         self._space = BrainGlobeAtlasSpace(self.metadata)
         self._regions = tuple(_normalize_regions(atlas.structures_list))
@@ -744,6 +1102,8 @@ class LoadedAtlas:
 
 
 def _normalize_metadata(atlas: _AtlasLike, *, atlas_key: str) -> AtlasMetadata:
+    if atlas_key not in SUPPORTED_ATLAS_KEYS:
+        raise BrainGlobeContractError(f"atlas {atlas_key!r} has not been reviewed")
     raw = atlas.metadata
     orientation = str(atlas.orientation).lower()
     metadata_orientation = _required_text(raw, "orientation").lower()
@@ -759,6 +1119,10 @@ def _normalize_metadata(atlas: _AtlasLike, *, atlas_key: str) -> AtlasMetadata:
         raise BrainGlobeContractError(
             f"BrainGlobe shape property {shape} disagrees with metadata {metadata_shape}"
         )
+    if shape != _SUPPORTED_ATLAS_SHAPE_VOXELS[atlas_key]:
+        raise BrainGlobeContractError(
+            f"BrainGlobe shape {shape} disagrees with reviewed key {atlas_key!r}"
+        )
 
     resolution = _resolution_triplet(atlas.resolution, field="resolution")
     metadata_resolution = _resolution_triplet(raw.get("resolution"), field="metadata.resolution")
@@ -766,6 +1130,10 @@ def _normalize_metadata(atlas: _AtlasLike, *, atlas_key: str) -> AtlasMetadata:
         raise BrainGlobeContractError(
             "BrainGlobe resolution property "
             f"{resolution} disagrees with metadata {metadata_resolution}"
+        )
+    if resolution != _SUPPORTED_ATLAS_RESOLUTION_UM[atlas_key]:
+        raise BrainGlobeContractError(
+            f"BrainGlobe resolution {resolution} disagrees with reviewed key {atlas_key!r}"
         )
 
     root_dir = Path(atlas.root_dir).resolve()
@@ -820,6 +1188,11 @@ def _normalize_metadata(atlas: _AtlasLike, *, atlas_key: str) -> AtlasMetadata:
     symmetric = raw.get("symmetric")
     if not isinstance(symmetric, bool):
         raise BrainGlobeContractError("atlas metadata 'symmetric' must be a boolean")
+    if not symmetric:
+        raise BrainGlobeContractError(
+            "stable adapter requires a reviewed symmetric Allen mouse atlas"
+        )
+    midline_ml_um = float(shape[2] * resolution[2]) / 2.0
 
     return AtlasMetadata(
         atlas_key=atlas_key,
@@ -835,8 +1208,26 @@ def _normalize_metadata(atlas: _AtlasLike, *, atlas_key: str) -> AtlasMetadata:
         source_annotation=source_annotation,
         framework_name=framework_name,
         symmetric=symmetric,
+        midline_ml_um=midline_ml_um,
         axes=axes,
     )
+
+
+def _validate_hemisphere_constants(atlas: _AtlasLike) -> None:
+    """Assert the pinned scalar hemisphere labels without opening the label volume."""
+
+    observed = (atlas.left_hemisphere_value, atlas.right_hemisphere_value)
+    if any(isinstance(value, bool) or not isinstance(value, Integral) for value in observed):
+        raise BrainGlobeContractError(
+            "BrainGlobe hemisphere labels must be integral scalar values; "
+            f"got left={observed[0]!r}, right={observed[1]!r}"
+        )
+    normalized = (int(observed[0]), int(observed[1]))
+    if normalized != (1, 2):
+        raise BrainGlobeContractError(
+            "unsupported BrainGlobe hemisphere labels; expected left=1 and right=2, "
+            f"got left={normalized[0]} and right={normalized[1]}"
+        )
 
 
 def _normalize_regions(

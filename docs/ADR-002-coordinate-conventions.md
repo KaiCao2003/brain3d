@@ -1,6 +1,6 @@
 # ADR-002: Coordinate conventions and atlas provenance
 
-- Status: Accepted for the Phase 1 baseline
+- Status: Accepted for the current SwiftUI/Python hybrid baseline
 - Date: 2026-07-21
 - Scope: Allen mouse atlases loaded through `brainglobe-atlasapi==2.3.1`
 
@@ -19,14 +19,14 @@ coordinate-frame conversion issue; atlas arrays must not be modified to compensa
 camera view.
 
 This ADR defines the authoritative frames, conversions, bounds, provenance, and validation
-requirements for Phase 1. Physical skull registration and the experimental determination of
+requirements for the application. Physical skull registration and the experimental determination of
 stereotaxic landmarks remain outside the atlas's authority.
 
 ## Decision
 
 ### 1. Pin the stable BrainGlobe contract
 
-Phase 1 uses exactly `brainglobe-atlasapi==2.3.1`, as pinned in `pyproject.toml`. The
+The current baseline uses exactly `brainglobe-atlasapi==2.3.1`, as pinned in `pyproject.toml`. The
 application accesses it through one application-owned adapter; domain, UI, persistence, and
 rendering code do not call BrainGlobe directly.
 
@@ -64,7 +64,7 @@ At adapter startup, the application records and verifies at least:
 - SHA-256 of the installed atlas `metadata.json`.
 
 An unexpected library version, atlas version, shape, orientation, or metadata-file SHA is an
-error, not a warning followed by best-effort loading. Phase 1 does not persist or claim a
+error, not a warning followed by best-effort loading. The current application does not persist or claim a
 package-wide content hash.
 
 ### 2. Use named frames, never bare coordinate triplets
@@ -77,6 +77,7 @@ not contain an unqualified `coordinates: [a, b, c]` field.
 | `BRAINGLOBE_VOXEL_ASR` | `[AP, DV, ML]` | origin A/S/R; increases P/I/L | voxel | Continuous voxel coordinates and discrete array indices, with the coordinate kind recorded separately |
 | `BRAINGLOBE_PHYSICAL_ASR_UM` | `[AP, DV, ML]` | origin A/S/R; increases P/I/L | µm | BrainGlobe arrays, meshes, queries, and atlas-native exports |
 | `SURGERY_WORLD_RAS_UM` | `[ML, AP, DV]` | right/anterior/dorsal positive | µm | Canonical right-handed anatomical and renderer world basis |
+| `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` | named `[AP, ML, DV]` fields | user-declared bregma; anterior/right/dorsal positive | mm | Exact user-entered implant target storage before calibration; fixed as unprojected and unusable for navigation |
 | `STEREOTAXIC_<profile>` | named `ml`, `ap`, `dv` fields | defined by a versioned landmark/calibration profile | internally µm; UI may display mm | User-facing stereotaxic coordinates only after explicit calibration |
 
 For BrainGlobe ASR specifically:
@@ -127,11 +128,10 @@ the translation for an axis flip. That convention describes continuous volume-bo
 geometry. A discrete array-index flip is instead `N - 1 - i`; the two operations must not be
 substituted for one another.
 
-For the Phase 1 Allen resolutions:
+For the current allowlisted Allen resolution:
 
 | Atlas | Resolution | Shape `[AP,DV,ML]` | Extent in µm | Last index | Last index anchor in µm | Last voxel center in µm |
 | --- | --- | --- | --- | --- | --- | --- |
-| `allen_mouse_10um` | `(10,10,10)` | `(1320,800,1140)` | `(13200,8000,11400)` | `(1319,799,1139)` | `(13190,7990,11390)` | `(13195,7995,11395)` |
 | `allen_mouse_25um` | `(25,25,25)` | `(528,320,456)` | `(13200,8000,11400)` | `(527,319,455)` | `(13175,7975,11375)` | `(13187.5,7987.5,11387.5)` |
 
 ### 4. Convert ASR into one right-handed renderer/world frame
@@ -178,9 +178,9 @@ does not change `SURGERY_WORLD_RAS_UM`.
 In stable BrainGlobe source, `left_hemisphere_value == 1` and
 `right_hemisphere_value == 2`. For a symmetric atlas, BrainGlobe initializes the volume as
 right and labels indices from `round(N_ML / 2)` onward as left. The application reads these
-constants from the atlas instance and asserts the observed labels; it does not hard-code the
-values from prose documentation, which currently contains a conflicting 0/1 description for
-direct hemisphere files.
+scalar constants from the atlas instance and asserts the observed labels without materializing
+BrainGlobe's hemisphere volume; it does not trust the values in prose documentation, which
+currently contains a conflicting 0/1 description for direct hemisphere files.
 
 For the even-sized Allen volumes, the continuous midline is:
 
@@ -188,11 +188,15 @@ For the even-sized Allen volumes, the continuous midline is:
 m_mid_um = extent_ml_um / 2 = 5700 µm
 ```
 
+The reviewed Allen contract persists this value explicitly as `AtlasMetadata.midline_ml_um`.
+Hemisphere classification consumes that provenance field rather than silently recomputing a
+center from shape at each call. Metadata validation still requires the midline to be finite,
+strictly inside the ML extent, and consistent with the symmetric reviewed volume contract.
+
 Expected neighboring indices are:
 
 | Atlas | Last right index | First left index |
 | --- | --- | --- |
-| `allen_mouse_10um` | 569 | 570 |
 | `allen_mouse_25um` | 227 | 228 |
 
 BrainGlobe's half-open lookup assigns a point at exactly 5700 µm to the first left voxel. The
@@ -211,8 +215,18 @@ surgical uncertainty band. Biological or procedural uncertainty must be modeled 
 
 The Allen CCF was built from an average of 1,675 ex-cranio, fixed mouse brains. It has no
 single source skull and therefore no Allen-supplied, uniquely correct bregma or lambda. The
-atlas-native frame is the default; stereotaxic coordinates become available only after the
-user explicitly selects or creates a calibration profile.
+atlas-native frame is the default. The application may preserve a user's bregma-relative implant
+entry before calibration only in `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED`, with these fixed signs:
+
+```text
+AP+ anterior / forward      AP− posterior / back
+ML+ right                   ML− left
+DV+ dorsal / up             DV− deep / ventral
+```
+
+That model must serialize `projected=false` and `usable_for_navigation=false`. It has no implicit
+Allen point, renderer point, region, or trajectory. Projected stereotaxic coordinates become
+available only after the user explicitly selects or creates a calibration profile.
 
 A calibration profile records at least:
 
@@ -251,15 +265,15 @@ identifiers and must not be collapsed into one “atlas version” string:
 
 - framework/publication: Allen CCFv3, Wang et al. 2020;
 - source annotation requested by the stable BrainGlobe packager: `annotation/ccf_2017`;
-- BrainGlobe atlas package version: currently `1.2` for Allen 10/25/50/100 µm packages;
-- BrainGlobe library version: `2.3.1` for the Phase 1 adapter.
+- BrainGlobe atlas package version: exactly `1.2` for the allowlisted Allen 25 µm package;
+- BrainGlobe library version: `2.3.1` for the current adapter.
 
 Calling the BrainGlobe package “the 2020 annotation” solely because it cites Wang et al. is
 prohibited. If a feature specifically requires the Allen 2020 parcellation, that asset must be
 selected, adapted, versioned, and validated as a separate data source.
 
 Stable BrainGlobe's atlas-validation module contains a checksum function that is explicitly an
-unimplemented, always-true placeholder. Phase 1 therefore computes and persists the SHA-256 of
+unimplemented, always-true placeholder. The application therefore computes and persists the SHA-256 of
 the installed `metadata.json` as an exact metadata identity, while explicitly not claiming that
 upstream verified the archive or that all package files were authenticated. A future
 package-wide integrity feature must define a versioned file manifest and hash every covered file.
@@ -302,6 +316,8 @@ The following are correctness errors:
 - using `shape` and `shape - 1` flip translations interchangeably;
 - hard-coding hemisphere file values from documentation instead of the installed API contract;
 - labeling atlas center, an IBL estimate, or a user landmark as official Allen bregma;
+- projecting an uncalibrated bregma AP/ML/DV entry into the atlas, renderer, anatomy, or a
+  vascular overlay;
 - equating the CCFv3/Wang 2020 publication, `ccf_2017` annotation, `Allen-CCF-2020`
   annotation, BrainGlobe package version, and library version;
 - assuming a successful BrainGlobe download has passed a cryptographic checksum;
@@ -315,22 +331,22 @@ Tests must exercise the application adapter, not only reproduce BrainGlobe inter
 | Area | Required fixture or input | Required assertion |
 | --- | --- | --- |
 | Stable API | installed package and adapter | library is exactly 2.3.1; stable constructor/reference behavior is used; unexpected API surface fails clearly |
-| 10 µm metadata | real or locked metadata | ASR, `[AP,DV,ML]`, shape `(1320,800,1140)`, resolution `(10,10,10)`, extent `(13200,8000,11400)` |
 | 25 µm metadata | real or locked metadata | ASR, `[AP,DV,ML]`, shape `(528,320,456)`, resolution `(25,25,25)`, same extent |
 | Bounds | `0`, last valid cell, `extent`, `-0.1`, negative index, NaN, and infinities | valid points resolve; all invalid points are rejected before BrainGlobe/NumPy indexing |
-| Voxel semantics | first/last indices at 10 and 25 µm | index anchor and center match the table; `floor(center/r)` returns the original index |
+| Voxel semantics | first/last indices at 25 µm | index anchor and center match the table; `floor(center/r)` returns the original index |
 | Continuous round trip | random finite points strictly inside the volume | voxel→µm→voxel error ≤ `1e-9` voxel and frame/unit labels survive serialization |
 | World affine | random points, vectors, and an arbitrary explicit anchor | anchor maps to zero; inverse round trip error ≤ `1e-6` µm; linear determinant is `-1`; vectors receive no translation |
-| Hemisphere | ML indices 569/570 and 227/228; physical ML 5700 µm | neighboring cells are right/left through installed constants; exact plane is domain `MIDLINE` |
-| Region lookup | manually frozen interior points at 10 and 25 µm | physical interior points resolve to expected region IDs/acronyms; boundary points are separately marked because downsampling may change them |
+| Hemisphere | ML indices 227/228; physical ML 5700 µm | neighboring cells are right/left through installed constants; exact plane is domain `MIDLINE` |
+| Region lookup | manually frozen interior points at 25 µm | physical interior points resolve to expected region IDs/acronyms; boundary points are separately marked |
 | Mesh/volume | root plus selected region meshes | coordinates are in µm; bounds lie within the volume plus one-voxel generation tolerance; verified interior samples resolve to the region or a descendant |
 | Rendering/picking | asymmetric left/right landmarks and camera presets | landmarks render on the anatomically intended sides; normals/winding are correct; picking round-trips to the original BrainGlobe point |
 | External Allen import | asymmetric ASL/ASR golden fixtures | declared transforms produce the expected hemisphere and region; ambiguous XYZ or missing metadata is rejected |
+| Unprojected bregma target | strict decimal AP/ML/DV input, zero values, signs, save/reopen | exact named values and frame survive; AP− is posterior, ML− is left, DV− is deep; projection and navigation remain false |
 | Stereotaxic profile | explicit user anchor and optional named estimate | selected landmark maps to zero and inverses correctly; no profile is silently selected; profile/atlas mismatch is rejected |
 | Provenance/integrity | saved project with locked identity and hash | exact identity reloads; changed package, source annotation, resolution, transform schema, or hash fails closed |
 
 Numerical transform tests do not replace visual validation. At least one asymmetric left/right
-golden fixture must be inspected and frozen before Phase 1 coordinate behavior is considered
+golden fixture must be inspected and frozen before coordinate behavior is considered
 validated.
 
 ## Consequences
@@ -340,6 +356,8 @@ validated.
 - Renderer reflection handling is explicit and testable instead of being hidden in camera or
   data flips.
 - The application can display atlas-native coordinates without implying stereotaxic accuracy.
+- The application can preserve a user's bregma-relative target without inventing an atlas
+  projection or navigation claim.
 - Supporting a new bregma estimate, atlas annotation, reader, or UI sign convention requires a
   named profile/adapter and validation fixtures rather than a global constant.
 - Old projects remain reproducible only while their atlas identity, content hash, transform,

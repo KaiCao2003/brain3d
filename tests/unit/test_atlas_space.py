@@ -6,12 +6,14 @@ import math
 
 import numpy as np
 import pytest
+from pydantic import BaseModel
 from tests.fixtures import AllenResolution, make_allen_metadata_test_double
 
 from mouse_brain_planner.coordinates.atlas_space import (
     AtlasIdentityError,
     BrainGlobeAtlasSpace,
     CoordinateBoundsError,
+    CoordinateFrameError,
 )
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import (
@@ -19,6 +21,7 @@ from mouse_brain_planner.domain.coordinate_models import (
     BrainGlobeVoxelIndex,
     BrainGlobeVoxelPoint,
     Hemisphere,
+    SurgeryWorldPoint,
     VoxelAnchor,
 )
 
@@ -117,6 +120,7 @@ def test_metadata_test_double_matches_published_contract(
     assert metadata.shape_voxels == shape
     assert metadata.resolution_um == (float(resolution_um),) * 3
     assert metadata.extent_um == (13200.0, 8000.0, 11400.0)
+    assert metadata.midline_ml_um == 5700.0
     assert tuple(axis.voxel_size_um for axis in metadata.axes) == metadata.resolution_um
     assert tuple(
         (
@@ -357,6 +361,123 @@ def test_anchor_identity_mismatch_is_rejected() -> None:
         space.world_transform_matrix(wrong_anchor)
 
 
+@pytest.mark.parametrize(
+    ("point_type", "payload", "wrong_frame"),
+    (
+        (
+            BrainGlobeVoxelPoint,
+            {"ap": 1.0, "dv": 1.0, "ml": 1.0},
+            "BRAINGLOBE_PHYSICAL_ASR_UM",
+        ),
+        (
+            BrainGlobeVoxelIndex,
+            {"ap": 1, "dv": 1, "ml": 1},
+            "BRAINGLOBE_VOXEL_ASR",
+        ),
+        (
+            BrainGlobePhysicalPoint,
+            {"ap_um": 1.0, "dv_um": 1.0, "ml_um": 1.0},
+            "SURGERY_WORLD_RAS_UM",
+        ),
+        (
+            SurgeryWorldPoint,
+            {"ml_right_um": 1.0, "ap_anterior_um": 1.0, "dv_dorsal_um": 1.0},
+            "BRAINGLOBE_PHYSICAL_ASR_UM",
+        ),
+    ),
+    ids=("voxel", "index", "physical", "world"),
+)
+def test_point_models_reject_caller_overridden_frames(
+    point_type: type[BaseModel],
+    payload: dict[str, float | int],
+    wrong_frame: str,
+) -> None:
+    metadata = make_allen_metadata_test_double(25)
+
+    with pytest.raises(ValueError, match="Input should be"):
+        point_type.model_validate(
+            {
+                "atlas_key": metadata.atlas_key,
+                "atlas_version": metadata.atlas_package_version,
+                "frame_id": wrong_frame,
+                **payload,
+            }
+        )
+
+
+def test_voxel_point_model_rejects_voxel_center_anchor() -> None:
+    metadata = make_allen_metadata_test_double(25)
+
+    with pytest.raises(ValueError, match="continuous-index"):
+        BrainGlobeVoxelPoint.model_validate(
+            {
+                "atlas_key": metadata.atlas_key,
+                "atlas_version": metadata.atlas_package_version,
+                "ap": 1.0,
+                "dv": 1.0,
+                "ml": 1.0,
+                "anchor": VoxelAnchor.VOXEL_CENTER,
+            }
+        )
+
+
+def test_space_defensively_rejects_constructed_wrong_frames_and_anchor() -> None:
+    metadata = make_allen_metadata_test_double(25)
+    space = BrainGlobeAtlasSpace(metadata)
+    malformed_voxel = BrainGlobeVoxelPoint.model_construct(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap=1.0,
+        dv=1.0,
+        ml=1.0,
+        frame_id="WRONG",
+    )
+    malformed_anchor = BrainGlobeVoxelPoint.model_construct(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap=1.0,
+        dv=1.0,
+        ml=1.0,
+        anchor=VoxelAnchor.VOXEL_CENTER,
+    )
+    malformed_index = BrainGlobeVoxelIndex.model_construct(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap=1,
+        dv=1,
+        ml=1,
+        frame_id="WRONG",
+    )
+    malformed_physical = BrainGlobePhysicalPoint.model_construct(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=100.0,
+        dv_um=100.0,
+        ml_um=100.0,
+        frame_id="WRONG",
+    )
+    malformed_world = SurgeryWorldPoint.model_construct(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ml_right_um=0.0,
+        ap_anterior_um=0.0,
+        dv_dorsal_um=0.0,
+        frame_id="WRONG",
+    )
+    valid_anchor = _physical(metadata, (100.0, 100.0, 100.0))
+
+    with pytest.raises(CoordinateFrameError, match="voxel point frame"):
+        space.voxel_to_physical(malformed_voxel)
+    with pytest.raises(CoordinateFrameError, match="anchor must be continuous-index"):
+        space.voxel_to_physical(malformed_anchor)
+    with pytest.raises(CoordinateFrameError, match="voxel index frame"):
+        space.index_to_center(malformed_index)
+    with pytest.raises(CoordinateFrameError, match="physical point frame"):
+        space.physical_to_index(malformed_physical)
+    with pytest.raises(CoordinateFrameError, match="world point frame"):
+        space.world_to_physical(malformed_world, valid_anchor)
+
+
 @pytest.mark.parametrize("resolution_um", (10, 25), ids=("10um", "25um"))
 def test_world_matrix_has_negative_determinant_and_inverts(
     resolution_um: AllenResolution,
@@ -424,3 +545,22 @@ def test_hemisphere_rejects_invalid_tolerance(invalid: float) -> None:
 
     with pytest.raises(ValueError, match="tolerance must be finite and non-negative"):
         BrainGlobeAtlasSpace(metadata).hemisphere(point, midline_tolerance_um=invalid)
+
+
+def test_hemisphere_uses_explicit_metadata_midline_not_extent_midpoint() -> None:
+    payload = make_allen_metadata_test_double(25).model_dump()
+    payload["symmetric"] = False
+    payload["midline_ml_um"] = 5600.0
+    metadata = AtlasMetadata.model_validate(payload)
+    space = BrainGlobeAtlasSpace(metadata)
+
+    assert space.hemisphere(_physical(metadata, (0.0, 0.0, 5600.0))) is Hemisphere.MIDLINE
+    assert space.hemisphere(_physical(metadata, (0.0, 0.0, 5650.0))) is Hemisphere.LEFT
+
+
+def test_symmetric_metadata_rejects_noncentral_midline() -> None:
+    payload = make_allen_metadata_test_double(25).model_dump()
+    payload["midline_ml_um"] = 5600.0
+
+    with pytest.raises(ValueError, match="must equal half the ML extent"):
+        AtlasMetadata.model_validate(payload)

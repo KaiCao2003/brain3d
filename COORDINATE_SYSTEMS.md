@@ -6,7 +6,7 @@ be known before it can be interpreted.
 
 The normative engineering decision is [ADR-002: Coordinate conventions and atlas
 provenance](docs/ADR-002-coordinate-conventions.md). This guide explains that decision with
-diagrams and worked examples for the Phase 1 baseline,
+diagrams and worked examples for the current baseline,
 `brainglobe-atlasapi==2.3.1`.
 
 > **Not stereotaxically calibrated:** Atlas-native and renderer coordinates are not bregma
@@ -22,6 +22,7 @@ diagrams and worked examples for the Phase 1 baseline,
 | `BRAINGLOBE_VOXEL_INDEX_ASR` | `[AP, DV, ML]` | anterior, superior, right | posterior, inferior, left | integer index |
 | `BRAINGLOBE_PHYSICAL_ASR_UM` | `[AP, DV, ML]` | anterior, superior, right | posterior, inferior, left | µm |
 | `SURGERY_WORLD_RAS_UM` | `[ML, AP, DV]`, exposed to the renderer as `[x,y,z]` | selected anchor | right, anterior, dorsal | µm |
+| `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` | named `[AP, ML, DV]` | user-declared bregma | anterior, right, dorsal/up | mm |
 | `STEREOTAXIC_<profile>` | named `ml`, `ap`, `dv` fields | profile-defined landmark | profile-defined | internal µm; UI may show mm |
 
 Every point also carries `atlas_key` and `atlas_version`. A point from another atlas package is
@@ -136,32 +137,9 @@ BrainGlobe is called. This prevents NumPy negative-index wraparound and BrainGlo
 When a user selects an image voxel, the planner represents it physically by its center. Mesh
 vertices remain continuous physical coordinates and receive no automatic half-voxel shift.
 
-### 10 µm example
-
-`allen_mouse_10um` has:
-
-```text
-resolution:  [10, 10, 10] µm
-shape:       [1320, 800, 1140]
-extent:      [13200, 8000, 11400] µm
-last index:  [1319, 799, 1139]
-last anchor: [13190, 7990, 11390] µm
-last center: [13195, 7995, 11395] µm
-```
-
-For the physical BrainGlobe point `[1234, 567, 5699] µm`:
-
-```text
-continuous voxel = [123.4, 56.7, 569.9]
-containing index  = [123,   56,   569]
-```
-
-`[13200, 0, 0] µm` is invalid because AP is exactly at the upper extent. The largest valid AP
-lookup coordinate is any finite representable value strictly less than `13200 µm`.
-
 ### 25 µm example
 
-`allen_mouse_25um` covers the same physical extent with fewer voxels:
+The current atlas, `allen_mouse_25um`, has:
 
 ```text
 resolution:  [25, 25, 25] µm
@@ -179,13 +157,12 @@ continuous voxel = [49.36, 22.68, 227.96]
 containing index  = [49,    22,    227]
 ```
 
-These matching physical extents do not imply that annotation labels at boundaries are
-identical across resolutions. Downsampling can move a discrete label boundary; cross-resolution
-region comparisons require verified interior points from real annotation volumes.
+`[13200, 0, 0] µm` is invalid because AP is exactly at the upper extent. The largest valid AP
+lookup coordinate is any finite representable value strictly less than `13200 µm`.
 
 ## Midline and hemisphere
 
-Both Phase 1 Allen resolutions have ML extent `11400 µm`, so the continuous midline is:
+The current Allen atlas has ML extent `11400 µm`, so the continuous midline is:
 
 ```text
 m_mid = 11400 / 2 = 5700 µm
@@ -194,13 +171,6 @@ m_mid = 11400 / 2 = 5700 µm
 The adjacent ML cells are:
 
 ```text
-10 µm atlas
-
-  RIGHT cell, index 569             LEFT cell, index 570
-  [5690, 5700) µm                   [5700, 5710) µm
-                 | 5700 µm |
-                 +-- MIDLINE --+
-
 25 µm atlas
 
   RIGHT cell, index 227             LEFT cell, index 228
@@ -317,7 +287,26 @@ ML midline         != a complete bregma calibration
 renderer anchor    != bregma unless a profile explicitly establishes it
 ```
 
-An eventual stereotaxic profile must name its source and version and store its landmark,
+The UI nevertheless allows the user to preserve the standard surgical entry exactly as entered
+from bregma. Its signs are:
+
+```text
+AP+ anterior / forward      AP− posterior / back
+ML+ right                   ML− left
+DV+ dorsal / up             DV− deep / ventral
+```
+
+For example, `[AP,ML,DV] = [-1.25,-0.70,-2.40] mm` records a point 1.25 mm posterior,
+0.70 mm left, and 2.40 mm deep/ventral from bregma. The stored frame ID is
+`BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED`. It deliberately has no atlas coordinate,
+`projected=false`, and `usable_for_navigation=false`.
+
+This unprojected record does not contradict the absence of an official CCF bregma: it preserves
+the user's surgical-frame input without pretending to know the bregma/skull-to-atlas transform.
+The application must not place an atlas marker, calculate a trajectory, sample a region, or
+compare the target with a vascular overlay from that record alone.
+
+A projected stereotaxic profile must name its source and version and store its landmark,
 affine/transform, axis signs, units, atlas identity, hash, voxel convention, and uncertainty.
 The IBL bregma estimate is an IBL convention and may only be offered as a named opt-in profile;
 it must not be silently presented as Allen ground truth. No tilt or DV scale is hidden in the
@@ -326,14 +315,25 @@ base atlas-to-world transform.
 Millimetre values in the UI are formatting conversions from a declared profile or frame. A
 unit conversion alone does not create stereotaxic calibration.
 
+## Dorsal overlay plane
+
+The dorsal atlas image, the population-density projection, and a registered subject image share a
+display grid with AP as rows and ML as columns. The population layer is a maximum over DV, so it
+contains no recoverable DV position. A subject dorsal image is mapped from `[pixel column,
+pixel row]` into atlas physical `[AP,ML]` micrometres through an explicit registered transform.
+
+Compositing either image over the brain is a visualization operation. It does not convert a
+two-dimensional image into a 3D vessel graph, and it cannot establish clearance to an
+unprojected bregma target.
+
 ## Provenance and external Allen data
 
-The Phase 1 BrainGlobe package provenance keeps these identities separate:
+The current BrainGlobe package provenance keeps these identities separate:
 
 ```text
 framework / publication:  Allen CCFv3, Wang et al. 2020
 source annotation request: annotation/ccf_2017
-BrainGlobe atlas package:  v1.2 for current Allen 10/25/50/100 µm packages
+BrainGlobe atlas package:  allen_mouse_25um v1.2
 BrainGlobe library:        2.3.1
 ```
 

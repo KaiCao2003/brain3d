@@ -8,9 +8,11 @@ columns; it never performs an implicit anatomical flip.
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
+from collections.abc import Collection
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -85,6 +87,21 @@ class SliceFrame:
     rgb: NDArray[np.uint8]
 
 
+@dataclass(frozen=True, slots=True)
+class _SliceCacheKey:
+    """Canonical inputs that can change a composed slice frame."""
+
+    orientation: SliceOrientation
+    slice_index: int
+    contrast_low: float | None
+    contrast_high: float | None
+    selected_region_ids: tuple[int, ...]
+    selected_color: RGBColor
+    selected_alpha: float
+    outline_color: RGBColor
+    outline_alpha: float
+
+
 def extract_asr_slice(
     volume: NDArray[Any],
     orientation: SliceOrientation | str,
@@ -130,9 +147,33 @@ def normalize_grayscale(
     dividing by zero.
     """
 
-    values = np.asarray(image, dtype=np.float64)
-    if values.ndim != 2:
-        raise ValueError(f"grayscale input must be two-dimensional, got shape {values.shape}")
+    source = np.asarray(image)
+    if source.ndim != 2:
+        raise ValueError(f"grayscale input must be two-dimensional, got shape {source.shape}")
+
+    # Reviewed Allen references are uint16.  Mapping them through a 65,536-entry
+    # lookup table produces the same float64 subtract/scale/clip/rint result as
+    # a slice-sized float64 working copy while bounding temporary memory and GUI
+    # latency for large atlas views.
+    if source.dtype == np.dtype(np.uint16):
+        resolved_low = float(source.min()) if low is None else float(low)
+        resolved_high = float(source.max()) if high is None else float(high)
+        if not math.isfinite(resolved_low) or not math.isfinite(resolved_high):
+            raise ValueError("contrast limits must be finite")
+        if resolved_high < resolved_low:
+            raise ValueError("contrast high limit must be greater than or equal to the low limit")
+        if resolved_high == resolved_low:
+            return np.zeros(source.shape, dtype=np.uint8)
+
+        lookup = np.arange(1 << 16, dtype=np.float64)
+        lookup -= resolved_low
+        lookup /= resolved_high - resolved_low
+        np.clip(lookup, 0.0, 1.0, out=lookup)
+        lookup *= 255.0
+        np.rint(lookup, out=lookup)
+        return np.asarray(lookup.astype(np.uint8)[source], dtype=np.uint8)
+
+    values = np.asarray(source, dtype=np.float64)
     finite = np.isfinite(values)
     finite_values = values[finite]
     if finite_values.size == 0:
@@ -175,12 +216,17 @@ def annotation_outline(annotation: NDArray[Any]) -> NDArray[np.bool_]:
 class SliceRenderer:
     """Render and map orthogonal slices from one explicit ASR test or atlas volume."""
 
+    _CACHE_FRAMES_PER_ORIENTATION = 2
+    _CACHE_MAX_BYTES = 64 * 1024 * 1024
+
     def __init__(
         self,
         reference: NDArray[Any],
         annotation: NDArray[Any],
         *,
         resolution_um: tuple[float, float, float],
+        sagittal_reference: NDArray[Any] | None = None,
+        sagittal_annotation: NDArray[Any] | None = None,
     ) -> None:
         reference_values = np.asarray(reference)
         annotation_values = np.asarray(annotation)
@@ -201,10 +247,41 @@ class SliceRenderer:
         ):
             raise ValueError("resolution_um must contain three positive finite ASR values")
 
+        if (sagittal_reference is None) != (sagittal_annotation is None):
+            raise ValueError("sagittal reference and annotation arrays must be provided together")
+        optimized_reference = None if sagittal_reference is None else np.asarray(sagittal_reference)
+        optimized_annotation = (
+            None if sagittal_annotation is None else np.asarray(sagittal_annotation)
+        )
+        if optimized_reference is not None and optimized_annotation is not None:
+            sagittal_shape = (
+                reference_values.shape[2],
+                reference_values.shape[1],
+                reference_values.shape[0],
+            )
+            if (
+                optimized_reference.shape != sagittal_shape
+                or optimized_annotation.shape != sagittal_shape
+            ):
+                raise ValueError(
+                    f"optimized sagittal arrays must use exact [ML,DV,AP] shape {sagittal_shape}"
+                )
+            if optimized_reference.dtype != reference_values.dtype:
+                raise TypeError("optimized sagittal reference dtype must match the ASR reference")
+            if optimized_annotation.dtype != annotation_values.dtype:
+                raise TypeError("optimized sagittal annotation dtype must match the ASR annotation")
+
         self.reference = reference_values
         self.annotation = annotation_values
+        self._sagittal_reference = optimized_reference
+        self._sagittal_annotation = optimized_annotation
         self.resolution_um = tuple(float(value) for value in resolution_um)
         self.shape: tuple[int, int, int] = tuple(int(size) for size in reference_values.shape)  # type: ignore[assignment]
+        # A renderer belongs to exactly one atlas instance, so cached frames can
+        # never be reused across atlas volumes. Two entries per orientation
+        # cover the paired slice views while bounding retained working arrays.
+        self._frame_cache: OrderedDict[_SliceCacheKey, tuple[SliceFrame, int]] = OrderedDict()
+        self._frame_cache_bytes = 0
 
     def image_shape(self, orientation: SliceOrientation | str) -> tuple[int, int]:
         """Return displayed ``(rows, columns)`` for an orientation."""
@@ -223,14 +300,22 @@ class SliceRenderer:
     ) -> NDArray[Any]:
         """Extract a reference image with the documented displayed axes."""
 
-        return extract_asr_slice(self.reference, orientation, slice_index)
+        normalized = SliceOrientation.coerce(orientation)
+        if normalized is SliceOrientation.SAGITTAL and self._sagittal_reference is not None:
+            index = self._validate_slice_index(normalized, slice_index)
+            return cast(NDArray[Any], self._sagittal_reference[index])
+        return extract_asr_slice(self.reference, normalized, slice_index)
 
     def annotation_slice(
         self, orientation: SliceOrientation | str, slice_index: int
     ) -> NDArray[Any]:
         """Extract an annotation image with the documented displayed axes."""
 
-        return extract_asr_slice(self.annotation, orientation, slice_index)
+        normalized = SliceOrientation.coerce(orientation)
+        if normalized is SliceOrientation.SAGITTAL and self._sagittal_annotation is not None:
+            index = self._validate_slice_index(normalized, slice_index)
+            return cast(NDArray[Any], self._sagittal_annotation[index])
+        return extract_asr_slice(self.annotation, normalized, slice_index)
 
     def render_slice(
         self,
@@ -240,6 +325,7 @@ class SliceRenderer:
         contrast_low: float | None = None,
         contrast_high: float | None = None,
         selected_region_id: int | None = None,
+        selected_region_ids: Collection[int] | None = None,
         selected_color: RGBColor = (0, 174, 239),
         selected_alpha: float = 0.35,
         outline_color: RGBColor = (255, 170, 0),
@@ -248,39 +334,117 @@ class SliceRenderer:
         """Compose grayscale, annotation outlines, and a selected-region overlay."""
 
         normalized = SliceOrientation.coerce(orientation)
-        reference = self.reference_slice(normalized, slice_index)
-        annotation = self.annotation_slice(normalized, slice_index)
+        index = self._validate_slice_index(normalized, slice_index)
+        resolved_low = None if contrast_low is None else float(contrast_low)
+        resolved_high = None if contrast_high is None else float(contrast_high)
+        region_ids: set[int] = set()
+        if selected_region_id is not None:
+            region_ids.add(_integer_value(selected_region_id, "selected region ID"))
+        if selected_region_ids is not None:
+            region_ids.update(
+                _integer_value(region_id, "selected region ID") for region_id in selected_region_ids
+            )
+        selected_alpha_value = _alpha_value(selected_alpha, "selected alpha")
+        outline_alpha_value = _alpha_value(outline_alpha, "outline alpha")
+        selected_color_value = _color_components(selected_color, "selected color")
+        outline_color_value = _color_components(outline_color, "outline color")
+        cache_key = _SliceCacheKey(
+            orientation=normalized,
+            slice_index=index,
+            contrast_low=resolved_low,
+            contrast_high=resolved_high,
+            selected_region_ids=tuple(sorted(region_ids)),
+            selected_color=selected_color_value,
+            selected_alpha=selected_alpha_value,
+            outline_color=outline_color_value,
+            outline_alpha=outline_alpha_value,
+        )
+        cached = self._frame_cache.get(cache_key)
+        if cached is not None:
+            self._frame_cache.move_to_end(cache_key)
+            return cached[0]
+
+        reference = self.reference_slice(normalized, index)
+        annotation = self.annotation_slice(normalized, index)
         grayscale = normalize_grayscale(
             reference,
-            low=contrast_low,
-            high=contrast_high,
+            low=resolved_low,
+            high=resolved_high,
         )
         outline = annotation_outline(annotation)
         selected = np.zeros(annotation.shape, dtype=np.bool_)
-        if selected_region_id is not None:
-            region_id = _integer_value(selected_region_id, "selected region ID")
-            selected = annotation == region_id
+        if len(region_ids) == 1:
+            selected = annotation == next(iter(region_ids))
+        elif region_ids:
+            selected = np.isin(annotation, tuple(region_ids))
 
-        selected_alpha_value = _alpha_value(selected_alpha, "selected alpha")
-        outline_alpha_value = _alpha_value(outline_alpha, "outline alpha")
-        selected_rgb = _color_value(selected_color, "selected color")
-        outline_rgb = _color_value(outline_color, "outline color")
+        composed = _compose_rgb(
+            grayscale,
+            selected,
+            selected_color_value,
+            selected_alpha_value,
+            outline,
+            outline_color_value,
+            outline_alpha_value,
+        )
 
-        rgb = np.repeat(grayscale[:, :, np.newaxis], 3, axis=2).astype(np.float32)
-        _blend(rgb, selected, selected_rgb, selected_alpha_value)
-        _blend(rgb, outline, outline_rgb, outline_alpha_value)
-        composed = np.rint(np.clip(rgb, 0.0, 255.0)).astype(np.uint8)
-
-        return SliceFrame(
+        frame = SliceFrame(
             orientation=normalized,
-            slice_index=_integer_value(slice_index, "slice index"),
+            slice_index=index,
             reference=reference,
             annotation=annotation,
             grayscale=grayscale,
             annotation_outline=outline,
             selected_region=selected,
-            rgb=np.ascontiguousarray(composed),
+            rgb=composed,
         )
+        self._freeze_frame(frame)
+        self._cache_frame(cache_key, frame)
+        return frame
+
+    def _cache_frame(self, cache_key: _SliceCacheKey, frame: SliceFrame) -> None:
+        """Retain one immutable frame without exceeding either cache bound."""
+
+        cache_bytes = sum(
+            array.nbytes
+            for array in (
+                frame.grayscale,
+                frame.annotation_outline,
+                frame.selected_region,
+                frame.rgb,
+            )
+        )
+        if cache_bytes > self._CACHE_MAX_BYTES:
+            return
+
+        self._frame_cache[cache_key] = (frame, cache_bytes)
+        self._frame_cache_bytes += cache_bytes
+        orientation_keys = [
+            key for key in self._frame_cache if key.orientation is cache_key.orientation
+        ]
+        while len(orientation_keys) > self._CACHE_FRAMES_PER_ORIENTATION:
+            self._evict_frame(orientation_keys.pop(0))
+        while self._frame_cache_bytes > self._CACHE_MAX_BYTES:
+            oldest_key = next(iter(self._frame_cache))
+            self._evict_frame(oldest_key)
+
+    def _evict_frame(self, cache_key: _SliceCacheKey) -> None:
+        _, cache_bytes = self._frame_cache.pop(cache_key)
+        self._frame_cache_bytes -= cache_bytes
+
+    @staticmethod
+    def _freeze_frame(frame: SliceFrame) -> None:
+        """Make every array exposed by a shared frame reject writes."""
+
+        for array in (
+            frame.reference,
+            frame.annotation,
+            frame.grayscale,
+            frame.annotation_outline,
+            frame.selected_region,
+            frame.rgb,
+        ):
+            array.setflags(write=False)
 
     def pixel_to_voxel(
         self,
@@ -401,7 +565,7 @@ def _alpha_value(value: float, label: str) -> float:
     return result
 
 
-def _color_value(value: RGBColor, label: str) -> NDArray[np.float32]:
+def _color_components(value: RGBColor, label: str) -> RGBColor:
     if len(value) != 3 or any(
         isinstance(component, bool)
         or not isinstance(component, (int, np.integer))
@@ -410,17 +574,45 @@ def _color_value(value: RGBColor, label: str) -> NDArray[np.float32]:
         for component in value
     ):
         raise ValueError(f"{label} must contain three integer values in [0, 255]")
-    return np.asarray(value, dtype=np.float32)
+    return (int(value[0]), int(value[1]), int(value[2]))
 
 
-def _blend(
-    rgb: NDArray[np.float32],
-    mask: NDArray[np.bool_],
-    color: NDArray[np.float32],
-    alpha: float,
-) -> None:
-    """Blend one solid color through a boolean mask using NumPy indexing."""
+def _compose_rgb(
+    grayscale: NDArray[np.uint8],
+    selected: NDArray[np.bool_],
+    selected_color: RGBColor,
+    selected_alpha: float,
+    outline: NDArray[np.bool_],
+    outline_color: RGBColor,
+    outline_alpha: float,
+) -> NDArray[np.uint8]:
+    """Blend overlays exactly while allocating float pixels only where needed."""
 
-    if alpha == 0.0 or not np.any(mask):
-        return
-    rgb[mask] = rgb[mask] * (1.0 - alpha) + color * alpha
+    rgb = np.repeat(grayscale[:, :, np.newaxis], 3, axis=2)
+    active = np.zeros(grayscale.shape, dtype=np.bool_)
+    if selected_alpha != 0.0:
+        active |= selected
+    if outline_alpha != 0.0:
+        active |= outline
+    if not np.any(active):
+        return np.ascontiguousarray(rgb)
+
+    # Preserve the former float32 operation order (selection, then outline,
+    # then one final rounding) for pixel-exact output at arbitrary alphas.
+    pixels = np.repeat(grayscale[active, np.newaxis], 3, axis=1).astype(np.float32)
+    if selected_alpha != 0.0:
+        selected_pixels = selected[active]
+        if np.any(selected_pixels):
+            selected_rgb = np.asarray(selected_color, dtype=np.float32)
+            pixels[selected_pixels] = (
+                pixels[selected_pixels] * (1.0 - selected_alpha) + selected_rgb * selected_alpha
+            )
+    if outline_alpha != 0.0:
+        outline_pixels = outline[active]
+        if np.any(outline_pixels):
+            outline_rgb = np.asarray(outline_color, dtype=np.float32)
+            pixels[outline_pixels] = (
+                pixels[outline_pixels] * (1.0 - outline_alpha) + outline_rgb * outline_alpha
+            )
+    rgb[active] = np.rint(np.clip(pixels, 0.0, 255.0)).astype(np.uint8)
+    return np.ascontiguousarray(rgb)

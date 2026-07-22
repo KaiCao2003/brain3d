@@ -2,10 +2,11 @@
 
 ## Current implementation status
 
-**No Neuropixels or generic implant geometry is implemented in Phase 1.** Probe model files,
-probe rendering, trajectories, recording-site mapping, and multi-probe planning are Phase 3
-work. Nothing in the current application should be interpreted as a probe shank, recording site,
-implant trajectory, or hardware-clearance calculation.
+**No reviewed Neuropixels or generic probe geometry is enabled in the current application.**
+Lower-level trajectory/domain groundwork is not an approved hardware profile. Probe rendering,
+recording-site mapping, and multi-probe planning remain later work. An unprojected bregma
+AP/ML/DV implant target is a coordinate record only; it must not be interpreted as a probe shank,
+recording site, projected trajectory, or hardware/vessel-clearance calculation.
 
 This file records sources inspected during Phase 0 and the acceptance policy for later model
 data. It intentionally contains no transcribed geometry table: a partial dimension list would

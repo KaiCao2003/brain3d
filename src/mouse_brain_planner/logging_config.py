@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -14,6 +15,36 @@ from mouse_brain_planner.version import __version__
 
 LOGGER_NAMESPACE = "mouse_brain_planner"
 LOG_FILENAME = "application.jsonl"
+MAX_LOG_MESSAGE_CHARS = 4_000
+MAX_LOG_EXCEPTION_CHARS = 8_000
+
+_URL_USERINFO = re.compile(
+    r"(?P<scheme>\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@",
+    re.IGNORECASE,
+)
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?P<key>\b(?:password|passwd|secret|token|api[_-]?key|access[_-]?token|authorization)\b)"
+    r"(?P<separator>\s*[:=]\s*)(?P<value>[^\s,;]+)",
+    re.IGNORECASE,
+)
+_BEARER_TOKEN = re.compile(r"\bBearer\s+[^\s,;]+", re.IGNORECASE)
+_ABSOLUTE_POSIX_PATH = re.compile(r"(?<![A-Za-z0-9_.:/-])/(?:[^/\s:]+/)*[^/\s:,;\]\[(){}]+")
+
+
+def _redact_private_text(value: str, *, max_chars: int) -> str:
+    """Remove credentials and private filesystem locations from one log field."""
+
+    redacted = _URL_USERINFO.sub(r"\g<scheme><redacted>@", value)
+    redacted = _SECRET_ASSIGNMENT.sub(
+        r"\g<key>\g<separator><redacted>",
+        redacted,
+    )
+    redacted = _BEARER_TOKEN.sub("Bearer <redacted>", redacted)
+    redacted = _ABSOLUTE_POSIX_PATH.sub("<path>", redacted)
+    if len(redacted) <= max_chars:
+        return redacted
+    suffix = "…<truncated>"
+    return redacted[: max_chars - len(suffix)] + suffix
 
 
 class JsonLineFormatter(logging.Formatter):
@@ -28,15 +59,26 @@ class JsonLineFormatter(logging.Formatter):
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": _redact_private_text(
+                record.getMessage(),
+                max_chars=MAX_LOG_MESSAGE_CHARS,
+            ),
             "application_version": __version__,
             "thread": record.threadName,
         }
         for field in self._extra_fields:
             if field in record.__dict__:
-                payload[field] = record.__dict__[field]
+                field_value = record.__dict__[field]
+                payload[field] = (
+                    _redact_private_text(field_value, max_chars=MAX_LOG_MESSAGE_CHARS)
+                    if isinstance(field_value, str)
+                    else field_value
+                )
         if record.exc_info is not None:
-            payload["exception"] = self.formatException(record.exc_info)
+            payload["exception"] = _redact_private_text(
+                self.formatException(record.exc_info),
+                max_chars=MAX_LOG_EXCEPTION_CHARS,
+            )
         return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
 

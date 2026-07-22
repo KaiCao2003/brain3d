@@ -3,20 +3,72 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, cast
+from typing import ClassVar, Literal, Protocol, cast
 
 import numpy as np
 import pyvista as pv
-from numpy.typing import NDArray
 
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
+from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import (
     BrainGlobePhysicalPoint,
     SurgeryWorldPoint,
 )
 
 MeshSource = str | Path | pv.DataSet
+CancellationCheck = Callable[[], None]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedWorldMesh:
+    """Immutable handoff for geometry already mapped into renderer world space.
+
+    The VTK dataset itself is treated as read-only after construction.  Atlas
+    metadata and the exact physical anchor travel with it so a GUI scene cannot
+    silently render geometry prepared for another atlas package or origin.
+    """
+
+    frame_id: ClassVar[Literal["SURGERY_WORLD_RAS_UM"]] = "SURGERY_WORLD_RAS_UM"
+
+    mesh: pv.PolyData
+    atlas_metadata: AtlasMetadata
+    renderer_anchor: BrainGlobePhysicalPoint
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.mesh, pv.PolyData):
+            raise TypeError("prepared world mesh must contain PyVista PolyData")
+        # This validates the anchor frame, atlas key/version, finite values, and
+        # half-open atlas bounds even if a caller bypassed normal worker setup.
+        BrainGlobeAtlasSpace(self.atlas_metadata).world_transform_matrix(self.renderer_anchor)
+
+    def validate_for(
+        self,
+        space: BrainGlobeAtlasSpace,
+        anchor: BrainGlobePhysicalPoint,
+    ) -> pv.PolyData:
+        """Fail closed unless this prepared geometry matches the target scene."""
+
+        expected_metadata = space.metadata.model_dump(exclude={"cache_path"})
+        actual_metadata = self.atlas_metadata.model_dump(exclude={"cache_path"})
+        if actual_metadata != expected_metadata:
+            raise ValueError(
+                "prepared mesh atlas identity does not match the target scene: "
+                f"prepared {self.atlas_metadata.atlas_key} "
+                f"v{self.atlas_metadata.atlas_package_version}, target "
+                f"{space.metadata.atlas_key} v{space.metadata.atlas_package_version}"
+            )
+        # Validate both points against the target space before comparing their
+        # exact persisted values.  An anchor difference changes every vertex.
+        space.world_transform_matrix(anchor)
+        space.world_transform_matrix(self.renderer_anchor)
+        if self.renderer_anchor != anchor:
+            raise ValueError(
+                "prepared mesh renderer anchor does not match the target scene: "
+                f"prepared {self.renderer_anchor.as_tuple()}, target {anchor.as_tuple()}"
+            )
+        return self.mesh
 
 
 class PlotterProtocol(Protocol):
@@ -65,16 +117,31 @@ def _vtk_object_identity(value: object) -> str:
 
 def prepare_world_mesh(
     source: MeshSource,
-    transform: NDArray[np.float64],
-) -> pv.PolyData:
-    """Load/copy a mesh, transform ASR µm to world µm, and repair winding."""
+    space: BrainGlobeAtlasSpace,
+    anchor: BrainGlobePhysicalPoint,
+    *,
+    check_cancelled: CancellationCheck | None = None,
+) -> PreparedWorldMesh:
+    """Prepare ASR geometry completely before it reaches the GUI thread."""
 
+    def cancellation_point() -> None:
+        if check_cancelled is not None:
+            check_cancelled()
+
+    # Each potentially expensive stage is bracketed so project replacement or
+    # application shutdown suppresses delivery at the earliest safe boundary.
+    cancellation_point()
     dataset = pv.read(str(source)) if isinstance(source, (str, Path)) else source.copy(deep=True)
+    cancellation_point()
     surface = dataset if isinstance(dataset, pv.PolyData) else dataset.extract_surface()
+    cancellation_point()
+    transform = space.world_transform_matrix(anchor)
     transformed = surface.transform(transform, inplace=False)
+    cancellation_point()
     if np.linalg.det(transform[:3, :3]) < 0:
         transformed = transformed.flip_faces(inplace=False)
-    return cast(
+    cancellation_point()
+    world_mesh = cast(
         pv.PolyData,
         transformed.compute_normals(
             cell_normals=True,
@@ -82,6 +149,12 @@ def prepare_world_mesh(
             consistent_normals=True,
             inplace=False,
         ),
+    )
+    cancellation_point()
+    return PreparedWorldMesh(
+        mesh=world_mesh,
+        atlas_metadata=space.metadata,
+        renderer_anchor=anchor,
     )
 
 
@@ -97,18 +170,21 @@ class SceneController:
         self.plotter = plotter
         self.space = space
         self.anchor = anchor
-        self._region_sources: dict[int, MeshSource] = {}
-        self._region_source_keys: dict[int, str | int] = {}
+        # Constructor validation makes a malformed or cross-atlas scene fail
+        # before any native VTK actor is allocated.
+        self.space.world_transform_matrix(self.anchor)
+        self._region_sources: dict[int, PreparedWorldMesh] = {}
         self._region_world_meshes: dict[int, pv.PolyData] = {}
         self._root_actor_key: str | None = None
         self._region_actor_keys: dict[int, str] = {}
+        self._actor_region_ids: dict[str, int] = {}
         self._pickable_actor_keys: set[str] = set()
         self._disposed = False
 
-    def load_root_mesh(self, source: MeshSource) -> None:
-        """Show the atlas root as a translucent anatomical shell."""
+    def load_root_mesh(self, source: PreparedWorldMesh) -> None:
+        """Create the atlas-root actor from worker-prepared world geometry."""
 
-        mesh = prepare_world_mesh(source, self.space.world_transform_matrix(self.anchor))
+        mesh = source.validate_for(self.space, self.anchor)
         actor = self.plotter.add_mesh(
             mesh,
             name="atlas-root",
@@ -117,13 +193,14 @@ class SceneController:
             smooth_shading=True,
             pickable=True,
             reset_camera=True,
+            render=False,
         )
         self._root_actor_key = _vtk_object_identity(actor)
         self._pickable_actor_keys.add(self._root_actor_key)
         self.plotter.add_axes(
-            xlabel="ML right (+)",
-            ylabel="AP anterior (+)",
-            zlabel="DV dorsal (+)",
+            xlabel="ML Right (+) / Left (-)",
+            ylabel="AP Anterior (+) / Posterior (-)",
+            zlabel="DV Superior/Dorsal (+) / Inferior/Ventral (-)",
         )
         self.plotter.set_background((0.055, 0.065, 0.085))
         self.plotter.render()
@@ -131,7 +208,7 @@ class SceneController:
     def set_region(
         self,
         structure_id: int,
-        source: MeshSource,
+        source: PreparedWorldMesh,
         *,
         rgb: tuple[int, int, int],
         opacity: float,
@@ -140,25 +217,21 @@ class SceneController:
         """Add, update, or hide one lazily requested region mesh."""
 
         name = f"region-{structure_id}"
-        self._region_sources[structure_id] = source
+        # Validate before touching actor or cache state.  A late payload from a
+        # replaced atlas therefore cannot partially mutate the current scene.
+        mesh = source.validate_for(self.space, self.anchor)
         previous_actor_key = self._region_actor_keys.pop(structure_id, None)
         if previous_actor_key is not None:
             self._pickable_actor_keys.discard(previous_actor_key)
+            self._actor_region_ids.pop(previous_actor_key, None)
         if not visible:
-            self.plotter.remove_actor(name, reset_camera=False, render=True)
+            self._region_sources.pop(structure_id, None)
+            self._region_world_meshes.pop(structure_id, None)
+            self.plotter.remove_actor(name, reset_camera=False, render=False)
+            self.plotter.render()
             return
-        source_key: str | int
-        if isinstance(source, (str, Path)):
-            source_key = str(Path(source).resolve())
-        else:
-            source_key = id(source)
-        if self._region_source_keys.get(structure_id) != source_key:
-            self._region_world_meshes[structure_id] = prepare_world_mesh(
-                source,
-                self.space.world_transform_matrix(self.anchor),
-            )
-            self._region_source_keys[structure_id] = source_key
-        mesh = self._region_world_meshes[structure_id]
+        self._region_sources[structure_id] = source
+        self._region_world_meshes[structure_id] = mesh
         color = tuple(component / 255.0 for component in rgb)
         actor = self.plotter.add_mesh(
             mesh,
@@ -168,9 +241,11 @@ class SceneController:
             smooth_shading=True,
             pickable=True,
             reset_camera=False,
+            render=False,
         )
         actor_key = _vtk_object_identity(actor)
         self._region_actor_keys[structure_id] = actor_key
+        self._actor_region_ids[actor_key] = structure_id
         self._pickable_actor_keys.add(actor_key)
         self.plotter.render()
 
@@ -193,21 +268,27 @@ class SceneController:
                 line_width=2.0,
                 pickable=False,
                 reset_camera=False,
+                render=False,
             )
         self.plotter.render()
 
     def enable_physical_picking(
         self,
         callback: Callable[[BrainGlobePhysicalPoint], None],
+        *,
+        region_callback: Callable[[int, BrainGlobePhysicalPoint], None] | None = None,
     ) -> None:
-        """Map renderer picks back into checked BrainGlobe physical space."""
+        """Map renderer picks back to physical space and preserve actor identity."""
 
         def picked(
             world_values: tuple[float, float, float],
             picker: PickerProtocol,
         ) -> None:
             actor = picker.GetActor()
-            if actor is None or _vtk_object_identity(actor) not in self._pickable_actor_keys:
+            if actor is None:
+                return
+            actor_key = _vtk_object_identity(actor)
+            if actor_key not in self._pickable_actor_keys:
                 return
             try:
                 world = SurgeryWorldPoint(
@@ -222,7 +303,11 @@ class SceneController:
                 # Root meshes may extend slightly beyond the half-open annotation
                 # volume. An invalid surface pick is ignored at the VTK boundary.
                 return
-            callback(physical)
+            region_id = self._actor_region_ids.get(actor_key)
+            if region_id is not None and region_callback is not None:
+                region_callback(region_id, physical)
+            else:
+                callback(physical)
 
         self.plotter.enable_point_picking(
             callback=picked,
@@ -249,14 +334,24 @@ class SceneController:
             raise ValueError(f"unknown anatomical camera preset: {preset}")
         view_up = (0.0, 0.0, 1.0) if preset not in {"dorsal", "ventral"} else (0.0, 1.0, 0.0)
         self.plotter.camera_position = [positions[preset], (0.0, 0.0, 0.0), view_up]
-        self.plotter.reset_camera()
+        self.plotter.reset_camera(render=False)
         self.plotter.render()
 
     def reset_camera(self) -> None:
         """Reset the active camera around visible actors."""
 
-        self.plotter.reset_camera()
+        self.plotter.reset_camera(render=False)
         self.plotter.render()
+
+    def center_region(self, structure_id: int) -> bool:
+        """Frame one currently visible region and report whether it was available."""
+
+        mesh = self._region_world_meshes.get(structure_id)
+        if mesh is None or structure_id not in self._region_actor_keys:
+            return False
+        self.plotter.reset_camera(bounds=mesh.bounds, render=False)
+        self.plotter.render()
+        return True
 
     def dispose(self) -> None:
         """Release renderer-owned VTK resources exactly once."""
@@ -265,9 +360,9 @@ class SceneController:
             return
         self._disposed = True
         self._region_sources.clear()
-        self._region_source_keys.clear()
         self._region_world_meshes.clear()
         self._region_actor_keys.clear()
+        self._actor_region_ids.clear()
         self._pickable_actor_keys.clear()
         self._root_actor_key = None
         self.plotter.clear()

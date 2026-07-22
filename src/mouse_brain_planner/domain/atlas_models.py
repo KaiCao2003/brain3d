@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -37,6 +38,7 @@ class AtlasMetadata(BaseModel):
     source_annotation: str | None = None
     framework_name: str = "Allen CCFv3"
     symmetric: bool
+    midline_ml_um: float = Field(gt=0, allow_inf_nan=False)
     axes: tuple[AtlasAxis, AtlasAxis, AtlasAxis]
 
     @field_validator("resolution_um")
@@ -84,13 +86,29 @@ class AtlasMetadata(BaseModel):
 
     @model_validator(mode="after")
     def validate_axis_voxel_sizes(self) -> Self:
-        """Require axis descriptors to repeat the canonical resolution exactly."""
+        """Require coherent axis sizes and an explicit atlas midline."""
 
         axis_sizes = tuple(axis.voxel_size_um for axis in self.axes)
         if axis_sizes != self.resolution_um:
             raise ValueError(
                 "atlas axis voxel sizes must equal resolution_um; "
                 f"got axes={axis_sizes}, resolution={self.resolution_um}"
+            )
+        ml_extent_um = float(self.shape_voxels[2] * self.resolution_um[2])
+        if self.midline_ml_um >= ml_extent_um:
+            raise ValueError(
+                f"atlas midline {self.midline_ml_um:g} µm must be inside "
+                f"the ML extent (0, {ml_extent_um:g}) µm"
+            )
+        if self.symmetric and not math.isclose(
+            self.midline_ml_um,
+            ml_extent_um / 2.0,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        ):
+            raise ValueError(
+                "a symmetric atlas midline must equal half the ML extent; "
+                f"got {self.midline_ml_um:g} µm for extent {ml_extent_um:g} µm"
             )
         return self
 

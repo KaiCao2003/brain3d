@@ -1,6 +1,6 @@
 # ADR-001: Native desktop technology stack
 
-- **Status:** Accepted
+- **Status:** Superseded for the macOS UI shell by ADR-004; retained for the Python scientific core
 - **Decision date:** 2026-07-21
 - **Applies to:** the first supported macOS release
 
@@ -12,9 +12,18 @@ build path that can be signed and notarized.
 
 ## Decision
 
+> **2026-07-21 revision:** repeated native Cocoa accessibility crashes demonstrated the blocking
+> compatibility issue anticipated below. [ADR-004](ADR-004-swiftui-hybrid-shell.md) replaces the
+> Qt application shell with SwiftUI while retaining this ADR's Python, BrainGlobe, NumPy/SciPy,
+> PyVista/VTK, validation, and data-source decisions as the scientific backend.
+
+The remainder of this ADR records the original Qt decision and its evidence. It is historical,
+not a current launch, UI, or packaging instruction; ADR-004 and [Packaging](../PACKAGING.md) are
+authoritative for the supported hybrid application.
+
 Build the application in Python 3.12 with PySide6 widgets, embed PyVista/VTK through
 `pyvistaqt.QtInteractor`, and use BrainGlobe AtlasAPI behind an application-owned adapter.
-The first distributable is a **macOS 13+ Apple Silicon (`arm64`)** application.
+The first distributable is a **macOS 14+ Apple Silicon (`arm64`)** application.
 
 The application imports PySide6 directly. Set `QT_API=pyside6` before importing QtPy,
 PyVistaQt, or other Qt-aware packages, and do not install a second Qt binding. Qt widgets and
@@ -29,7 +38,7 @@ is in the chosen stack.
 | Component | Pin | Role | Upstream |
 |---|---:|---|---|
 | Python | `>=3.12,<3.13` | Runtime and supported ABI | [python.org](https://www.python.org/downloads/) |
-| PySide6 | `6.11.1` | Native widgets, event loop, threading/signals | [PyPI](https://pypi.org/project/PySide6/6.11.1/) |
+| PySide6 | `6.10.3` | Native widgets, event loop, threading/signals | [PyPI](https://pypi.org/project/PySide6/6.10.3/) |
 | PyVista | `0.48.4` | High-level VTK meshes and scene operations | [PyPI](https://pypi.org/project/pyvista/0.48.4/) |
 | PyVistaQt | `0.12.0` | `QtInteractor` embedding | [PyPI](https://pypi.org/project/pyvistaqt/0.12.0/) |
 | VTK | `9.6.2` | Rendering and geometry engine | [PyPI](https://pypi.org/project/vtk/9.6.2/) |
@@ -80,7 +89,22 @@ Release validation must cover the Cocoa Qt platform plugin, a real VTK render, a
 download/cancel/offline reuse, normal shutdown, Developer ID signing, hardened runtime,
 notarization, and stapling.
 
-PySide6 6.11.1 declares `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`; Qt also offers
+The UI currently pins PySide6 6.10.3. Native macOS accessibility traversal reproduced the same
+Cocoa use-after-free on both 6.11.1 and 6.10.3 while a selected item-view hierarchy transitioned.
+The symbolicated fault is
+`-[QMacAccessibilityElement accessibilitySelectedChildren] + 204`, where Qt dereferences a stale
+`QAccessibleTableCell` returned by the selection interface. The application therefore clears
+selection and current index synchronously while the old hierarchy is still live—before atlas
+dialog accept/reject and before a region-view `setModel()`—and stores the accepted atlas choice
+separately. It also uses detached `QStandardItemModel` construction followed by an atomic view
+swap, never publishes a zero-row region model, and retains retired
+dialog/model/selection/progress hierarchies until the owning main window is torn down. Atlas
+replacement recovery reports status without entering a nested modal event loop. These lifetime
+mitigations require repeated native Cocoa accessibility scans; offscreen Qt tests alone do not
+establish safety. Any Qt update must repeat native VoiceOver/accessibility traversal, selection,
+slider, atlas-load/replacement, VTK, and shutdown journeys before the pin changes.
+
+PySide6 6.10.3 declares `LGPL-3.0-only OR GPL-2.0-only OR GPL-3.0-only`; Qt also offers
 commercial terms. An open-source distribution
 must ship the applicable notices and preserve LGPL replacement/relink rights. A proprietary or
 Mac App Store distribution requires a fresh legal review and may require commercial Qt terms.
@@ -91,7 +115,7 @@ dependency retains its own obligations. See the [Qt for Python licenses](https:/
 
 ## Consequences
 
-- The supported matrix is deliberately narrow: Python 3.12, macOS 13+, arm64.
+- The supported matrix is deliberately narrow: Python 3.12, macOS 14+, arm64.
 - AtlasAPI, Qt, and rendering are accessed through small adapters so upstream changes remain
   localized.
 - Large atlas arrays and meshes must be loaded lazily; ADR-003 defines the memory and cache

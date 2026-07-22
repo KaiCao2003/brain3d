@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Self
 from uuid import UUID, uuid4
@@ -10,7 +11,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
+from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.vessel_models import (
+    DorsalVascularRegistration,
+    ReferenceVascularDensityProjectState,
+    SubjectVascularImage,
+    SubjectVascularOverlayState,
+)
 from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION, __version__
+
+MAX_PROJECT_EVENTS = 1_000
+MAX_SUBJECT_VASCULAR_IMAGES = 128
+MAX_DORSAL_VASCULAR_REGISTRATIONS = 1_024
+MAX_UNPROJECTED_BREGMA_TARGETS = 256
 
 
 def utc_now() -> datetime:
@@ -50,7 +63,7 @@ class ProjectEvent(BaseModel):
 
 
 class PlannerProject(BaseModel):
-    """Phase 1 project state."""
+    """Versioned animal surgery-planning project state."""
 
     model_config = ConfigDict(validate_assignment=True)
 
@@ -63,12 +76,30 @@ class PlannerProject(BaseModel):
     modified_at: datetime = Field(default_factory=utc_now)
     atlas: AtlasMetadata | None = None
     linked_cursor: BrainGlobePhysicalPoint | None = None
+    renderer_anchor: BrainGlobePhysicalPoint | None = None
     selected_region_id: int | None = Field(default=None, gt=0)
     region_display: list[RegionDisplayState] = Field(default_factory=list)
+    subject_vascular_images: list[SubjectVascularImage] = Field(
+        default_factory=list,
+        max_length=MAX_SUBJECT_VASCULAR_IMAGES,
+    )
+    dorsal_vascular_registrations: list[DorsalVascularRegistration] = Field(
+        default_factory=list,
+        max_length=MAX_DORSAL_VASCULAR_REGISTRATIONS,
+    )
+    subject_vascular_overlays: list[SubjectVascularOverlayState] = Field(
+        default_factory=list,
+        max_length=MAX_SUBJECT_VASCULAR_IMAGES,
+    )
+    reference_vascular_density: ReferenceVascularDensityProjectState | None = None
+    unprojected_bregma_targets: list[UnprojectedBregmaTarget] = Field(
+        default_factory=list,
+        max_length=MAX_UNPROJECTED_BREGMA_TARGETS,
+    )
     coordinate_convention: str = "BrainGlobe ASR: [AP,DV,ML], origin A/S/R, increasing P/I/L, µm"
     scientific_disclaimer_acknowledged: bool = False
     user_notes: str = ""
-    event_log: list[ProjectEvent] = Field(default_factory=list)
+    event_log: list[ProjectEvent] = Field(default_factory=list, max_length=MAX_PROJECT_EVENTS)
 
     @field_validator("schema_version")
     @classmethod
@@ -85,47 +116,172 @@ class PlannerProject(BaseModel):
     def validate_atlas_bound_state(self) -> Self:
         """Reject mixed atlas identities and out-of-bounds persisted cursors."""
 
+        target_ids = [target.target_uuid for target in self.unprojected_bregma_targets]
+        if len(target_ids) != len(set(target_ids)):
+            raise ValueError("unprojected bregma targets contain duplicate UUIDs")
+
         if self.atlas is None:
             if self.linked_cursor is not None:
                 raise ValueError("a linked atlas cursor requires atlas metadata")
+            if self.renderer_anchor is not None:
+                raise ValueError("a renderer anchor requires atlas metadata")
             if self.selected_region_id is not None or self.region_display:
                 raise ValueError("atlas region state requires atlas metadata")
+            if (
+                self.subject_vascular_images
+                or self.dorsal_vascular_registrations
+                or self.subject_vascular_overlays
+                or self.reference_vascular_density is not None
+            ):
+                raise ValueError("vascular state requires atlas metadata")
             return self
 
-        if self.linked_cursor is not None:
+        for label, point in (
+            ("linked cursor", self.linked_cursor),
+            ("renderer anchor", self.renderer_anchor),
+        ):
+            if point is None:
+                continue
             expected_identity = (
                 self.atlas.atlas_key,
                 self.atlas.atlas_package_version,
             )
-            cursor_identity = (
-                self.linked_cursor.atlas_key,
-                self.linked_cursor.atlas_version,
+            point_identity = (
+                point.atlas_key,
+                point.atlas_version,
             )
-            if cursor_identity != expected_identity:
+            if point_identity != expected_identity:
                 raise ValueError(
-                    f"linked cursor atlas identity {cursor_identity} does not match "
+                    f"{label} atlas identity {point_identity} does not match "
                     f"project atlas {expected_identity}"
                 )
             for axis, (value, extent) in enumerate(
                 zip(
-                    self.linked_cursor.as_tuple(),
+                    point.as_tuple(),
                     self.atlas.extent_um,
                     strict=True,
                 )
             ):
                 if value < 0 or value >= extent:
                     raise ValueError(
-                        f"linked cursor axis {axis} value {value:g} is outside "
+                        f"{label} axis {axis} value {value:g} is outside "
                         f"atlas bounds [0, {extent}) µm"
                     )
+
+        if self.renderer_anchor is None:
+            raise ValueError("an atlas-bound project requires a renderer anchor")
 
         region_ids = [state.structure_id for state in self.region_display]
         if len(region_ids) != len(set(region_ids)):
             raise ValueError("project region display state contains duplicate structure IDs")
+
+        image_ids = [image.image_uuid for image in self.subject_vascular_images]
+        if len(image_ids) != len(set(image_ids)):
+            raise ValueError("subject vascular images contain duplicate UUIDs")
+        image_paths = [
+            image.project_relative_path.casefold() for image in self.subject_vascular_images
+        ]
+        if len(image_paths) != len(set(image_paths)):
+            raise ValueError("subject vascular images contain duplicate package paths")
+        images_by_id = {image.image_uuid: image for image in self.subject_vascular_images}
+
+        registration_ids = [
+            registration.registration_uuid for registration in self.dorsal_vascular_registrations
+        ]
+        if len(registration_ids) != len(set(registration_ids)):
+            raise ValueError("dorsal vascular registrations contain duplicate UUIDs")
+        registration_versions = [
+            (registration.image_uuid, registration.version)
+            for registration in self.dorsal_vascular_registrations
+        ]
+        if len(registration_versions) != len(set(registration_versions)):
+            raise ValueError("each subject image registration version must be unique")
+        registrations_by_id = {
+            registration.registration_uuid: registration
+            for registration in self.dorsal_vascular_registrations
+        }
+        expected_atlas_identity = (
+            self.atlas.atlas_key,
+            self.atlas.atlas_package_version,
+        )
+        for registration in self.dorsal_vascular_registrations:
+            if registration.image_uuid not in images_by_id:
+                raise ValueError("dorsal vascular registration references an unknown image UUID")
+            registration_identity = (registration.atlas_key, registration.atlas_version)
+            if registration_identity != expected_atlas_identity:
+                raise ValueError(
+                    "dorsal vascular registration atlas identity "
+                    f"{registration_identity} does not match project atlas "
+                    f"{expected_atlas_identity}"
+                )
+
+        overlay_image_ids = [overlay.image_uuid for overlay in self.subject_vascular_overlays]
+        if len(overlay_image_ids) != len(set(overlay_image_ids)):
+            raise ValueError("subject vascular overlays contain duplicate image UUIDs")
+        for overlay in self.subject_vascular_overlays:
+            if overlay.image_uuid not in images_by_id:
+                raise ValueError("subject vascular overlay references an unknown image UUID")
+            overlay_registration: DorsalVascularRegistration | None = (
+                registrations_by_id.get(overlay.registration_uuid)
+                if overlay.registration_uuid is not None
+                else None
+            )
+            if overlay.registration_uuid is not None and overlay_registration is None:
+                raise ValueError("subject vascular overlay references an unknown registration UUID")
+            if (
+                overlay_registration is not None
+                and overlay_registration.image_uuid != overlay.image_uuid
+            ):
+                raise ValueError("subject vascular overlay registration belongs to another image")
+            if overlay.visible and overlay_registration is None:
+                raise ValueError("a visible subject vascular overlay requires a registration")
+            if overlay.segmentation_visible and not overlay.visible:
+                raise ValueError("subject vascular segmentation requires its overlay to be visible")
+            if overlay.dorsal_plane_dv_um is not None and not (
+                0 <= overlay.dorsal_plane_dv_um < self.atlas.extent_um[1]
+            ):
+                raise ValueError("subject vascular overlay DV plane is outside atlas bounds")
+
+        if self.reference_vascular_density is not None:
+            reference_identity = (
+                self.reference_vascular_density.target_atlas_key,
+                self.reference_vascular_density.target_atlas_version,
+            )
+            if reference_identity != expected_atlas_identity:
+                raise ValueError(
+                    "reference vascular density atlas identity "
+                    f"{reference_identity} does not match project atlas "
+                    f"{expected_atlas_identity}"
+                )
+            reference_extent = tuple(
+                size * self.reference_vascular_density.output_voxel_size_um
+                for size in self.reference_vascular_density.output_shape_asr
+            )
+            if any(
+                not math.isclose(
+                    actual,
+                    expected,
+                    rel_tol=1e-10,
+                    abs_tol=1e-6,
+                )
+                for actual, expected in zip(
+                    reference_extent,
+                    self.atlas.extent_um,
+                    strict=True,
+                )
+            ):
+                raise ValueError(
+                    "reference vascular density output extent "
+                    f"{reference_extent} does not match project atlas extent "
+                    f"{self.atlas.extent_um}"
+                )
         return self
 
     def touch(self, action: str, details: str | None = None) -> None:
         """Update modification time and append one reproducible event."""
 
         self.modified_at = utc_now()
+        overflow = len(self.event_log) - MAX_PROJECT_EVENTS + 1
+        if overflow > 0:
+            del self.event_log[:overflow]
         self.event_log.append(ProjectEvent(action=action, details=details))

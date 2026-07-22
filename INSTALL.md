@@ -1,13 +1,14 @@
 # Installation
 
-Mouse Brain Surgery Planner is currently a source-run Phase 1 application. The supported
-development target is **Apple Silicon (`arm64`), macOS 13 or later, and CPython 3.12**. A
-signed, notarized Finder-installable application is a Phase 5 deliverable and is not available
-yet; see [Packaging](PACKAGING.md).
+Mouse Brain Surgery Planner currently builds a native SwiftUI development `.app` that launches a
+separate Python scientific service from the repository environment. The supported development
+target is **Apple Silicon (`arm64`), macOS 14 or later, CPython 3.12, and Swift**. The development
+bundle is ad-hoc signed; a Developer ID-signed and notarized release is not available yet. See
+[Packaging](PACKAGING.md).
 
-> **Research-use warning:** This application is a planning and visualization tool, not a
-> certified surgical navigation or medical device. Independently verify all coordinates before
-> surgery.
+> **Animal-research-only warning:** This application is for mouse animal-research planning only,
+> never human or clinical use. It is not a certified surgical-navigation, medical, or veterinary
+> device. Independently verify all coordinates before every animal procedure.
 
 ## Prerequisites
 
@@ -41,28 +42,36 @@ uv sync --frozen --all-groups
 
 ## Launch
 
-Start the desktop application from the repository root:
+Build and start the supported native application from the repository root:
 
 ```bash
-uv run --frozen mouse-brain-planner
+native/Brain3D/Scripts/build-app.sh
+open native/Brain3D/build/Brain3D.app
 ```
 
-To open the GUI while forbidding a missing atlas from being downloaded in that session:
+The app discovers `.venv/bin/python` and `src/mouse_brain_planner/bridge/server.py`
+deterministically. If discovery fails, it reports **Backend not configured** and does not display
+demo scientific state. Environment overrides for a managed development launch are documented in
+[`native/Brain3D/README.md`](native/Brain3D/README.md).
+
+The older Python command starts the diagnostic Qt shell, not the supported SwiftUI workflow:
 
 ```bash
 uv run --frozen mouse-brain-planner --no-download
 ```
 
-Confirm the installed version or run the bounded first-frame smoke check with:
+Use it only for explicitly scoped diagnostic tests. Confirm the Python package version, run the
+bounded Qt smoke check, and test the native package separately with:
 
 ```bash
 uv run --frozen mouse-brain-planner --version
 QT_QPA_PLATFORM=offscreen PYVISTA_OFF_SCREEN=true \
   uv run --frozen mouse-brain-planner --smoke-test --no-download
+swift test --package-path native/Brain3D
 ```
 
-The smoke check only proves that the Qt event loop opens and closes. It does not validate a real
-atlas, GPU interaction, anatomy, or surgical accuracy.
+The Qt smoke check only proves that its diagnostic event loop opens and closes. The Swift test
+suite checks native protocol/UI policy code. Neither validates anatomy or surgical accuracy.
 
 ## Acquire an atlas
 
@@ -73,16 +82,11 @@ and locally cached packages with:
 uv run --frozen mouse-brain-planner atlas list
 ```
 
-For an initial lower-memory installation, download the 25 µm Allen package:
+Download the only current package, the 25 µm Allen atlas, from the native **Download reviewed
+25 µm atlas** control or by CLI:
 
 ```bash
 uv run --frozen mouse-brain-planner atlas download allen_mouse_25um
-```
-
-The preferred-resolution package can be requested explicitly with:
-
-```bash
-uv run --frozen mouse-brain-planner atlas download allen_mouse_10um
 ```
 
 Read [Atlas Data](ATLAS_DATA.md) and the
@@ -91,12 +95,11 @@ The two arrays loaded by stable BrainGlobe AtlasAPI require approximately:
 
 | Atlas | Reference + annotation raw bytes | Approximate raw memory |
 | --- | ---: | ---: |
-| `allen_mouse_10um` | 7,223,040,000 | 7.223 GB / 6.73 GiB |
 | `allen_mouse_25um` | 462,274,560 | 0.462 GB / 0.43 GiB |
 
 Actual peak memory is higher because these figures exclude Python objects, temporary arrays,
-slice composites, and VTK meshes. Prefer 25 µm on a 16 GB Mac. The application must never
-silently replace one resolution with another.
+slice composites, and VTK meshes. The application rejects other resolutions rather than silently
+substituting or mixing them. Existing 10 µm cache data is left untouched but ignored.
 
 ## Application-owned data locations
 
@@ -125,9 +128,16 @@ store atlas provenance and a cache path but do not embed the atlas arrays.
 
 ## Troubleshooting
 
-### A different Qt binding is selected
+### The native app reports Backend not configured
 
-The application requires PySide6. If launch reports that `QT_API` selects a different binding,
+Run `uv sync --frozen --all-groups` from the repository root and confirm that both
+`.venv/bin/python` and `src/mouse_brain_planner/bridge/server.py` exist. Launch the `.app` from
+this checkout so deterministic development discovery can find them. Do not point the UI at an
+unreviewed backend.
+
+### A different Qt binding is selected in diagnostic tests
+
+The diagnostic Qt shell requires PySide6. If it reports that `QT_API` selects a different binding,
 remove that override or set it explicitly:
 
 ```bash
@@ -138,22 +148,16 @@ Do not install PyQt alongside this locked environment.
 
 ### Atlas download is unavailable
 
-Check that `--no-download` was not supplied, that the selected atlas is not merely a remote
-catalog entry, and that the app-owned data/cache directories are writable. A cached atlas can be
-opened without a network connection; an uncached atlas cannot.
+Confirm that the native planning service is connected and that the app-owned data/cache
+directories are writable. A cached atlas can be opened without a network connection; an uncached
+atlas requires an explicit download and network access. The diagnostic Qt shell additionally
+honors `--no-download`.
 
-### The 3D view does not render
+### The 3D view is unavailable
 
-Confirm the supported architecture and environment first:
-
-```bash
-uname -m
-uv run --frozen python -c 'import platform; print(platform.machine())'
-uv run --frozen python -c 'import PySide6, pyvista, vtk; print("Qt/VTK imports OK")'
-```
-
-Both commands should report `arm64` on the supported target. Remote desktops, virtual machines,
-and unsupported GPU/display configurations have not been release-qualified.
+This is expected in the current supported app: bridge protocol v1 exposes dorsal, coronal,
+sagittal, and horizontal raster views but no native 3D renderer. Do not use the diagnostic Qt 3D
+viewer as a substitute for a qualified surgery-planning view.
 
 ### Project validation fails
 

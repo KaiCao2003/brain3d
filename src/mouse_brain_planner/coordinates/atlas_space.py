@@ -26,6 +26,10 @@ class AtlasIdentityError(ValueError):
     """Raised when a point belongs to a different atlas package."""
 
 
+class CoordinateFrameError(ValueError):
+    """Raised when a typed point declares the wrong coordinate frame."""
+
+
 class BrainGlobeAtlasSpace:
     """Conversion service for one exact BrainGlobe atlas package.
 
@@ -40,7 +44,7 @@ class BrainGlobeAtlasSpace:
     def voxel_to_physical(self, point: BrainGlobeVoxelPoint) -> BrainGlobePhysicalPoint:
         """Convert a continuous voxel coordinate to micrometres."""
 
-        self._check_identity(point.atlas_key, point.atlas_version)
+        self._check_voxel(point)
         values = point.as_tuple()
         self._validate_half_open(values, self.metadata.shape_voxels, "voxel")
         physical = tuple(
@@ -58,7 +62,7 @@ class BrainGlobeAtlasSpace:
     def index_to_center(self, index: BrainGlobeVoxelIndex) -> BrainGlobePhysicalPoint:
         """Return the physical center of a discrete annotation voxel."""
 
-        self._check_identity(index.atlas_key, index.atlas_version)
+        self._check_index(index)
         values = index.as_tuple()
         self._validate_index(values)
         center = tuple(
@@ -133,7 +137,7 @@ class BrainGlobeAtlasSpace:
     ) -> BrainGlobePhysicalPoint:
         """Invert the right-handed render-frame mapping."""
 
-        self._check_identity(point.atlas_key, point.atlas_version)
+        self._check_world(point)
         self._check_physical(anchor)
         result = BrainGlobePhysicalPoint(
             atlas_key=point.atlas_key,
@@ -170,15 +174,41 @@ class BrainGlobeAtlasSpace:
         self._check_physical(point)
         if midline_tolerance_um < 0 or not math.isfinite(midline_tolerance_um):
             raise ValueError("midline tolerance must be finite and non-negative")
-        midline = self.metadata.extent_um[2] / 2.0
+        midline = self.metadata.midline_ml_um
         delta = point.ml_um - midline
         if abs(delta) <= midline_tolerance_um:
             return Hemisphere.MIDLINE
         return Hemisphere.RIGHT if delta < 0 else Hemisphere.LEFT
 
     def _check_physical(self, point: BrainGlobePhysicalPoint) -> None:
+        self._check_frame(
+            point.frame_id,
+            "BRAINGLOBE_PHYSICAL_ASR_UM",
+            "physical point",
+        )
         self._check_identity(point.atlas_key, point.atlas_version)
         self._validate_half_open(point.as_tuple(), self.metadata.extent_um, "micrometre")
+
+    def _check_voxel(self, point: BrainGlobeVoxelPoint) -> None:
+        self._check_frame(point.frame_id, "BRAINGLOBE_VOXEL_ASR", "voxel point")
+        if point.anchor != VoxelAnchor.CONTINUOUS_INDEX:
+            raise CoordinateFrameError(
+                f"voxel point anchor must be continuous-index; got {point.anchor!r}"
+            )
+        self._check_identity(point.atlas_key, point.atlas_version)
+
+    def _check_index(self, index: BrainGlobeVoxelIndex) -> None:
+        self._check_frame(index.frame_id, "BRAINGLOBE_VOXEL_INDEX_ASR", "voxel index")
+        self._check_identity(index.atlas_key, index.atlas_version)
+
+    def _check_world(self, point: SurgeryWorldPoint) -> None:
+        self._check_frame(point.frame_id, "SURGERY_WORLD_RAS_UM", "world point")
+        self._check_identity(point.atlas_key, point.atlas_version)
+
+    @staticmethod
+    def _check_frame(actual: object, expected: str, point_kind: str) -> None:
+        if actual != expected:
+            raise CoordinateFrameError(f"{point_kind} frame {actual!r} does not match {expected!r}")
 
     def _check_identity(self, atlas_key: str, atlas_version: str) -> None:
         expected = (self.metadata.atlas_key, self.metadata.atlas_package_version)

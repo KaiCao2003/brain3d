@@ -7,25 +7,34 @@ import os
 from typing import cast, override
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtGui import QCloseEvent, QGuiApplication
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from pyvistaqt import QtInteractor
 
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.rendering.scene_controller import (
-    MeshSource,
     PlotterProtocol,
+    PreparedWorldMesh,
     SceneController,
 )
 
 logger = logging.getLogger(__name__)
+
+_HEADLESS_QT_PLATFORMS = frozenset({"offscreen", "minimal", "minimalegl"})
+
+
+def embedded_3d_supported() -> bool:
+    """Return whether Qt owns a native window VTK can safely embed into."""
+
+    return QGuiApplication.platformName().casefold() not in _HEADLESS_QT_PLATFORMS
 
 
 class Brain3DView(QWidget):
     """3D view that creates VTK resources only after an atlas is selected."""
 
     physical_point_picked = Signal(object)
+    region_picked = Signal(int, object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -42,13 +51,23 @@ class Brain3DView(QWidget):
     def load_atlas(
         self,
         space: BrainGlobeAtlasSpace,
-        root_mesh: MeshSource,
+        root_mesh: PreparedWorldMesh,
         *,
         anchor: BrainGlobePhysicalPoint,
     ) -> None:
         """Create the embedded renderer and show real atlas geometry."""
 
         self.dispose()
+        if not embedded_3d_supported():
+            platform = QGuiApplication.platformName() or "unknown"
+            self._empty_label.setText(
+                f"3D rendering is unavailable on the Qt {platform!r} test platform."
+            )
+            logger.warning(
+                "skipping embedded VTK renderer on a headless Qt platform",
+                extra={"event": "headless-3d-disabled"},
+            )
+            return
         self._empty_label.hide()
         try:
             off_screen = os.environ.get("PYVISTA_OFF_SCREEN", "").lower() in {
@@ -61,7 +80,10 @@ class Brain3DView(QWidget):
             self._layout.addWidget(self._plotter.interactor, 1)
             self._scene = SceneController(cast(PlotterProtocol, self._plotter), space, anchor)
             self._scene.load_root_mesh(root_mesh)
-            self._scene.enable_physical_picking(self.physical_point_picked.emit)
+            self._scene.enable_physical_picking(
+                self.physical_point_picked.emit,
+                region_callback=self.region_picked.emit,
+            )
         except Exception:
             self.dispose()
             raise
@@ -75,7 +97,7 @@ class Brain3DView(QWidget):
     def set_region(
         self,
         structure_id: int,
-        source: MeshSource,
+        source: PreparedWorldMesh,
         *,
         rgb: tuple[int, int, int],
         opacity: float,
@@ -97,6 +119,11 @@ class Brain3DView(QWidget):
 
         if self._scene is not None:
             self._scene.reset_camera()
+
+    def center_region(self, structure_id: int) -> bool:
+        """Frame one visible region if its scene mesh is available."""
+
+        return self._scene is not None and self._scene.center_region(structure_id)
 
     def set_camera(self, preset: str) -> None:
         """Apply an anatomical camera preset."""
@@ -127,6 +154,7 @@ class Brain3DView(QWidget):
                 logger.exception("failed to close the embedded 3D plotter")
             finally:
                 plotter.deleteLater()
+        self._empty_label.setText("No atlas loaded")
         self._empty_label.show()
 
     @override
