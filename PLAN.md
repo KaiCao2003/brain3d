@@ -33,7 +33,7 @@ path, with typed protocol coverage; it does not mean validated for an animal pro
   views. Exact voxel traversal drives region inspection and CSV/JSON export.
 - The bundled LAMBADA P60_606 derivative retains radius-bearing runs at diameter ≥30 µm and
   is rendered on intersecting 2D planes, as a Dorsal reference projection, and as 3D tubes.
-- Vessel analysis uses the V2 tapered-surface algorithm, conservative probe envelopes, explicit
+- Vessel analysis uses the V3 broad-phase/tapered-surface algorithm, conservative probe envelopes, explicit
   required margin and registration uncertainty, and acknowledgements for the lab-defined inputs
   and incomplete reference coverage.
 - Population density and subject-image registration are archived backend paths, not primary UI
@@ -55,7 +55,9 @@ The remaining program is qualification rather than another UI feature sweep:
 9. complete a final animal-only/non-human/non-clinical requirement audit.
 
 The LAMBADA layer can never fill its own omissions: it is one fixed cleared specimen, excludes
-pial and choroidal vessels upstream, and filters smaller vessels. A current zero-conflict result
-must remain exactly bounded as:
+pial and choroidal vessels upstream, and filters smaller vessels. Its registration and tissue
+distortion error are not numerically bounded, so a no-loaded-conflict result fails closed as
+`insufficientGeometry`. The zero-conflict phrase remains reserved for a future source with
+reviewed bounds covered by the analysis uncertainty:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.

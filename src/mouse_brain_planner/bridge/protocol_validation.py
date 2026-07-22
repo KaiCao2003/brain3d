@@ -81,9 +81,7 @@ def finite_number(
     number = float(value)
     if not math.isfinite(number):
         raise BridgeError("INVALID_PARAMS", f"{field} must be a finite number.")
-    below = minimum is not None and (
-        number < minimum if minimum_inclusive else number <= minimum
-    )
+    below = minimum is not None and (number < minimum if minimum_inclusive else number <= minimum)
     above = maximum is not None and number > maximum
     if below or above:
         bounds = {

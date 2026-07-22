@@ -30,7 +30,12 @@ public enum ProbePlanningContract {
     public static let insertionAxisDefinition = "entry-toward-tip"
     public static let atlasFrameId = "BRAINGLOBE_PHYSICAL_ASR_UM"
     public static let regionFrameId = "BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"
-    public static let planningAlgorithmVersion = "calibrated-target-angle-depth-v1"
+    public static let planningAlgorithmVersion =
+        "calibrated-stereotaxic-probe-transform-v2"
+    public static let legacyPlanningAlgorithmVersion = "calibrated-target-angle-depth-v1"
+    public static let planningPlacementMethod =
+        "stereotaxic-target-plus-manipulator-angles"
+    public static let legacyPlacementMethod = "target-plus-angles-depth"
     public static let regionAlgorithmVersion = "probe-region-analysis-bundle-v1"
     public static let angleConvention =
         "azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"
@@ -454,6 +459,22 @@ public struct ProbePlacement: Codable, Equatable, Sendable {
     public let atlasFrame: ProbeAtlasFrame
 }
 
+public struct ProbeManipulatorInput: Codable, Equatable, Sendable {
+    public let frameId: String
+    public let azimuthDegrees: Double
+    public let elevationDegrees: Double
+    public let insertionDepthMicrometres: Double
+    public let axialRotationDegrees: Double
+    public let angleConvention: String
+}
+
+public struct ProbeManipulatorDraft: Equatable, Sendable {
+    public let azimuthDegrees: Double
+    public let elevationDegrees: Double
+    public let insertionDepthMicrometres: Double
+    public let axialRotationDegrees: Double
+}
+
 public struct ProbePlacedShank: Codable, Equatable, Identifiable, Sendable {
     public let shankId: String
     public let entry: ProbePhysicalPoint
@@ -556,6 +577,7 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
     public let regionAnalysisSha256: String?
     public let usableForNavigation: Bool
     public let sourceTarget: ProbeSourceTarget
+    public let manipulatorInput: ProbeManipulatorInput?
     public let placement: ProbePlacement
     public let shanks: [ProbePlacedShank]
     public let recordingSites: [ProbeRecordingSite]
@@ -563,6 +585,35 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
     public let warning: String
 
     public var id: String { planId }
+
+    public var hasCurrentPlanningGeometry: Bool {
+        provenance.planningAlgorithmVersion == ProbePlanningContract.planningAlgorithmVersion
+    }
+
+    public var requiresPlanningGeometryUpdate: Bool {
+        provenance.planningAlgorithmVersion
+            == ProbePlanningContract.legacyPlanningAlgorithmVersion
+    }
+
+    public var manipulatorDraft: ProbeManipulatorDraft {
+        if let manipulatorInput {
+            return ProbeManipulatorDraft(
+                azimuthDegrees: manipulatorInput.azimuthDegrees,
+                elevationDegrees: manipulatorInput.elevationDegrees,
+                insertionDepthMicrometres: manipulatorInput.insertionDepthMicrometres,
+                axialRotationDegrees: manipulatorInput.axialRotationDegrees
+            )
+        }
+        // Legacy v1 serialized these exact operator inputs on the placement.
+        // They are exposed only to let the user review and explicitly update;
+        // the legacy projected geometry itself remains unusable.
+        return ProbeManipulatorDraft(
+            azimuthDegrees: placement.azimuthDegrees,
+            elevationDegrees: placement.elevationDegrees,
+            insertionDepthMicrometres: placement.insertionDepthMicrometres,
+            axialRotationDegrees: placement.axialRotationDegrees
+        )
+    }
 }
 
 public struct ProbePlanListResult: Codable, Equatable, Sendable {
@@ -574,13 +625,57 @@ public struct ProbePlanListResult: Codable, Equatable, Sendable {
     public let plans: [ProbePlanSummary]
 }
 
-public struct ProbePlanGetResult: Codable, Equatable, Sendable {
+public struct ProbePlanGetResult: Decodable, Equatable, Sendable {
     public let protocolVersion: Int
     public let status: String
     public let projectId: String
     public let projectRevision: Int
     public let plan: ProbePlanDetail
     public let regionAnalysis: ProbeRegionAnalysisBundle?
+    public let majorVesselAnalysis: MajorVesselAnalysisResult?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case protocolVersion
+        case status
+        case projectId
+        case projectRevision
+        case plan
+        case regionAnalysis
+        case majorVesselAnalysis
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let dynamic = try decoder.container(keyedBy: ProbePlanGetDynamicCodingKey.self)
+        let actual = Set(dynamic.allKeys.map(\.stringValue))
+        let expected = Set(CodingKeys.allCases.map(\.stringValue))
+        guard actual == expected else {
+            throw ProbePlanningValidationError.invalid(
+                "Probe-plan detail keys do not match protocol v1 exactly."
+            )
+        }
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        status = try container.decode(String.self, forKey: .status)
+        projectId = try container.decode(String.self, forKey: .projectId)
+        projectRevision = try container.decode(Int.self, forKey: .projectRevision)
+        plan = try container.decode(ProbePlanDetail.self, forKey: .plan)
+        regionAnalysis = try container.decodeIfPresent(
+            ProbeRegionAnalysisBundle.self,
+            forKey: .regionAnalysis
+        )
+        majorVesselAnalysis = try container.decodeIfPresent(
+            MajorVesselAnalysisResult.self,
+            forKey: .majorVesselAnalysis
+        )
+    }
+}
+
+private struct ProbePlanGetDynamicCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init?(stringValue: String) { self.stringValue = stringValue }
+    init?(intValue: Int) { return nil }
 }
 
 public struct ProbePlanMutationResult: Codable, Equatable, Sendable {
@@ -802,6 +897,20 @@ public enum ProbePlanningValidator {
         try validateCatalogModel(result.model, detailed: true)
     }
 
+    public static func validateCatalogModel(
+        _ model: ProbeCatalogModel,
+        matches plan: ProbePlanDetail
+    ) throws {
+        try validateCatalogModel(model, detailed: true)
+        guard model.modelId == plan.modelId,
+              model.modelVersion == plan.modelVersion,
+              model.displayName == plan.modelDisplayName,
+              model.verificationStatus == plan.verificationStatus
+        else {
+            throw invalid("Selected probe catalog model does not match the plan being edited.")
+        }
+    }
+
     public static func validatePlanList(
         _ result: ProbePlanListResult,
         projectId: String,
@@ -836,6 +945,16 @@ public enum ProbePlanningValidator {
         if let analysis = result.regionAnalysis {
             try validateRegionBundle(analysis, plan: result.plan)
         }
+        if let analysis = result.majorVesselAnalysis {
+            try MajorVesselAnalysisValidator.validateCurrent(
+                analysis,
+                projectId: result.projectId,
+                projectRevision: result.projectRevision,
+                planId: result.plan.planId,
+                planVersion: result.plan.planVersion,
+                planInputSha256: result.plan.inputSha256
+            )
+        }
     }
 
     public static func validateMutation(
@@ -852,6 +971,9 @@ public enum ProbePlanningValidator {
             throw invalid("A probe-plan update must explicitly clear its stale region analysis.")
         }
         try validatePlan(result.plan)
+        guard result.plan.hasCurrentPlanningGeometry else {
+            throw invalid("A probe-plan mutation must publish current recomputed geometry.")
+        }
     }
 
     public static func validateRemove(
@@ -935,8 +1057,33 @@ public enum ProbePlanningValidator {
         else { throw invalid("Probe source target must preserve finite AP/ML/DV millimetres.") }
         let placement = plan.placement
         try requireUUID(placement.placementId, "placementId")
-        guard placement.method == "stereotaxic-target-plus-manipulator-angles",
-              placement.angleConvention == ProbePlanningContract.angleConvention,
+        switch plan.provenance.planningAlgorithmVersion {
+        case ProbePlanningContract.planningAlgorithmVersion:
+            guard let manipulator = plan.manipulatorInput,
+                  !manipulator.frameId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  manipulator.azimuthDegrees.isFinite,
+                  (-180 ... 180).contains(manipulator.azimuthDegrees),
+                  manipulator.elevationDegrees.isFinite,
+                  (-90 ... 90).contains(manipulator.elevationDegrees),
+                  manipulator.insertionDepthMicrometres.isFinite,
+                  manipulator.insertionDepthMicrometres > 0,
+                  manipulator.axialRotationDegrees.isFinite,
+                  (-180 ... 180).contains(manipulator.axialRotationDegrees),
+                  manipulator.angleConvention == ProbePlanningContract.angleConvention,
+                  placement.method == ProbePlanningContract.planningPlacementMethod
+            else {
+                throw invalid("Current probe plan does not preserve valid manipulator inputs.")
+            }
+        case ProbePlanningContract.legacyPlanningAlgorithmVersion:
+            guard plan.manipulatorInput == nil,
+                  placement.method == ProbePlanningContract.legacyPlacementMethod
+            else {
+                throw invalid("Legacy probe plan mixes current and obsolete geometry fields.")
+            }
+        default:
+            throw invalid("Probe plan uses an unsupported planning algorithm version.")
+        }
+        guard placement.angleConvention == ProbePlanningContract.angleConvention,
               placement.azimuthDegrees.isFinite, (-180 ... 180).contains(placement.azimuthDegrees),
               placement.elevationDegrees.isFinite, (-90 ... 90).contains(placement.elevationDegrees),
               placement.insertionDepthMicrometres.isFinite,
@@ -980,9 +1127,7 @@ public enum ProbePlanningValidator {
         guard plan.provenance.calibrationId == plan.calibrationId,
               plan.provenance.calibrationVersion == plan.calibrationVersion,
               plan.provenance.planInputSha256 == plan.inputSha256,
-              plan.provenance.catalogVersion == ProbePlanningContract.catalogVersion,
-              plan.provenance.planningAlgorithmVersion
-                == ProbePlanningContract.planningAlgorithmVersion
+              plan.provenance.catalogVersion == ProbePlanningContract.catalogVersion
         else { throw invalid("Probe plan provenance does not match the displayed plan.") }
         try requireSha(plan.provenance.calibrationSha256, "calibrationSha256")
         try requireSha(plan.provenance.atlasMetadataSha256, "atlasMetadataSha256")

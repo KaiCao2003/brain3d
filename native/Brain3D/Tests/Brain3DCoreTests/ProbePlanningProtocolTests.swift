@@ -254,6 +254,15 @@ struct ProbePlanningProtocolTests {
         )
         #expect(result.plan.placement.elevationDegrees == -80)
         #expect(result.plan.usableForNavigation == false)
+        #expect(result.plan.hasCurrentPlanningGeometry)
+        #expect(!result.plan.requiresPlanningGeometryUpdate)
+        #expect(result.majorVesselAnalysis == nil)
+
+        var missingVesselAnalysisKey = planGetPayload(regionAnalysis: nil)
+        missingVesselAnalysisKey.removeValue(forKey: "majorVesselAnalysis")
+        #expect(throws: (any Error).self) {
+            try decode(ProbePlanGetResult.self, missingVesselAnalysisKey)
+        }
 
         var pendingReview = planGetPayload(regionAnalysis: nil)
         var pendingReviewPlan = pendingReview["plan"] as! [String: Any]
@@ -297,6 +306,114 @@ struct ProbePlanningProtocolTests {
         #expect(throws: ProbePlanningValidationError.self) {
             try ProbePlanningValidator.validatePlanGet(
                 wrongResult,
+                projectId: projectId,
+                projectRevision: 7,
+                planId: planId
+            )
+        }
+    }
+
+    @Test("Legacy v1 plan is selectable only as an explicit update draft")
+    func legacyPlanIsUpdateReadyButNotCurrent() throws {
+        var legacyPayload = planGetPayload(regionAnalysis: nil)
+        var legacyPlan = try #require(legacyPayload["plan"] as? [String: Any])
+        legacyPlan["manipulatorInput"] = NSNull()
+        var placement = try #require(legacyPlan["placement"] as? [String: Any])
+        placement["method"] = ProbePlanningContract.legacyPlacementMethod
+        legacyPlan["placement"] = placement
+        var provenance = try #require(legacyPlan["provenance"] as? [String: Any])
+        provenance["planningAlgorithmVersion"] =
+            ProbePlanningContract.legacyPlanningAlgorithmVersion
+        legacyPlan["provenance"] = provenance
+        legacyPayload["plan"] = legacyPlan
+
+        let result = try decode(ProbePlanGetResult.self, legacyPayload)
+        try ProbePlanningValidator.validatePlanGet(
+            result,
+            projectId: projectId,
+            projectRevision: 7,
+            planId: planId
+        )
+        #expect(result.plan.requiresPlanningGeometryUpdate)
+        #expect(!result.plan.hasCurrentPlanningGeometry)
+        #expect(result.plan.manipulatorInput == nil)
+        let matchingCatalog = try decode(
+            ProbeCatalogGetResult.self,
+            [
+                "protocolVersion": 1,
+                "status": "found",
+                "catalogVersion": ProbePlanningContract.catalogVersion,
+                "model": genericCatalogModel(detailed: true),
+            ]
+        ).model
+        try ProbePlanningValidator.validateCatalogModel(
+            matchingCatalog,
+            matches: result.plan
+        )
+        let wrongCatalog = try decode(
+            ProbeCatalogGetResult.self,
+            [
+                "protocolVersion": 1,
+                "status": "found",
+                "catalogVersion": ProbePlanningContract.catalogVersion,
+                "model": neuropixelsCatalogModel(detailed: true),
+            ]
+        ).model
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCatalogModel(
+                wrongCatalog,
+                matches: result.plan
+            )
+        }
+        let resolution = try AtlasASRResolution(
+            apMicrometres: 25,
+            dvMicrometres: 25,
+            mlMicrometres: 25
+        )
+        let shape = try AtlasASRShape(apVoxels: 528, dvVoxels: 320, mlVoxels: 456)
+        #expect(ProbeSliceOverlayGeometry.make(
+            plan: result.plan,
+            orientation: .coronal,
+            sliceIndex: 1,
+            resolution: resolution,
+            shape: shape
+        ) == nil)
+        #expect(ProbeSliceOverlayGeometry.makeDorsalProjection(
+            plan: result.plan,
+            resolution: resolution,
+            shape: shape
+        ) == nil)
+        let draft = result.plan.manipulatorDraft
+        #expect(draft.azimuthDegrees == -12.5)
+        #expect(draft.elevationDegrees == -80)
+        #expect(draft.insertionDepthMicrometres == 3_200)
+        #expect(draft.axialRotationDegrees == 5)
+
+        let update = ProbePlanUpdateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            planId: result.plan.planId,
+            expectedPlanInputSha256: result.plan.inputSha256,
+            targetId: result.plan.targetId,
+            modelId: result.plan.modelId,
+            modelVersion: result.plan.modelVersion,
+            name: result.plan.name,
+            azimuthDegrees: draft.azimuthDegrees,
+            elevationDegrees: draft.elevationDegrees,
+            insertionDepthMicrometres: draft.insertionDepthMicrometres,
+            axialRotationDegrees: draft.axialRotationDegrees,
+            customGeometryAcknowledged: true
+        )
+        try ProbePlanningValidator.validateUpdate(update)
+
+        var mixedPayload = legacyPayload
+        var mixedPlan = try #require(mixedPayload["plan"] as? [String: Any])
+        mixedPlan["manipulatorInput"] = planDetail()["manipulatorInput"]
+        mixedPayload["plan"] = mixedPlan
+        let mixed = try decode(ProbePlanGetResult.self, mixedPayload)
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validatePlanGet(
+                mixed,
                 projectId: projectId,
                 projectRevision: 7,
                 planId: planId
@@ -415,6 +532,7 @@ struct ProbePlanningProtocolTests {
             "projectRevision": 7,
             "plan": planDetail(),
             "regionAnalysis": regionAnalysis ?? NSNull(),
+            "majorVesselAnalysis": NSNull(),
         ]
     }
 
@@ -445,6 +563,14 @@ struct ProbePlanningProtocolTests {
                 "apMillimetres": -2.5,
                 "mlMillimetres": -1.2,
                 "dvMillimetres": -0.8,
+            ],
+            "manipulatorInput": [
+                "frameId": "SUBJECT_STEREOTAXIC_AP_ML_DV_UM",
+                "azimuthDegrees": -12.5,
+                "elevationDegrees": -80.0,
+                "insertionDepthMicrometres": 3_200.0,
+                "axialRotationDegrees": 5.0,
+                "angleConvention": ProbePlanningContract.angleConvention,
             ],
             "placement": [
                 "placementId": "55555555-5555-4555-8555-555555555555",

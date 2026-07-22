@@ -146,9 +146,7 @@ def test_independent_viewer_state_is_atlas_bound_and_bounded() -> None:
         PlannerProject(
             atlas=metadata,
             renderer_anchor=anchor,
-            viewer_slice_depths=depths.model_copy(
-                update={"coronal": metadata.shape_voxels[0]}
-            ),
+            viewer_slice_depths=depths.model_copy(update={"coronal": metadata.shape_voxels[0]}),
         )
 
 
@@ -219,9 +217,7 @@ def test_viewer_selection_must_match_its_persisted_slice_and_intrinsic_pixel() -
             renderer_anchor=anchor,
             viewer_slice_depths=depths,
             viewer_region_selection=selection.model_copy(
-                update={
-                    "atlas_point": point.model_copy(update={"atlas_version": "wrong"})
-                }
+                update={"atlas_point": point.model_copy(update={"atlas_version": "wrong"})}
             ),
         )
 

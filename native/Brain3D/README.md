@@ -17,8 +17,10 @@ geometry; a typed NDJSON subprocess boundary delegates scientific state and anal
   posterior, left, and deep/ventral.
 - Probe placement, 2D/3D overlays, region traversal, inspection, and CSV/JSON export.
 - LAMBADA P60_606 reference vessels at diameter ≥30 µm on slices, Dorsal, and 3D.
-- V2 tapered-vessel reference analysis with explicit margin, uncertainty, and two
-  acknowledgements. Its bounded zero-conflict wording is:
+- V3 broad-phase/tapered-vessel reference analysis with explicit margin, uncertainty, and two
+  acknowledgements. P60_606 has no reviewed registration/tissue-distortion uncertainty bound, so
+  absence of loaded-geometry conflicts fails closed. The reserved bounded wording for a future
+  qualified source is:
 
   > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 

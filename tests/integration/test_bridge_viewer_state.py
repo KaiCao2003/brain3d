@@ -273,9 +273,7 @@ def test_region_pick_replaces_selection_without_changing_any_depth() -> None:
     dispatcher = _dispatcher()
     project_id, revision = _new_project(dispatcher)
     before = _call(dispatcher, "viewer.state.get")
-    before_depths = {
-        name: item["index"] for name, item in before["slices"].items()
-    }
+    before_depths = {name: item["index"] for name, item in before["slices"].items()}
 
     first = _call(
         dispatcher,
@@ -580,7 +578,7 @@ def test_independent_depths_and_selection_survive_save_and_reopen(tmp_path: Path
     opened = _call(reopened, "project.open", path=str(destination))
     assert opened["projectId"] == project_id
     snapshot = _call(reopened, "viewer.state.get")
-    assert snapshot["projectRevision"] == 0
+    assert snapshot["projectRevision"] == 5
     assert snapshot["slices"] == selected["slices"]
     assert snapshot["selection"] == selected["selection"]
     assert _call(reopened, "state.get")["viewer"] == snapshot

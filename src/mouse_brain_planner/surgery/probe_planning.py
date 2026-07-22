@@ -17,6 +17,8 @@ from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_models import ProbeModelDefinition
 from mouse_brain_planner.domain.probe_plan_models import (
+    PROBE_PLANNING_ALGORITHM_VERSION,
+    ProbeManipulatorInput,
     ProbePlanRecord,
     probe_plan_input_digest,
 )
@@ -25,7 +27,10 @@ from mouse_brain_planner.domain.stereotaxy_models import (
     BregmaRelativeTargetMM,
 )
 from mouse_brain_planner.surgery.stereotaxy import bregma_relative_target_to_point
-from mouse_brain_planner.surgery.trajectory import placement_from_target_angles_depth
+from mouse_brain_planner.surgery.trajectory import (
+    placement_from_stereotaxic_target,
+    transform_probe_placement_uniform,
+)
 
 TARGET_PROJECTION_ALGORITHM_VERSION = "bregma-target-through-subject-atlas-calibration-v1"
 
@@ -98,17 +103,32 @@ def build_calibrated_probe_plan(
         atlas,
     )
     BrainGlobeAtlasSpace(atlas).physical_to_index(atlas_physical_point)
-    placement = placement_from_target_angles_depth(
-        context=context,
-        model=model,
-        name=name,
-        target=atlas_anatomical_point,
+    manipulator_input = ProbeManipulatorInput(
+        frame_id=skull.stereotaxic_frame.frame_id,
         azimuth_deg=azimuth_deg,
         elevation_deg=elevation_deg,
         insertion_depth_um=insertion_depth_um,
         axial_rotation_deg=axial_rotation_deg,
+    )
+    stereotaxic_placement = placement_from_stereotaxic_target(
+        calibration=skull,
+        model=model,
+        name=name,
+        target=stereotaxic_point,
+        manipulator_azimuth_deg=azimuth_deg,
+        manipulator_elevation_deg=elevation_deg,
+        insertion_depth_um=insertion_depth_um,
+        axial_rotation_deg=axial_rotation_deg,
         custom_geometry_acknowledged=custom_geometry_acknowledged,
     )
+    placement = transform_probe_placement_uniform(
+        stereotaxic_placement,
+        calibration.atlas_transform,
+    )
+    if placement.target != atlas_anatomical_point:
+        raise ProbePlanningError(
+            "target projection and transformed probe placement produced different atlas points"
+        )
     actual_plan_uuid = plan_uuid or uuid4()
     calibration_sha256 = calibration_digest(calibration)
     projection_sha256 = target_projection_digest(
@@ -123,12 +143,14 @@ def build_calibrated_probe_plan(
         name=normalized_name,
         source_target=target,
         probe_model=model,
+        manipulator_input=manipulator_input,
         placement=placement,
         calibration_uuid=calibration.calibration_uuid,
         calibration_version=calibration.calibration_version,
         calibration_sha256=calibration_sha256,
         atlas_metadata_sha256=atlas.metadata_sha256,
         projection_sha256=projection_sha256,
+        planning_algorithm_version=PROBE_PLANNING_ALGORITHM_VERSION,
     )
     values: dict[str, object] = {
         "plan_uuid": actual_plan_uuid,
@@ -136,12 +158,14 @@ def build_calibrated_probe_plan(
         "name": normalized_name,
         "source_target": target,
         "probe_model": model,
+        "manipulator_input": manipulator_input,
         "placement": placement,
         "calibration_uuid": calibration.calibration_uuid,
         "calibration_version": calibration.calibration_version,
         "calibration_sha256": calibration_sha256,
         "atlas_metadata_sha256": atlas.metadata_sha256,
         "projection_sha256": projection_sha256,
+        "planning_algorithm_version": PROBE_PLANNING_ALGORITHM_VERSION,
         "input_sha256": input_sha256,
     }
     if created_at is not None:

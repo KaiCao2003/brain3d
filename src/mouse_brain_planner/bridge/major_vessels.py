@@ -1,4 +1,4 @@
-"""Read-only audited major-vessel geometry and radius-aware probe analysis."""
+"""Audited major-vessel geometry and revision-safe persisted probe analysis."""
 
 from __future__ import annotations
 
@@ -35,7 +35,10 @@ from mouse_brain_planner.coordinates.anatomical_atlas import (
 )
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.probe_models import PlacedProbeShank
-from mouse_brain_planner.domain.probe_plan_models import ProbePlanRecord
+from mouse_brain_planner.domain.probe_plan_models import (
+    PROBE_PLANNING_ALGORITHM_VERSION,
+    ProbePlanRecord,
+)
 from mouse_brain_planner.domain.project_models import PlannerProject
 from mouse_brain_planner.domain.vessel_clearance_models import (
     MajorVesselSourceProvenance,
@@ -43,6 +46,10 @@ from mouse_brain_planner.domain.vessel_clearance_models import (
     ProbeVesselAnalysis,
     ProbeVesselConflict,
     VesselRiskProfile,
+)
+from mouse_brain_planner.domain.vessel_plan_models import (
+    ProbeVesselAnalysisBundle,
+    build_probe_vessel_analysis_bundle,
 )
 from mouse_brain_planner.surgery.trajectory import placed_shank_centerlines
 from mouse_brain_planner.vasculature.lambada_major_vessels import (
@@ -70,16 +77,18 @@ REFERENCE_POLICY: Final = (
 
 ProjectGetter = Callable[[], PlannerProject]
 RevisionGetter = Callable[[], int]
+ProjectReplacer = Callable[[PlannerProject], int]
 GraphLoader = Callable[[], LambadaMajorVesselGraph]
 
 
 @dataclass(slots=True)
 class MajorVesselReferenceBridge:
-    """Expose one pinned reference graph without mutating project state."""
+    """Expose one pinned graph and persist plan-linked analysis results."""
 
     dispatcher: BridgeDispatcher
     get_project: ProjectGetter
     get_revision: RevisionGetter
+    replace_project: ProjectReplacer
     graph_loader: GraphLoader = load_lambada_major_vessels
     _graph_cache: LambadaMajorVesselGraph | None = field(default=None, init=False, repr=False)
     _analysis_cache: RadiusBearingVesselRuns | None = field(default=None, init=False, repr=False)
@@ -185,6 +194,17 @@ class MajorVesselReferenceBridge:
                 "The project and loaded atlas provenance do not match.",
             )
         plan = _find_plan(project, params["planId"])
+        if plan.planning_algorithm_version != PROBE_PLANNING_ALGORITHM_VERSION:
+            raise BridgeError(
+                "PROBE_PLAN_RECOMPUTE_REQUIRED",
+                "This legacy probe plan must be updated through its subject calibration "
+                "before vessel analysis.",
+                details={
+                    "planId": str(plan.plan_uuid),
+                    "planningAlgorithmVersion": plan.planning_algorithm_version,
+                    "requiredPlanningAlgorithmVersion": PROBE_PLANNING_ALGORITHM_VERSION,
+                },
+            )
         expected_plan_hash = _sha256(params["expectedPlanInputSha256"], "expectedPlanInputSha256")
         if expected_plan_hash != plan.input_sha256:
             raise BridgeError(
@@ -244,16 +264,68 @@ class MajorVesselReferenceBridge:
                 "The reference-vessel analysis inputs could not be evaluated.",
                 details={"exceptionType": type(error).__name__},
             ) from error
-        return {
-            "protocolVersion": PROTOCOL_VERSION,
-            "projectId": str(project.project_uuid),
-            "projectRevision": actual_revision,
-            "planId": str(plan.plan_uuid),
-            "planVersion": plan.plan_version,
-            "planInputSha256": plan.input_sha256,
-            "analysis": _analysis_payload(result),
-            "limitations": list(graph.provenance.limitations),
-        }
+        limitations = tuple(graph.provenance.limitations)
+        try:
+            bundle = build_probe_vessel_analysis_bundle(
+                plan_uuid=plan.plan_uuid,
+                plan_version=plan.plan_version,
+                plan_input_sha256=plan.input_sha256,
+                maximum_conflicts=maximum_conflicts,
+                analysis=result,
+                limitations=limitations,
+            )
+        except ValidationError as error:
+            raise BridgeError(
+                "VESSEL_ANALYSIS_INVALID",
+                "The reference-vessel analysis result could not be persisted.",
+                details={"exceptionType": type(error).__name__},
+            ) from error
+
+        current_revision = self.get_revision()
+        current_project = self.get_project()
+        current_plan = next(
+            (item for item in current_project.probe_plans if item.plan_uuid == plan.plan_uuid),
+            None,
+        )
+        if (
+            current_revision != expected_revision
+            or current_project.project_uuid != project.project_uuid
+            or current_plan is None
+            or current_plan.plan_version != plan.plan_version
+            or current_plan.input_sha256 != plan.input_sha256
+        ):
+            raise BridgeError(
+                "ANALYSIS_STALE",
+                "Probe inputs changed before the vessel analysis could be stored.",
+                details={"analysisStored": False},
+            )
+        payload = current_project.model_dump(mode="python")
+        payload["probe_vessel_analyses"] = [
+            item
+            for item in current_project.probe_vessel_analyses
+            if item.plan_uuid != plan.plan_uuid
+        ] + [bundle]
+        try:
+            updated = PlannerProject.model_validate(payload)
+        except ValidationError as error:
+            raise BridgeError(
+                "VESSEL_ANALYSIS_INVALID",
+                "The plan-linked vessel analysis failed project validation.",
+                details={"exceptionType": type(error).__name__},
+            ) from error
+        updated.touch(
+            "probe-major-vessel-analysis-run",
+            f"plan={plan.plan_uuid}; planInputSha256={plan.input_sha256}; "
+            f"analysisSha256={bundle.analysis_sha256}",
+        )
+        stored_revision = self.replace_project(updated)
+        if stored_revision != expected_revision + 1:
+            raise RuntimeError("vessel project replacer did not increment revision exactly once")
+        return major_vessel_analysis_result_payload(
+            bundle,
+            project_uuid=updated.project_uuid,
+            project_revision=stored_revision,
+        )
 
     def _require_loaded_atlas(self) -> LoadedAtlasProtocol:
         atlas = self.dispatcher.context.loaded_atlas
@@ -303,12 +375,14 @@ def register_major_vessel_handlers(
     *,
     get_project: ProjectGetter,
     get_revision: RevisionGetter,
+    replace_project: ProjectReplacer,
     graph_loader: GraphLoader = load_lambada_major_vessels,
 ) -> MajorVesselReferenceBridge:
     extension = MajorVesselReferenceBridge(
         dispatcher=dispatcher,
         get_project=get_project,
         get_revision=get_revision,
+        replace_project=replace_project,
         graph_loader=graph_loader,
     )
     extension.register()
@@ -375,6 +449,26 @@ def _analysis_payload(result: ProbeVesselAnalysis) -> JsonObject:
     }
 
 
+def major_vessel_analysis_result_payload(
+    bundle: ProbeVesselAnalysisBundle,
+    *,
+    project_uuid: UUID,
+    project_revision: int,
+) -> JsonObject:
+    """Return the stable native result shape for live and reopened analyses."""
+
+    return {
+        "protocolVersion": PROTOCOL_VERSION,
+        "projectId": str(project_uuid),
+        "projectRevision": project_revision,
+        "planId": str(bundle.plan_uuid),
+        "planVersion": bundle.plan_version,
+        "planInputSha256": bundle.plan_input_sha256,
+        "analysis": _analysis_payload(bundle.analysis),
+        "limitations": list(bundle.limitations),
+    }
+
+
 def _conflict_payload(conflict: ProbeVesselConflict) -> JsonObject:
     return {
         "conflictId": conflict.conflict_id,
@@ -434,6 +528,12 @@ def _provenance_payload(value: MajorVesselSourceProvenance) -> JsonObject:
         "pialVesselsExcluded": True,
         "choroidalVesselsExcluded": True,
         "arteryVeinClassificationAvailable": False,
+        "registrationTransformId": value.registration_transform_id,
+        "registrationUncertaintyBoundMicrometres": (value.registration_uncertainty_bound_um),
+        "tissueDistortionUncertaintyBoundMicrometres": (
+            value.tissue_distortion_uncertainty_bound_um
+        ),
+        "uncertaintyBoundsReviewed": value.uncertainty_bounds_reviewed,
     }
 
 

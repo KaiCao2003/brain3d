@@ -42,11 +42,12 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
         }
         if let selectedProbePlan {
             try ProbePlanningValidator.validatePlan(selectedProbePlan)
-            guard selectedProbePlan.provenance.atlasMetadataSha256
+            guard selectedProbePlan.hasCurrentPlanningGeometry,
+                  selectedProbePlan.provenance.atlasMetadataSha256
                     == meshResult.atlas.metadataSha256
             else {
                 throw AtlasSceneContractError.invalid(
-                    "Selected probe plan and 3D atlas provenance do not match."
+                    "The selected probe requires current geometry matching the 3D atlas."
                 )
             }
         }

@@ -131,9 +131,7 @@ class CalibrationBridge:
                 else str(project.active_calibration_uuid)
             ),
             "calibrationCount": len(project.calibrations),
-            "calibrations": [
-                _calibration_summary(item, project) for item in project.calibrations
-            ],
+            "calibrations": [_calibration_summary(item, project) for item in project.calibrations],
         }
 
     def get_calibration(self, params: Mapping[str, object]) -> JsonObject:
@@ -420,11 +418,7 @@ class CalibrationBridge:
             )
         target_id = _uuid(params["targetId"], "targetId")
         target = next(
-            (
-                item
-                for item in project.unprojected_bregma_targets
-                if item.target_uuid == target_id
-            ),
+            (item for item in project.unprojected_bregma_targets if item.target_uuid == target_id),
             None,
         )
         if target is None:
@@ -667,15 +661,9 @@ def _parse_create_input(
         )
     source_points = {
         "bregma": _source_point(skull_payload["bregma"], source_frame, "bregma"),
-        "lambda": _source_point(
-            skull_payload["lambdaPoint"], source_frame, "lambdaPoint"
-        ),
-        "left-skull": _source_point(
-            skull_payload["leftSkull"], source_frame, "leftSkull"
-        ),
-        "right-skull": _source_point(
-            skull_payload["rightSkull"], source_frame, "rightSkull"
-        ),
+        "lambda": _source_point(skull_payload["lambdaPoint"], source_frame, "lambdaPoint"),
+        "left-skull": _source_point(skull_payload["leftSkull"], source_frame, "leftSkull"),
+        "right-skull": _source_point(skull_payload["rightSkull"], source_frame, "rightSkull"),
     }
     skull_landmarks = SkullLandmarkSet(
         bregma=source_points["bregma"],
@@ -974,9 +962,7 @@ def _calibration_summary(
         "permitsFinalExport": calibration.permits_final_export,
         "active": project.active_calibration_uuid == calibration.calibration_uuid,
         "skullQuality": calibration.skull_calibration.qc.quality.value,
-        "skullRmsResidualMicrometres": (
-            calibration.skull_calibration.qc.transform_rms_residual_um
-        ),
+        "skullRmsResidualMicrometres": (calibration.skull_calibration.qc.transform_rms_residual_um),
         "atlasRmsResidualMicrometres": calibration.atlas_transform.rms_residual_um,
         "atlasMaximumResidualMicrometres": calibration.atlas_transform.max_residual_um,
         "atlasTransformMethod": calibration.atlas_transform.method.value,
@@ -1025,19 +1011,13 @@ def _calibration_detail(
                 ),
             },
             "qualityLimits": {
-                "minimumAxisBaselineMicrometres": (
-                    skull.quality_limits.minimum_axis_baseline_um
-                ),
+                "minimumAxisBaselineMicrometres": (skull.quality_limits.minimum_axis_baseline_um),
                 "distanceWarningMicrometres": skull.quality_limits.distance_warning_um,
                 "distanceFailureMicrometres": skull.quality_limits.distance_failure_um,
                 "lateralApWarningMicrometres": skull.quality_limits.lateral_ap_warning_um,
                 "lateralApFailureMicrometres": skull.quality_limits.lateral_ap_failure_um,
-                "transformRmsWarningMicrometres": (
-                    skull.quality_limits.transform_rms_warning_um
-                ),
-                "transformRmsFailureMicrometres": (
-                    skull.quality_limits.transform_rms_failure_um
-                ),
+                "transformRmsWarningMicrometres": (skull.quality_limits.transform_rms_warning_um),
+                "transformRmsFailureMicrometres": (skull.quality_limits.transform_rms_failure_um),
             },
             "limitsSource": skull.qc.limits_source,
             "skullTransform": _transform_payload(skull.transform),
@@ -1148,9 +1128,7 @@ def _effective_qc_messages(calibration: AtlasRegisteredCalibration) -> tuple[str
             f"{limits.transform_rms_warning_um:g}"
         )
     else:
-        messages.append(
-            "PASS: atlas landmark RMS residual is below the configured warning limit"
-        )
+        messages.append("PASS: atlas landmark RMS residual is below the configured warning limit")
     return tuple(messages)
 
 

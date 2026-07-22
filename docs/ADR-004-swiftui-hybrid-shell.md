@@ -75,7 +75,7 @@ process decision, is:
   planning/region export;
 - a radius-bearing LAMBADA P60_606 reference filtered to diameter ≥30 µm, shown in 2D,
   Dorsal, and 3D; and
-- V2 tapered-surface reference analysis with explicit margin, uncertainty, risk-input, and
+- V3 AABB-candidate/tapered-surface reference analysis with explicit margin, uncertainty, risk-input, and
   incomplete-coverage acknowledgements.
 
 Population density and subject-image registration remain archived backend capabilities and are

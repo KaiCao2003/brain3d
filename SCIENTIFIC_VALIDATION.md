@@ -17,7 +17,7 @@ claimed.
 | Target/probe | AP/ML/DV sign tests, projection provenance, versioned placement, overlays, exact voxel traversal/export | Insertion deformation and histological endpoint |
 | NP1 geometry | All 960 sites derived from pinned source snapshots; schema/count/pattern tests | Independent full-table review and physical-probe conformance |
 | LAMBADA asset | Reproducible extraction, source/asset hashes, schema/bounds/radius/run checks | Subject-specific vasculature and omitted-vessel coverage |
-| Vessel V2 | Tapered-surface minimization tests, conservative probe envelopes, threshold classes, stale-input checks | Empirical registration uncertainty and biological decision thresholds |
+| Vessel V3 | Sound AABB-candidate and tapered-surface tests, conservative probe envelopes, threshold classes, stale-input checks | Empirical registration uncertainty and biological decision thresholds |
 | SceneKit | Coordinate-transform, mesh, tube, probe-envelope, picking, and off-screen render tests | Anatomical truth beyond supplied geometry |
 | Persistence | Project revisions, checksums, migrations, backup recovery, source/input digests | Long-term regulated record requirements |
 
@@ -103,25 +103,55 @@ animal. The source excludes pial and choroidal vessels; the derivative filters s
 and sex/side, artery/vein identity, biological variation, tissue distortion, and registration
 error are not resolved. See [the derivation record](docs/LAMBADA_MAJOR_VESSELS.md).
 
-## V2 reference analysis semantics
+## V3 reference analysis semantics
 
-Algorithm `major-vessel-aabb-tapered-surface-v2` performs a conservative AABB candidate pass and
-then minimizes distance from each probe shank envelope to linearly tapered vessel surfaces. It
+Algorithm `major-vessel-aabb-tapered-surface-v3` computes conservative AABB lower bounds and
+feasible upper bounds before running exact finite-segment and tapered-surface minimization only on
+the sound candidate set. It
 reports centerline/surface geometry, interpolated radius, probe envelope, required margin,
 registration uncertainty, adjusted clearance, closest points, insertion depth, conflict class,
 source identity, algorithm version, and input hashes.
 
 The UI requires separate confirmation of the lab-defined margin/uncertainty inputs and
-acknowledgement of incomplete reference coverage. A result applies only to the loaded graph and
-those assumptions. The bounded zero-conflict wording is:
+acknowledgement of incomplete reference coverage. The bundled provenance does not bound
+registration error or tissue distortion, so absence of a conflict is classified
+`insufficientGeometry` even after acknowledgement; user input cannot replace missing source
+evidence. Positive loaded-geometry conflicts remain reportable. The zero-conflict wording below is
+reserved for a future source with reviewed bounds covered by the stated uncertainty:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
+
+### Reproducible performance evidence
+
+The offline [major-vessel benchmark](scripts/benchmark_major_vessel_analysis.py) loads only the
+bundled, SHA-256-verified asset and uses a fixed probe/profile input. Run it with:
+
+```console
+uv run python scripts/benchmark_major_vessel_analysis.py --iterations 20
+```
+
+One run on 2026-07-22 used an Apple M4 (`Mac16,13`, arm64), macOS 26.5.2, and CPython
+3.12.13. The asset contained 71,313 points, 11,818 runs, and 59,495 segments. V3 selected
+243 candidates, performed exactly 243 narrow-phase measurements, and reported 153 loaded-geometry
+conflicts. Timings were:
+
+| Measurement | Milliseconds |
+| --- | ---: |
+| Verified asset load and analysis-geometry construction | 44.205 |
+| First analysis after load | 27.283 |
+| Warm analysis median, 20 iterations | 28.656 |
+| Warm analysis P95, 20 iterations | 45.697 |
+
+Python/module startup is excluded. The benchmark enforces `--iterations` in `[5,100]`, verifies
+the bundled asset counts and digest, rejects changing outputs across identical runs, and emits the
+machine, Python, geometry, result counts, and timings as JSON. These measurements are one-machine
+engineering evidence, not a cross-hardware latency guarantee or scientific/surgical validation.
 
 ## Archived evidence paths
 
 The Kim 2022 population vascular-length-density field and user subject-image registration remain
 in the Python backend for reproducibility of older work. They are absent from the primary UI and
-do not feed the LAMBADA geometry or V2 analysis. A scalar density projection contains no
+do not feed the LAMBADA geometry or V3 analysis. A scalar density projection contains no
 individual vessel path/radius; a registered image is not automatically a vessel segmentation.
 
 ## Required evidence before qualification

@@ -347,9 +347,7 @@ def _selection_payload(project: PlannerProject, atlas: LoadedAtlasProtocol) -> J
             "ml": index.ml,
         },
         "region": None if region is None else _region_payload(region),
-        "hemisphere": BrainGlobeAtlasSpace(atlas.metadata)
-        .hemisphere(selection.atlas_point)
-        .value,
+        "hemisphere": BrainGlobeAtlasSpace(atlas.metadata).hemisphere(selection.atlas_point).value,
     }
 
 

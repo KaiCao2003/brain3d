@@ -284,6 +284,9 @@ class NormalizedProbePlacement(BaseModel):
     skull_entry: AnatomicalPoint | None = None
     brain_entry: AnatomicalPoint | None = None
     inward_direction: UnitDirectionAPMLDV
+    local_lateral_direction: UnitDirectionAPMLDV | None = None
+    local_normal_direction: UnitDirectionAPMLDV | None = None
+    model_to_placement_uniform_scale: PositiveFiniteFloat = 1.0
     insertion_depth_um: PositiveFiniteFloat
     azimuth_deg: FiniteFloat = Field(ge=-180, le=180)
     elevation_deg: FiniteFloat = Field(ge=-90, le=90)
@@ -316,6 +319,38 @@ class NormalizedProbePlacement(BaseModel):
             raise ValueError("all placement coordinates must use one explicit frame")
         if self.inward_direction.frame_id != self.entry.frame_id:
             raise ValueError("placement direction frame does not match placement points")
+        if (self.local_lateral_direction is None) != (self.local_normal_direction is None):
+            raise ValueError(
+                "placement local lateral and normal directions must be stored together"
+            )
+        if self.local_lateral_direction is not None and self.local_normal_direction is not None:
+            local_directions = (
+                self.local_lateral_direction,
+                self.local_normal_direction,
+            )
+            if any(direction.frame_id != self.entry.frame_id for direction in local_directions):
+                raise ValueError("placement local directions must use the placement frame")
+            inward_vector = self.inward_direction.as_ap_ml_dv()
+            lateral_vector = self.local_lateral_direction.as_ap_ml_dv()
+            normal_vector = self.local_normal_direction.as_ap_ml_dv()
+            dot_products = (
+                sum(a * b for a, b in zip(inward_vector, lateral_vector, strict=True)),
+                sum(a * b for a, b in zip(inward_vector, normal_vector, strict=True)),
+                sum(a * b for a, b in zip(lateral_vector, normal_vector, strict=True)),
+            )
+            if any(not math.isclose(value, 0.0, rel_tol=0, abs_tol=1e-9) for value in dot_products):
+                raise ValueError("placement local directions must form an orthonormal basis")
+            # The probe convention defines normal = (-inward) x lateral.
+            expected_normal = (
+                -inward_vector[1] * lateral_vector[2] + inward_vector[2] * lateral_vector[1],
+                -inward_vector[2] * lateral_vector[0] + inward_vector[0] * lateral_vector[2],
+                -inward_vector[0] * lateral_vector[1] + inward_vector[1] * lateral_vector[0],
+            )
+            if any(
+                not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-9)
+                for actual, expected in zip(normal_vector, expected_normal, strict=True)
+            ):
+                raise ValueError("placement local basis does not follow the probe right-hand rule")
         if len(self.selected_site_ids) != len(set(self.selected_site_ids)):
             raise ValueError("selected recording-site IDs must be unique")
 

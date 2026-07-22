@@ -78,6 +78,45 @@ class MajorVesselSourceProvenance(BaseModel):
     pial_vessels_excluded: Literal[True] = True
     choroidal_vessels_excluded: Literal[True] = True
     artery_vein_classification_available: Literal[False] = False
+    registration_transform_id: str | None = Field(default=None, min_length=1, max_length=300)
+    registration_uncertainty_bound_um: NonNegativeFiniteFloat | None = None
+    tissue_distortion_uncertainty_bound_um: NonNegativeFiniteFloat | None = None
+    uncertainty_bounds_reviewed: bool = False
+
+    @model_validator(mode="after")
+    def validate_uncertainty_evidence(self) -> Self:
+        """Require a complete reviewed evidence package before absence classification.
+
+        A graph can still provide useful positive conflict measurements when these
+        fields are unavailable.  Missing evidence must, however, remain explicit
+        so an acknowledgment or a user-entered zero cannot silently manufacture a
+        bounded registration/tissue-distortion claim.
+        """
+
+        bounds = (
+            self.registration_uncertainty_bound_um,
+            self.tissue_distortion_uncertainty_bound_um,
+        )
+        if self.uncertainty_bounds_reviewed and (
+            self.registration_transform_id is None or any(value is None for value in bounds)
+        ):
+            raise ValueError(
+                "reviewed vessel uncertainty requires a transform ID and both uncertainty bounds"
+            )
+        return self
+
+    @property
+    def minimum_spatial_uncertainty_bound_um(self) -> float | None:
+        """Return the conservative combined source bound, or ``None`` if unqualified."""
+
+        if (
+            not self.uncertainty_bounds_reviewed
+            or self.registration_transform_id is None
+            or self.registration_uncertainty_bound_um is None
+            or self.tissue_distortion_uncertainty_bound_um is None
+        ):
+            return None
+        return self.registration_uncertainty_bound_um + self.tissue_distortion_uncertainty_bound_um
 
 
 class PhysicalASRPoint(BaseModel):
@@ -122,8 +161,8 @@ class ProbeVesselAnalysis(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    algorithm_version: Literal["major-vessel-aabb-tapered-surface-v2"] = (
-        "major-vessel-aabb-tapered-surface-v2"
+    algorithm_version: Literal["major-vessel-aabb-tapered-surface-v3"] = (
+        "major-vessel-aabb-tapered-surface-v3"
     )
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     result_status: ProbeVesselResultStatus
@@ -146,9 +185,11 @@ class ProbeVesselAnalysis(BaseModel):
 
         if "safe" in self.statement.casefold():
             raise ValueError("vessel-analysis statement must not use safety language")
+        if self.measured_segment_count != self.candidate_segment_count:
+            raise ValueError("measured segment count must equal the exact narrow-phase candidates")
         if self.result_status is ProbeVesselResultStatus.INSUFFICIENT_GEOMETRY:
             if self.conflicts:
-                raise ValueError("an unconfirmed profile cannot publish classified conflicts")
+                raise ValueError("an insufficient-geometry result cannot publish conflicts")
         elif not (
             self.risk_profile.confirmed_by_user
             and self.risk_profile.reference_only_coverage_acknowledged
@@ -163,6 +204,16 @@ class ProbeVesselAnalysis(BaseModel):
                 raise ValueError("no-conflict result must use the reviewed bounded statement")
             if self.conflicts:
                 raise ValueError("no-conflict result cannot contain conflicts")
+            minimum_source_bound = self.provenance.minimum_spatial_uncertainty_bound_um
+            if minimum_source_bound is None:
+                raise ValueError(
+                    "no-conflict result requires reviewed registration and tissue "
+                    "uncertainty bounds"
+                )
+            if self.risk_profile.registration_uncertainty_um + 1e-6 < minimum_source_bound:
+                raise ValueError(
+                    "no-conflict result uncertainty is below the reviewed source bound"
+                )
         if (
             self.result_status
             in {

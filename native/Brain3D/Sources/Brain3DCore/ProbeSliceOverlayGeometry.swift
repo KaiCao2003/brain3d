@@ -73,14 +73,93 @@ public struct ProbeSliceOverlay: Equatable, Sendable {
 }
 
 public enum ProbeSliceOverlayGeometry {
+    public static func makeDorsalProjection(
+        plan: ProbePlanDetail,
+        resolution: AtlasASRResolution,
+        shape: AtlasASRShape
+    ) -> ProbeSliceOverlay? {
+        guard plan.hasCurrentPlanningGeometry else { return nil }
+        return makeDorsalProjection(
+            resolution: resolution,
+            shape: shape,
+            entry: plan.placement.atlasFrame.entry,
+            target: plan.placement.atlasFrame.target,
+            tip: plan.placement.atlasFrame.tip,
+            shanks: plan.shanks,
+            recordingSites: plan.recordingSites
+        )
+    }
+
+    public static func makeDorsalProjection(
+        resolution: AtlasASRResolution,
+        shape: AtlasASRShape,
+        entry: ProbePhysicalPoint,
+        target: ProbePhysicalPoint,
+        tip: ProbePhysicalPoint,
+        shanks: [ProbePlacedShank],
+        recordingSites _: [ProbeRecordingSite]
+    ) -> ProbeSliceOverlay {
+        var markers: [ProbeSliceMarker] = []
+        for (point, id, role, label) in [
+            (entry, "placement-entry", ProbeSliceMarkerRole.entry, "Entry"),
+            (target, "placement-target", ProbeSliceMarkerRole.target, "Target"),
+            (tip, "placement-tip", ProbeSliceMarkerRole.tip, "Tip"),
+        ] {
+            if let imagePoint = dorsalImagePoint(
+                point,
+                resolution: resolution,
+                shape: shape
+            ) {
+                markers.append(
+                    ProbeSliceMarker(id: id, role: role, label: label, imagePoint: imagePoint)
+                )
+            }
+        }
+        // A Dorsal AP/ML projection discards DV. Rendering hundreds of recording
+        // sites after that collapse creates an opaque point cloud and implies false
+        // site separation. Site markers remain available in the true depth slices;
+        // Dorsal intentionally preserves only landmarks and every shank centerline.
+
+        let width = Double(shape[.ml])
+        let height = Double(shape[.ap])
+        let shankProjections = shanks.compactMap { shank -> ProbeShankSliceIntersection? in
+            guard let start = dorsalUnboundedImagePoint(shank.entry, resolution: resolution),
+                  let end = dorsalUnboundedImagePoint(shank.tip, resolution: resolution)
+            else { return nil }
+            let distance = hypot(end.column - start.column, end.row - start.row)
+            if distance <= 1e-9 {
+                guard start.column >= 0, start.column < width,
+                      start.row >= 0, start.row < height
+                else { return nil }
+                return ProbeShankSliceIntersection(
+                    shankId: shank.shankId,
+                    geometry: .point(start)
+                )
+            }
+            guard let clipped = clip(start: start, end: end, width: width, height: height)
+            else { return nil }
+            return ProbeShankSliceIntersection(
+                shankId: shank.shankId,
+                geometry: .segment(start: clipped.start, end: clipped.end)
+            )
+        }
+        return ProbeSliceOverlay(
+            orientation: .horizontal,
+            sliceIndex: 0,
+            markers: markers,
+            shankIntersections: shankProjections
+        )
+    }
+
     public static func make(
         plan: ProbePlanDetail,
         orientation: AtlasSliceOrientation,
         sliceIndex: Int,
         resolution: AtlasASRResolution,
         shape: AtlasASRShape
-    ) -> ProbeSliceOverlay {
-        make(
+    ) -> ProbeSliceOverlay? {
+        guard plan.hasCurrentPlanningGeometry else { return nil }
+        return make(
             orientation: orientation,
             sliceIndex: sliceIndex,
             resolution: resolution,
@@ -280,6 +359,30 @@ public enum ProbeSliceOverlayGeometry {
               candidate.row >= 0, candidate.row < height
         else { return nil }
         return candidate
+    }
+
+    private static func dorsalImagePoint(
+        _ point: ProbePhysicalPoint,
+        resolution: AtlasASRResolution,
+        shape: AtlasASRShape
+    ) -> ProbeSliceImagePoint? {
+        guard let candidate = dorsalUnboundedImagePoint(point, resolution: resolution),
+              candidate.column >= 0,
+              candidate.column < Double(shape[.ml]),
+              candidate.row >= 0,
+              candidate.row < Double(shape[.ap])
+        else { return nil }
+        return candidate
+    }
+
+    private static func dorsalUnboundedImagePoint(
+        _ point: ProbePhysicalPoint,
+        resolution: AtlasASRResolution
+    ) -> ProbeSliceImagePoint? {
+        let column = point.mlMicrometres / resolution[.ml]
+        let row = point.apMicrometres / resolution[.ap]
+        guard column.isFinite, row.isFinite else { return nil }
+        return ProbeSliceImagePoint(column: column, row: row)
     }
 
     private static func unboundedImagePoint(

@@ -5,7 +5,7 @@ Audit baseline: `main` commit `51fe26d637b700d39944bbee86e3ea42ded4e7a2`, review
 
 > **Historical snapshot:** every present-tense “current” statement below refers to that baseline,
 > not the current development tree. The refactor has since made calibration, target projection,
-> probe planning/region traversal, the LAMBADA major-vessel layer and V2 analysis, and SceneKit 3D
+> probe planning/region traversal, the LAMBADA major-vessel layer and V3 analysis, and SceneKit 3D
 > product-reachable. See [Project Status](../PROJECT_STATUS.md) for the live inventory.
 
 This document records evidence about what is reachable from the supported product, what is only

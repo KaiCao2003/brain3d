@@ -24,7 +24,7 @@ work in [draft pull request #1](https://github.com/KaiCao2003/brain3d/pull/1).
 | Calibration | Create/list/inspect/validate/activate/remove subject calibration; QC-gated target projection | No default Allen bregma transform is invented |
 | Probes | Versioned catalog, placement CRUD, 2D/3D overlays, site/region traversal, inspector, CSV/JSON export | NP1 is source-transcribed and review-pending, not independently verified |
 | Major vessels | LAMBADA P60_606 radius-bearing graph in slices, Dorsal, and 3D | Reference specimen only; diameter ≥30 µm; pial/choroidal/smaller vessels omitted |
-| Vessel analysis | V2 tapered-surface clearance with probe envelope, margin, uncertainty, conflicts, provenance | Requires risk-input and incomplete-coverage acknowledgements |
+| Vessel analysis | V3 AABB-candidate/tapered-surface clearance with probe envelope, margin, uncertainty, conflicts, provenance | Missing source uncertainty bounds fail closed |
 | Projects | Revisioned, checksummed `.mouseplan` save/open, migrations, backup recovery | Stale revisions and source mismatches fail closed |
 
 Population vascular density and subject dorsal-image registration remain archived backend
@@ -49,10 +49,15 @@ The current layer is derived from Renier, de Launoit, and Skriabine's P60_606 gr
 radius is at least 15 µm: 71,313 points, 59,495 segments, and 11,818 polylines. Runtime checks bind
 the asset to its manifest, hashes, array schema, Allen 25 µm frame, and extraction rule.
 
-The V2 algorithm minimizes the probe-envelope distance to tapered vessel surfaces, rather than
-assuming a constant radius or using only centerline distance. It subtracts the declared required
-margin and registration uncertainty and reports the nearest geometry and conflict class. A
-zero-conflict result uses only this bounded statement:
+The V3 algorithm prunes with conservative AABB/feasible bounds and then minimizes the
+probe-envelope distance to candidate tapered vessel surfaces, rather than assuming a constant
+radius or using only centerline distance. It subtracts the declared required margin and
+registration uncertainty and reports the nearest geometry and conflict class.
+
+P60_606 does not publish reviewed numerical bounds for registration error or tissue distortion,
+so a trajectory without a loaded-geometry conflict returns `insufficientGeometry`; no user-entered
+value can turn missing provenance into an absence claim. The following statement is reserved for
+a future source with reviewed bounds covered by the stated uncertainty:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 

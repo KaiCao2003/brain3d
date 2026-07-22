@@ -18,6 +18,10 @@ struct MajorVesselProtocolTests {
         #expect(result.graph.runOffsets.first == 0)
         #expect(result.graph.runOffsets.last == MajorVesselContract.expectedPointCount)
         #expect(result.provenance.derivedAssetSha256 == MajorVesselContract.derivedAssetSHA256)
+        #expect(result.provenance.registrationTransformId == nil)
+        #expect(result.provenance.registrationUncertaintyBoundMicrometres == nil)
+        #expect(result.provenance.tissueDistortionUncertaintyBoundMicrometres == nil)
+        #expect(result.provenance.uncertaintyBoundsReviewed == false)
         #expect(result.limitations.contains(where: {
             $0.localizedCaseInsensitiveContains("pial")
         }))
@@ -194,6 +198,10 @@ struct MajorVesselProtocolTests {
             "pialVesselsExcluded": true,
             "choroidalVesselsExcluded": true,
             "arteryVeinClassificationAvailable": false,
+            "registrationTransformId": NSNull(),
+            "registrationUncertaintyBoundMicrometres": NSNull(),
+            "tissueDistortionUncertaintyBoundMicrometres": NSNull(),
+            "uncertaintyBoundsReviewed": false,
         ]
     }
 

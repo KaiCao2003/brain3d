@@ -25,7 +25,8 @@ conversion, calibration, geometry derivation, and analysis so they remain testab
 
 The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`; only one view occupies
 the workspace. Coronal, sagittal, and horizontal keep independent persisted depths. Picking a
-region replaces one compact label and never moves a slice. Dorsal is a reference projection;
+region replaces one compact label and never moves a slice. Dorsal is an AP/ML reference projection
+of the atlas surface, major vessels, and selected probe shanks (not a collapsed recording-site cloud);
 3D has its own camera and ray-pick interaction while consuming the same atlas/probe/vessel state.
 
 There is no crosshair, focus mode, 2×2 panel state, or duplicated cursor that can silently couple
@@ -50,11 +51,11 @@ subject calibration → projected target → versioned probe placement
                                       ├─→ exact voxel traversal + export
                                       ├─→ SceneKit probe envelope
 LAMBADA P60 major-vessel graph ─────├─→ 2D / Dorsal / 3D overlays
-                                      └─→ V2 tapered-surface analysis
+                                      └─→ V3 broad-phase + tapered-surface analysis
 ```
 
 The vessel bridge sends bounded, typed, little-endian geometry buffers with declared hashes.
-Swift validates and renders the resulting runs and radii. Python performs the authoritative V2
+Swift validates and renders the resulting runs and radii. Python performs the authoritative V3
 probe-envelope-to-tapered-vessel-surface calculation, including required margin and registration
 uncertainty. The UI cannot manufacture a conflict result from rendered pixels.
 
@@ -65,7 +66,10 @@ The primary vessel layer is the LAMBADA P60_606 reference filtered to point radi
 omits pial and choroidal vessels. Population density and subject-image registration are archived
 backend capabilities and remain outside the primary planning UI.
 
-The only bounded zero-conflict statement is:
+The bundled source has no reviewed bound for registration error or tissue distortion, so absence
+of a loaded-geometry conflict fails closed as `insufficientGeometry`. Intersections and threshold
+violations remain reportable reference measurements. This zero-conflict statement is reserved for
+a future source with reviewed uncertainty bounds covered by the analysis inputs:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 

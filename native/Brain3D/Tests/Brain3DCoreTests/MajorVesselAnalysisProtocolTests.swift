@@ -13,6 +13,47 @@ struct MajorVesselAnalysisProtocolTests {
         #expect(result.analysis.minimumAdjustedClearanceMicrometres == 125)
         #expect(result.analysis.conflicts.isEmpty)
         #expect(result.analysis.usableForNavigation == false)
+        #expect(result.analysis.algorithmVersion == "major-vessel-aabb-tapered-surface-v3")
+        #expect(result.analysis.provenance.registrationTransformId == nil)
+        #expect(result.analysis.provenance.uncertaintyBoundsReviewed == false)
+    }
+
+    @Test("Current project and plan identity gates restored analysis")
+    func restoredIdentityValidation() throws {
+        let result = try decode(payload())
+        try MajorVesselAnalysisValidator.validateCurrent(
+            result,
+            projectId: "00000000-0000-0000-0000-000000000001",
+            projectRevision: 7,
+            planId: "00000000-0000-0000-0000-000000000002",
+            planVersion: 2,
+            planInputSha256: String(repeating: "c", count: 64)
+        )
+        #expect(throws: MajorVesselContractError.self) {
+            try MajorVesselAnalysisValidator.validateCurrent(
+                result,
+                projectId: result.projectId,
+                projectRevision: 8,
+                planId: result.planId,
+                planVersion: result.planVersion,
+                planInputSha256: result.planInputSha256
+            )
+        }
+    }
+
+    @Test("Reviewed inputs may still produce an unclassifiable result")
+    func reviewedButUnclassifiable() throws {
+        var object = payload()
+        var analysis = try #require(object["analysis"] as? [String: Any])
+        analysis["resultStatus"] = "insufficientGeometry"
+        analysis["statement"] =
+            "The source does not provide reviewed registration and tissue-distortion bounds."
+        object["analysis"] = analysis
+
+        let result = try decode(object)
+        #expect(result.analysis.riskProfile.confirmedByUser)
+        #expect(result.analysis.riskProfile.referenceOnlyCoverageAcknowledged)
+        #expect(result.analysis.resultStatus == .insufficientGeometry)
     }
 
     @Test("Unbounded result wording is rejected")
@@ -125,6 +166,10 @@ struct MajorVesselAnalysisProtocolTests {
             "pialVesselsExcluded": true,
             "choroidalVesselsExcluded": true,
             "arteryVeinClassificationAvailable": false,
+            "registrationTransformId": NSNull(),
+            "registrationUncertaintyBoundMicrometres": NSNull(),
+            "tissueDistortionUncertaintyBoundMicrometres": NSNull(),
+            "uncertaintyBoundsReviewed": false,
         ]
     }
 }

@@ -13,6 +13,7 @@ enum ProbeEnvelopeNodeFactory {
         container.name = "selected-probe-envelope"
         container.categoryBitMask = SceneCategory.probe.rawValue
         guard let plan else { return container }
+        guard plan.hasCurrentPlanningGeometry else { return container }
 
         return try makeNode(
             for: plan.shanks,

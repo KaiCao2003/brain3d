@@ -64,9 +64,7 @@ class AtlasPhysicalPointAPMLDV(BaseModel):
     ap_um: FiniteFloat
     ml_um: FiniteFloat
     dv_um: FiniteFloat
-    frame_id: Literal["BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"] = (
-        "BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"
-    )
+    frame_id: Literal["BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"] = "BRAINGLOBE_PHYSICAL_ASR_AP_ML_DV_UM"
     component_order: tuple[Literal["AP"], Literal["ML"], Literal["DV"]] = (
         "AP",
         "ML",

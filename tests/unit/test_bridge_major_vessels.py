@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
@@ -122,6 +121,23 @@ def _mapping(value: object) -> dict[str, object]:
     return cast(dict[str, object], value)
 
 
+def _unexpected_project_replace(project: PlannerProject) -> int:
+    del project
+    pytest.fail("project mutation not expected")
+
+
+@dataclass(slots=True)
+class _ProjectState:
+    project: PlannerProject
+    revision: int
+
+    def replace(self, project: PlannerProject) -> int:
+        assert project.project_revision == self.revision
+        self.revision += 1
+        self.project = project.model_copy(update={"project_revision": self.revision})
+        return self.revision
+
+
 def _decode_buffer(
     value: object,
     *,
@@ -154,6 +170,7 @@ def test_registration_declares_capabilities_without_loading_geometry() -> None:
         dispatcher,
         get_project=lambda: pytest.fail("project not expected"),
         get_revision=lambda: 0,
+        replace_project=_unexpected_project_replace,
         graph_loader=loader,
     )
 
@@ -191,6 +208,7 @@ def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed() -> None:
         dispatcher,
         get_project=lambda: pytest.fail("project not expected"),
         get_revision=lambda: 0,
+        replace_project=_unexpected_project_replace,
         graph_loader=loader,
     )
 
@@ -223,7 +241,10 @@ def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed() -> None:
     assert provenance["pialVesselsExcluded"] is True
     assert provenance["choroidalVesselsExcluded"] is True
     assert provenance["arteryVeinClassificationAvailable"] is False
-    assert "calibrat" not in json.dumps(provenance, sort_keys=True).casefold()
+    assert provenance["registrationTransformId"] is None
+    assert provenance["registrationUncertaintyBoundMicrometres"] is None
+    assert provenance["tissueDistortionUncertaintyBoundMicrometres"] is None
+    assert provenance["uncertaintyBoundsReviewed"] is False
     atlas = _mapping(metadata["atlas"])
     assert atlas["identifier"] == "allen_mouse_25um"
     assert atlas["version"] == "1.2"
@@ -283,6 +304,7 @@ def test_real_bundled_graph_round_trips_through_bridge_buffers() -> None:
         dispatcher,
         get_project=lambda: pytest.fail("project not expected"),
         get_revision=lambda: 0,
+        replace_project=_unexpected_project_replace,
         graph_loader=lambda: graph,
     )
 
@@ -343,6 +365,7 @@ def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary() -> None
         dispatcher,
         get_project=lambda: pytest.fail("project not expected"),
         get_revision=lambda: 0,
+        replace_project=_unexpected_project_replace,
         graph_loader=failing_loader,
     )
     _call(dispatcher, "hello", client="lazy-integrity-test")
@@ -381,6 +404,7 @@ def test_reference_rejects_every_nonexact_atlas_contract(
         dispatcher,
         get_project=lambda: pytest.fail("project not expected"),
         get_revision=lambda: 0,
+        replace_project=_unexpected_project_replace,
         graph_loader=loader,
     )
 
@@ -434,11 +458,13 @@ def _analysis_params(
 def test_analysis_requires_both_acknowledgements_before_classifying_conflicts() -> None:
     project, revision = _project_with_probe_plan()
     assert project.atlas is not None
+    state = _ProjectState(project=project, revision=revision)
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
     register_major_vessel_handlers(
         dispatcher,
-        get_project=lambda: project,
-        get_revision=lambda: revision,
+        get_project=lambda: state.project,
+        get_revision=lambda: state.revision,
+        replace_project=state.replace,
         graph_loader=_tiny_graph,
     )
 
@@ -447,16 +473,19 @@ def test_analysis_requires_both_acknowledgements_before_classifying_conflicts() 
         (True, False),
         (False, True),
     ):
+        prior_revision = state.revision
         response = _call(
             dispatcher,
             "vessel.major.reference.analyze",
             **_analysis_params(
-                project,
-                revision,
+                state.project,
+                state.revision,
                 profile_confirmed=profile_confirmed,
                 coverage_acknowledged=coverage_acknowledged,
             ),
         )
+        assert response["projectRevision"] == prior_revision + 1 == state.revision
+        assert len(state.project.probe_vessel_analyses) == 1
         analysis = _mapping(response["analysis"])
         assert response["limitations"] == list(MANDATORY_LIMITATIONS)
         assert analysis["resultStatus"] == "insufficientGeometry"
@@ -472,22 +501,22 @@ def test_analysis_requires_both_acknowledgements_before_classifying_conflicts() 
         dispatcher,
         "vessel.major.reference.analyze",
         **_analysis_params(
-            project,
-            revision,
+            state.project,
+            state.revision,
             profile_confirmed=True,
             coverage_acknowledged=True,
         ),
     )
     assert confirmed["projectId"] == str(project.project_uuid)
-    assert confirmed["projectRevision"] == revision
+    assert confirmed["projectRevision"] == state.revision
     assert confirmed["planId"] == str(project.probe_plans[0].plan_uuid)
     assert confirmed["planInputSha256"] == project.probe_plans[0].input_sha256
     assert confirmed["limitations"] == list(MANDATORY_LIMITATIONS)
     analysis = _mapping(confirmed["analysis"])
-    assert analysis["algorithmVersion"] == "major-vessel-aabb-tapered-surface-v2"
+    assert analysis["algorithmVersion"] == "major-vessel-aabb-tapered-surface-v3"
     assert analysis["resultStatus"] == "intersection"
     assert analysis["candidateSegmentCount"] == 1
-    assert analysis["measuredSegmentCount"] == 2
+    assert analysis["measuredSegmentCount"] == 1
     assert analysis["conflictsTruncated"] is False
     assert analysis["usableForNavigation"] is False
     warnings = analysis["warnings"]
@@ -508,12 +537,52 @@ def test_analysis_requires_both_acknowledgements_before_classifying_conflicts() 
     provenance = _mapping(analysis["provenance"])
     assert provenance["physicalUnitsDeclared"] is True
     assert provenance["atlasScaleApplied"] is True
-    assert "calibrat" not in json.dumps(analysis, sort_keys=True).casefold()
+    assert provenance["registrationTransformId"] is None
+    assert provenance["registrationUncertaintyBoundMicrometres"] is None
+    assert provenance["tissueDistortionUncertaintyBoundMicrometres"] is None
+    assert provenance["uncertaintyBoundsReviewed"] is False
+
+
+def test_analysis_does_not_overwrite_project_when_revision_changes_during_compute() -> None:
+    project, revision = _project_with_probe_plan()
+    assert project.atlas is not None
+    state = _ProjectState(project=project, revision=revision)
+    dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
+
+    def concurrently_mutating_loader() -> LambadaMajorVesselGraph:
+        state.revision += 1
+        state.project = state.project.model_copy(update={"project_revision": state.revision})
+        return _tiny_graph()
+
+    register_major_vessel_handlers(
+        dispatcher,
+        get_project=lambda: state.project,
+        get_revision=lambda: state.revision,
+        replace_project=state.replace,
+        graph_loader=concurrently_mutating_loader,
+    )
+    with pytest.raises(BridgeError) as stale:
+        _call(
+            dispatcher,
+            "vessel.major.reference.analyze",
+            **_analysis_params(
+                project,
+                revision,
+                profile_confirmed=True,
+                coverage_acknowledged=True,
+            ),
+        )
+
+    assert stale.value.code == "ANALYSIS_STALE"
+    assert stale.value.details == {"analysisStored": False}
+    assert state.revision == revision + 1
+    assert state.project.probe_vessel_analyses == []
 
 
 def test_analysis_rejects_stale_hash_and_nonboolean_acknowledgement_before_loading_graph() -> None:
     project, revision = _project_with_probe_plan()
     assert project.atlas is not None
+    state = _ProjectState(project=project, revision=revision)
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
     load_count = 0
 
@@ -524,8 +593,9 @@ def test_analysis_rejects_stale_hash_and_nonboolean_acknowledgement_before_loadi
 
     register_major_vessel_handlers(
         dispatcher,
-        get_project=lambda: project,
-        get_revision=lambda: revision,
+        get_project=lambda: state.project,
+        get_revision=lambda: state.revision,
+        replace_project=state.replace,
         graph_loader=loader,
     )
     stale_params = _analysis_params(

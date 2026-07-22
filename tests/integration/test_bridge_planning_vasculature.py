@@ -10,6 +10,7 @@ import pytest
 from numpy.typing import NDArray
 from PIL import Image
 
+from mouse_brain_planner.bridge import planning as planning_module
 from mouse_brain_planner.bridge.planning import (
     ANIMAL_ONLY_WARNING,
     PlanningBridgeSession,
@@ -409,8 +410,47 @@ def test_backend_project_revision_is_authoritative_for_unsaved_changes(
     reopened_state = _call(reopened_dispatcher, "state.get")
     reopened_project = reopened_state["project"]
     assert isinstance(reopened_project, dict)
-    assert reopened_project["revision"] == 0
+    assert reopened_project["revision"] == 4
     assert reopened_project["isDirty"] is False
+    with pytest.raises(BridgeError) as stale:
+        _call(
+            reopened_dispatcher,
+            "viewer.slice.set",
+            projectId=reopened_project["projectId"],
+            expectedProjectRevision=0,
+            orientation="coronal",
+            index=0,
+        )
+    assert stale.value.code == "PROJECT_REVISION_CONFLICT"
+
+
+def test_project_save_failure_rolls_back_revision_event_and_session_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dispatcher, session = _dispatcher()
+    _new_project(dispatcher)
+    assert session.project is not None
+    before = session.project.model_dump(mode="json")
+    before_revision = session.project_revision
+
+    def fail_save(*args: object, **kwargs: object) -> Path:
+        del args, kwargs
+        raise OSError("test-only save failure")
+
+    monkeypatch.setattr(planning_module, "save_project", fail_save)
+    destination = tmp_path / "must-not-exist.mouseplan"
+    with pytest.raises(BridgeError) as failure:
+        _call(dispatcher, "project.save", path=str(destination))
+
+    assert failure.value.code == "PROJECT_SAVE_FAILED"
+    assert session.project is not None
+    assert session.project.model_dump(mode="json") == before
+    assert session.project_revision == before_revision == 1
+    assert session.project.project_revision == before_revision
+    assert session.project_path is None
+    assert session.saved_revision is None
+    assert not destination.exists()
 
 
 def test_unconfirmed_laterality_never_produces_subject_overlay(tmp_path: Path) -> None:

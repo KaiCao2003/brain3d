@@ -17,8 +17,9 @@ phantom-targeting, histological-outcome, or formal usability validation.
 
 ## Native views
 
-- Dorsal is a depth-collapsed reference projection. It cannot recover vessel depth and must not
-  be interpreted as the animal's cortical surface.
+- Dorsal is a depth-collapsed AP/ML reference projection. It shows selected-probe landmarks and
+  shank paths but intentionally omits the collapsed 960-site cloud. It cannot recover vessel depth
+  and must not be interpreted as the animal's cortical surface.
 - SceneKit 3D is a display and picking view of backend-verified geometry. Camera interaction and
   rendering do not add anatomical accuracy.
 - Probe and vessel overlays are clipped/projected according to their documented slab rules. A
@@ -54,7 +55,7 @@ phantom-targeting, histological-outcome, or formal usability validation.
 
 See [the full extraction record](docs/LAMBADA_MAJOR_VESSELS.md).
 
-## V2 reference analysis
+## V3 reference analysis
 
 The algorithm computes the minimum separation between a conservative probe envelope and tapered
 surfaces in the loaded reference graph, then subtracts a user-declared required margin and
@@ -63,7 +64,10 @@ but it cannot evaluate omitted, deformed, or subject-specific vessels.
 
 Required margin and uncertainty are lab inputs, not values supplied or validated by the software.
 The acknowledgements confirm that the operator saw those assumptions; they do not validate them.
-The only bounded zero-conflict statement is:
+Because the bundled provenance has no reviewed registration/tissue-distortion uncertainty bound,
+the software does not emit a zero-conflict classification for it. A no-loaded-conflict result is
+`insufficientGeometry`. The following statement is reserved for a future source with reviewed
+bounds covered by the entered uncertainty:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 

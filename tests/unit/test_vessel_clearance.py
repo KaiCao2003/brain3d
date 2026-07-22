@@ -10,9 +10,14 @@ from scipy.optimize import minimize_scalar
 
 from mouse_brain_planner.analysis.vessel_clearance import (
     NO_CONFLICT_STATEMENT,
+    UNBOUNDED_SOURCE_STATEMENT,
+    UNDERSPECIFIED_UNCERTAINTY_STATEMENT,
     ProbeShankASR,
     RadiusBearingVesselRuns,
     VesselClearanceInputError,
+    _closest_probe_to_segments,
+    _closest_probe_to_tapered_segments,
+    _segments,
     analyze_probe_vessel_clearance,
 )
 from mouse_brain_planner.domain.vessel_clearance_models import (
@@ -24,7 +29,15 @@ from mouse_brain_planner.domain.vessel_clearance_models import (
 from mouse_brain_planner.surgery.measurements import finite_segment_closest_points
 
 
-def _source() -> MajorVesselSourceProvenance:
+def _source(*, bounded: bool = True) -> MajorVesselSourceProvenance:
+    uncertainty_evidence: dict[str, object] = {}
+    if bounded:
+        uncertainty_evidence = {
+            "registration_transform_id": "synthetic-registration-v1",
+            "registration_uncertainty_bound_um": 4.0,
+            "tissue_distortion_uncertainty_bound_um": 4.0,
+            "uncertainty_bounds_reviewed": True,
+        }
     return MajorVesselSourceProvenance(
         source_id="synthetic-test-source",
         source_doi="10.0000/test",
@@ -39,6 +52,7 @@ def _source() -> MajorVesselSourceProvenance:
         derived_asset_sha256="0" * 64,
         extraction_algorithm_version="test-extractor-v1",
         minimum_included_diameter_um=30,
+        **uncertainty_evidence,
     )
 
 
@@ -137,6 +151,57 @@ def test_no_conflict_uses_only_the_reviewed_bounded_statement() -> None:
     assert "safe" not in result.statement.casefold()
 
 
+def test_unbounded_source_never_publishes_no_conflict() -> None:
+    result = analyze_probe_vessel_clearance(
+        shanks=(_probe(),),
+        vessels=_horizontal_vessel(distance=50),
+        risk_profile=_profile(),
+        provenance=_source(bounded=False),
+    )
+
+    assert result.result_status is ProbeVesselResultStatus.INSUFFICIENT_GEOMETRY
+    assert result.statement == UNBOUNDED_SOURCE_STATEMENT
+    assert result.conflicts == ()
+    assert result.minimum_uncertainty_adjusted_clearance_um == pytest.approx(10)
+    assert any("not bounded" in warning for warning in result.warnings)
+    assert NO_CONFLICT_STATEMENT not in result.statement
+
+
+def test_unbounded_source_retains_a_positive_conflict_measurement() -> None:
+    result = analyze_probe_vessel_clearance(
+        shanks=(_probe(),),
+        vessels=_horizontal_vessel(distance=10),
+        risk_profile=_profile(),
+        provenance=_source(bounded=False),
+    )
+
+    assert result.result_status is ProbeVesselResultStatus.INTERSECTION
+    assert len(result.conflicts) == 1
+    assert result.conflicts[0].geometric_surface_clearance_um == pytest.approx(-10)
+    assert any("not bounded" in warning for warning in result.warnings)
+
+
+def test_uncertainty_below_reviewed_source_bound_fails_closed() -> None:
+    result = analyze_probe_vessel_clearance(
+        shanks=(_probe(),),
+        vessels=_horizontal_vessel(distance=50),
+        risk_profile=_profile(uncertainty=7),
+        provenance=_source(),
+    )
+
+    assert result.result_status is ProbeVesselResultStatus.INSUFFICIENT_GEOMETRY
+    assert result.statement == UNDERSPECIFIED_UNCERTAINTY_STATEMENT
+    assert result.conflicts == ()
+    assert any("combined source bound of 8" in warning for warning in result.warnings)
+
+
+def test_reviewed_source_uncertainty_requires_complete_evidence() -> None:
+    payload = _source().model_dump()
+    payload["registration_transform_id"] = None
+    with pytest.raises(ValueError, match="transform ID and both uncertainty bounds"):
+        MajorVesselSourceProvenance.model_validate(payload)
+
+
 def test_unconfirmed_reference_profile_returns_measurements_without_classification() -> None:
     result = analyze_probe_vessel_clearance(
         shanks=(_probe(),),
@@ -221,6 +286,77 @@ def test_vectorized_global_nearest_matches_shared_scalar_kernel() -> None:
     )
 
 
+def test_candidate_first_pruning_matches_full_exact_scan() -> None:
+    rng = np.random.default_rng(20260723)
+    segment_count = 2_048
+    starts = rng.uniform(1_500, 4_000, size=(segment_count, 3))
+    ends = starts + rng.normal(scale=30, size=(segment_count, 3))
+    starts[0] = (-10, 0, 12)
+    ends[0] = (10, 0, 12)
+    starts[1] = (-10, 0, 40)
+    ends[1] = (10, 0, 40)
+    radii = rng.uniform(15, 40, size=(segment_count, 2))
+    radii[0] = (15, 15)
+    # The closest centerline is edge 0, while the closest tapered surface is
+    # edge 1.  Candidate pruning must preserve both independent global minima.
+    radii[1] = (60, 60)
+    points = np.empty((segment_count * 2, 3), dtype=np.float64)
+    points[0::2] = starts
+    points[1::2] = ends
+    point_radii = np.empty(segment_count * 2, dtype=np.float64)
+    point_radii[0::2] = radii[:, 0]
+    point_radii[1::2] = radii[:, 1]
+    vessels = RadiusBearingVesselRuns(
+        points_asr_um=points,
+        radii_um=point_radii,
+        run_offsets=np.arange(0, segment_count * 2 + 1, 2, dtype=np.int64),
+        source_edge_indices=np.arange(segment_count, dtype=np.int64),
+    )
+    probe = _probe()
+    full_segments = _segments(vessels)
+    full_centerline = _closest_probe_to_segments(
+        probe.entry_asr_um,
+        probe.tip_asr_um,
+        full_segments,
+    )
+    full_tapered = _closest_probe_to_tapered_segments(
+        probe.entry_asr_um,
+        probe.tip_asr_um,
+        full_segments,
+    )
+    full_geometric = full_tapered.distance - full_tapered.vessel_radius - probe.envelope_radius_um
+    full_adjusted = full_geometric - 10 - 10
+    expected_conflict_edges = {
+        int(edge) for edge in full_segments.source_edge_index[full_adjusted <= 1e-6]
+    }
+
+    result = analyze_probe_vessel_clearance(
+        shanks=(probe,),
+        vessels=vessels,
+        risk_profile=_profile(),
+        provenance=_source(),
+        maximum_conflicts=segment_count,
+    )
+
+    assert result.candidate_segment_count == result.measured_segment_count
+    assert result.measured_segment_count < segment_count // 10
+    assert result.nearest_centerline_distance_um == pytest.approx(
+        float(full_centerline.distance.min()),
+        abs=1e-10,
+    )
+    assert result.minimum_geometric_clearance_um == pytest.approx(
+        float(full_geometric.min()),
+        abs=1e-8,
+    )
+    assert result.minimum_uncertainty_adjusted_clearance_um == pytest.approx(
+        float(full_adjusted.min()),
+        abs=1e-8,
+    )
+    assert {conflict.vessel_source_edge_index for conflict in result.conflicts} == (
+        expected_conflict_edges
+    )
+
+
 def test_tapered_radius_minimization_catches_large_radius_endpoint() -> None:
     vessels = RadiusBearingVesselRuns(
         points_asr_um=np.asarray(((30, 0, 0), (40, 0, 0)), dtype=np.float64),
@@ -242,7 +378,7 @@ def test_tapered_radius_minimization_catches_large_radius_endpoint() -> None:
         provenance=_source(),
     )
 
-    assert result.algorithm_version == "major-vessel-aabb-tapered-surface-v2"
+    assert result.algorithm_version == "major-vessel-aabb-tapered-surface-v3"
     assert result.result_status is ProbeVesselResultStatus.INTERSECTION
     assert result.nearest_centerline_distance_um == pytest.approx(30)
     assert result.minimum_geometric_clearance_um == pytest.approx(-5)

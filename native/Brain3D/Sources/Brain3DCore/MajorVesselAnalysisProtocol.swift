@@ -1,7 +1,7 @@
 import Foundation
 
 public enum MajorVesselAnalysisContract {
-    public static let algorithmVersion = "major-vessel-aabb-tapered-surface-v2"
+    public static let algorithmVersion = "major-vessel-aabb-tapered-surface-v3"
     public static let noConflictStatement =
         "No conflict detected within the loaded geometry and stated uncertainty assumptions."
     public static let maximumDistanceMicrometres = 10_000.0
@@ -374,7 +374,7 @@ public struct MajorVesselClearanceAnalysis: Decodable, Equatable, Sendable {
         case .insufficientGeometry:
             guard conflicts.isEmpty else {
                 throw MajorVesselContractError.invalid(
-                    "Unconfirmed vessel analysis cannot publish conflicts."
+                    "An unclassified vessel analysis cannot publish conflicts."
                 )
             }
         case .noConflictDetected:
@@ -445,6 +445,30 @@ public struct MajorVesselAnalysisResult: Decodable, Equatable, Sendable {
         else {
             throw MajorVesselContractError.invalid(
                 "Vessel analysis result identity or limitations are inconsistent."
+            )
+        }
+    }
+}
+
+public enum MajorVesselAnalysisValidator {
+    public static func validateCurrent(
+        _ result: MajorVesselAnalysisResult,
+        projectId: String,
+        projectRevision: Int,
+        planId: String,
+        planVersion: Int,
+        planInputSha256: String
+    ) throws {
+        guard result.projectId == projectId,
+              result.projectRevision == projectRevision,
+              result.planId == planId,
+              result.planVersion == planVersion,
+              result.planInputSha256 == planInputSha256,
+              result.analysis.provenance.derivedAssetSha256
+                == MajorVesselContract.derivedAssetSHA256
+        else {
+            throw MajorVesselContractError.invalid(
+                "Vessel analysis is stale or belongs to another project, plan, or vessel asset."
             )
         }
     }

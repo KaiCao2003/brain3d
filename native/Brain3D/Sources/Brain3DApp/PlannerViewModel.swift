@@ -427,10 +427,24 @@ final class PlannerViewModel: ObservableObject {
             && !probeOperationInProgress
     }
 
-    var canAnalyzeMajorVesselClearance: Bool {
+    var canAnalyzeSelectedProbeRegions: Bool {
+        canManageProbePlanning
+            && selectedProbePlan?.hasCurrentPlanningGeometry == true
+    }
+
+    var canRemoveSelectedProbePlan: Bool {
         connection.isReady
             && backendState?.project != nil
             && selectedProbePlan != nil
+            && supportsProbePlanning
+            && !projectOperationInProgress
+            && !probeOperationInProgress
+    }
+
+    var canAnalyzeMajorVesselClearance: Bool {
+        connection.isReady
+            && backendState?.project != nil
+            && selectedProbePlan?.hasCurrentPlanningGeometry == true
             && majorVesselGeometry != nil
             && helloResult?.capabilities.radiusAwareReferenceVesselAnalysis == true
             && !majorVesselAnalysisInProgress
@@ -472,9 +486,13 @@ final class PlannerViewModel: ObservableObject {
             return "Single-specimen reference; no geometry is being displayed."
         }
         let source = geometry.provenance
-        return source.pialVesselsExcluded
+        let coverage = source.pialVesselsExcluded
             ? "Single cleared \(source.specimenId) reference; not subject-specific; pial and choroidal vessels are excluded."
             : "Single cleared \(source.specimenId) reference; not subject-specific."
+        guard !source.uncertaintyBoundsReviewed else { return coverage }
+        return coverage
+            + " Registration and tissue-distortion uncertainty bounds are not published; "
+            + "absence of conflict cannot be classified."
     }
 
     func projection(for targetId: String) -> CalibratedTargetProjectionResult? {
@@ -1158,10 +1176,20 @@ final class PlannerViewModel: ObservableObject {
                 projectRevision: project.revision,
                 planId: planId
             )
+            let catalogModel = try await fetchProbeCatalogModel(
+                using: bridgeClient,
+                modelId: result.plan.modelId,
+                modelVersion: result.plan.modelVersion,
+                matching: result.plan
+            )
+            selectedProbeModel = catalogModel
             selectedProbePlanId = planId
             selectedProbePlan = result.plan
-            selectedProbeRegionAnalysis = result.regionAnalysis
-            clearMajorVesselAnalysis()
+            selectedProbeRegionAnalysis = result.plan.hasCurrentPlanningGeometry
+                ? result.regionAnalysis : nil
+            selectedProbeVesselAnalysis = result.plan.hasCurrentPlanningGeometry
+                ? result.majorVesselAnalysis : nil
+            majorVesselAnalysisError = nil
             return true
         } catch {
             selectedProbePlanId = nil
@@ -1319,7 +1347,7 @@ final class PlannerViewModel: ObservableObject {
         probeOperationError = nil
         guard
             let bridgeClient,
-            canManageProbePlanning,
+            canRemoveSelectedProbePlan,
             let project = backendState?.project,
             let plan = selectedProbePlan
         else {
@@ -1364,7 +1392,7 @@ final class PlannerViewModel: ObservableObject {
         probeOperationError = nil
         guard
             let bridgeClient,
-            canManageProbePlanning,
+            canAnalyzeSelectedProbeRegions,
             let project = backendState?.project,
             let plan = selectedProbePlan
         else {
@@ -1437,12 +1465,15 @@ final class PlannerViewModel: ObservableObject {
                 method: "vessel.major.reference.analyze",
                 params: request
             )
-            guard result.projectId == project.projectId,
-                  result.projectRevision == project.revision,
-                  result.planId == plan.planId,
-                  result.planVersion == plan.planVersion,
-                  result.planInputSha256 == plan.inputSha256,
-                  result.analysis.riskProfile.requiredMarginMicrometres
+            try MajorVesselAnalysisValidator.validateCurrent(
+                result,
+                projectId: project.projectId,
+                projectRevision: project.revision + 1,
+                planId: plan.planId,
+                planVersion: plan.planVersion,
+                planInputSha256: plan.inputSha256
+            )
+            guard result.analysis.riskProfile.requiredMarginMicrometres
                     == requiredMarginMicrometres,
                   result.analysis.riskProfile.registrationUncertaintyMicrometres
                     == registrationUncertaintyMicrometres,
@@ -1457,6 +1488,13 @@ final class PlannerViewModel: ObservableObject {
                 )
             }
             selectedProbeVesselAnalysis = result
+            await refreshState()
+            guard backendState?.project?.revision == result.projectRevision,
+                  selectedProbePlan?.inputSha256 == result.planInputSha256,
+                  selectedProbeVesselAnalysis?.analysis.inputSha256
+                    == result.analysis.inputSha256
+            else { throw ProbePlanningOperationFailure.mutationNotPublished }
+            hasUnsavedChanges = true
             return true
         } catch {
             selectedProbeVesselAnalysis = nil
@@ -1475,7 +1513,7 @@ final class PlannerViewModel: ObservableObject {
         probeOperationError = nil
         guard
             let bridgeClient,
-            canManageProbePlanning,
+            canAnalyzeSelectedProbeRegions,
             let project = backendState?.project,
             let plan = selectedProbePlan,
             let analysis = selectedProbeRegionAnalysis
@@ -1517,6 +1555,7 @@ final class PlannerViewModel: ObservableObject {
     func probeSliceOverlay(for orientation: AtlasSliceOrientation) -> ProbeSliceOverlay? {
         guard
             let plan = selectedProbePlan,
+            plan.hasCurrentPlanningGeometry,
             let frame = viewerFrame(for: orientation),
             let atlas = viewerSnapshot?.atlas
         else { return nil }
@@ -1524,6 +1563,18 @@ final class PlannerViewModel: ObservableObject {
             plan: plan,
             orientation: orientation,
             sliceIndex: frame.index,
+            resolution: atlas.resolutionMicrometres,
+            shape: atlas.shapeVoxels
+        )
+    }
+
+    var probeDorsalOverlay: ProbeSliceOverlay? {
+        guard let plan = selectedProbePlan,
+              plan.hasCurrentPlanningGeometry,
+              let atlas = viewerSnapshot?.atlas
+        else { return nil }
+        return ProbeSliceOverlayGeometry.makeDorsalProjection(
+            plan: plan,
             resolution: atlas.resolutionMicrometres,
             shape: atlas.shapeVoxels
         )
@@ -1615,7 +1666,9 @@ final class PlannerViewModel: ObservableObject {
                 projectRevision: project.revision,
                 rendererAnchor: rendererAnchor,
                 meshResult: meshResult,
-                selectedProbePlan: selectedProbePlan,
+                selectedProbePlan: selectedProbePlan.flatMap {
+                    $0.hasCurrentPlanningGeometry ? $0 : nil
+                },
                 majorVessels: majorVesselGeometry
             )
             cachedRootMesh = meshResult
@@ -2399,6 +2452,34 @@ final class PlannerViewModel: ObservableObject {
         }
     }
 
+    private func fetchProbeCatalogModel(
+        using bridgeClient: BridgeClient,
+        modelId: String,
+        modelVersion: String,
+        matching plan: ProbePlanDetail? = nil
+    ) async throws -> ProbeCatalogModel {
+        guard probeCatalog.contains(where: {
+            $0.modelId == modelId && $0.modelVersion == modelVersion
+        }) else {
+            throw ProbePlanningValidationError.invalid(
+                "The plan's exact probe model is not present in the reviewed catalog."
+            )
+        }
+        let result: ProbeCatalogGetResult = try await bridgeClient.request(
+            method: "probe.catalog.get",
+            params: ProbeCatalogGetParameters(modelId: modelId, modelVersion: modelVersion)
+        )
+        try ProbePlanningValidator.validateCatalogGet(
+            result,
+            modelId: modelId,
+            modelVersion: modelVersion
+        )
+        if let plan {
+            try ProbePlanningValidator.validateCatalogModel(result.model, matches: plan)
+        }
+        return result.model
+    }
+
     private func synchronizeProbePlanning(
         using bridgeClient: BridgeClient,
         project: ProjectBridgeState
@@ -2409,28 +2490,6 @@ final class PlannerViewModel: ObservableObject {
         )
         try ProbePlanningValidator.validateCatalogList(catalogResult)
         probeCatalog = catalogResult.models
-
-        let requestedModel = ProbePlanningContract.preferredCatalogModel(
-            in: catalogResult.models,
-            preservingIdentity: selectedProbeModel?.id
-        )
-        if let requestedModel {
-            let detail: ProbeCatalogGetResult = try await bridgeClient.request(
-                method: "probe.catalog.get",
-                params: ProbeCatalogGetParameters(
-                    modelId: requestedModel.modelId,
-                    modelVersion: requestedModel.modelVersion
-                )
-            )
-            try ProbePlanningValidator.validateCatalogGet(
-                detail,
-                modelId: requestedModel.modelId,
-                modelVersion: requestedModel.modelVersion
-            )
-            selectedProbeModel = detail.model
-        } else {
-            selectedProbeModel = nil
-        }
 
         let list: ProbePlanListResult = try await bridgeClient.request(
             method: "probe.plan.list",
@@ -2457,6 +2516,19 @@ final class PlannerViewModel: ObservableObject {
             selectedProbePlan = nil
             selectedProbeRegionAnalysis = nil
             clearMajorVesselAnalysis()
+            let requestedModel = ProbePlanningContract.preferredCatalogModel(
+                in: catalogResult.models,
+                preservingIdentity: selectedProbeModel?.id
+            )
+            if let requestedModel {
+                selectedProbeModel = try await fetchProbeCatalogModel(
+                    using: bridgeClient,
+                    modelId: requestedModel.modelId,
+                    modelVersion: requestedModel.modelVersion
+                )
+            } else {
+                selectedProbeModel = nil
+            }
             return
         }
         let detail: ProbePlanGetResult = try await bridgeClient.request(
@@ -2469,12 +2541,19 @@ final class PlannerViewModel: ObservableObject {
             projectRevision: project.revision,
             planId: chosenId
         )
-        if selectedProbeVesselAnalysis?.planInputSha256 != detail.plan.inputSha256 {
-            clearMajorVesselAnalysis()
-        }
+        selectedProbeModel = try await fetchProbeCatalogModel(
+            using: bridgeClient,
+            modelId: detail.plan.modelId,
+            modelVersion: detail.plan.modelVersion,
+            matching: detail.plan
+        )
         selectedProbePlanId = chosenId
         selectedProbePlan = detail.plan
-        selectedProbeRegionAnalysis = detail.regionAnalysis
+        selectedProbeRegionAnalysis = detail.plan.hasCurrentPlanningGeometry
+            ? detail.regionAnalysis : nil
+        selectedProbeVesselAnalysis = detail.plan.hasCurrentPlanningGeometry
+            ? detail.majorVesselAnalysis : nil
+        majorVesselAnalysisError = nil
     }
 
     private func clearProbePlanning() {

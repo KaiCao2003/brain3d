@@ -22,11 +22,16 @@ The integrity-checked runs and radii are shown in three representations of the s
 The primary UI does not add capillaries or infer artery/vein identity. Population density and
 subject-image registration remain archived backend paths and are not substituted for these runs.
 
-For a selected probe, algorithm `major-vessel-aabb-tapered-surface-v2` minimizes separation from
-the conservative probe envelope to the linearly tapered vessel surfaces. It then applies the
-operator's declared required margin and registration uncertainty. Analysis requires separate
-acknowledgement of those lab-defined inputs and of this reference's incomplete coverage. Its
-bounded zero-conflict wording is:
+For a selected probe, algorithm `major-vessel-aabb-tapered-surface-v3` first applies a sound AABB
+candidate pass, then minimizes separation from the conservative probe envelope to the linearly
+tapered vessel surfaces. It applies the operator's declared required margin and registration
+uncertainty and requires separate acknowledgement of those inputs and incomplete coverage.
+
+The source does not publish reviewed numerical bounds for its atlas-registration error or tissue
+distortion. Consequently the bundled graph can report measured loaded-geometry conflicts, but a
+trajectory with no such conflict is classified `insufficientGeometry`, not zero-conflict. The
+following wording is reserved for a future source with reviewed bounds that are covered by the
+stated uncertainty:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 

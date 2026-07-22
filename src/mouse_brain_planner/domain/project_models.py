@@ -23,6 +23,7 @@ from mouse_brain_planner.domain.vessel_models import (
     SubjectVascularImage,
     SubjectVascularOverlayState,
 )
+from mouse_brain_planner.domain.vessel_plan_models import ProbeVesselAnalysisBundle
 from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION, __version__
 
 MAX_PROJECT_EVENTS = 1_000
@@ -32,6 +33,7 @@ MAX_UNPROJECTED_BREGMA_TARGETS = 256
 MAX_CALIBRATIONS = 32
 MAX_PROBE_PLANS = 32
 MAX_PROBE_REGION_ANALYSES = 32
+MAX_PROBE_VESSEL_ANALYSES = 32
 
 
 class ViewerSliceDepths(BaseModel):
@@ -99,6 +101,7 @@ class PlannerProject(BaseModel):
 
     schema_version: int = PROJECT_SCHEMA_VERSION
     application_version: str = __version__
+    project_revision: int = Field(default=0, ge=0)
     project_uuid: UUID = Field(default_factory=uuid4)
     title: str = Field(default="Untitled surgery plan", min_length=1, max_length=200)
     subject_id: str | None = Field(default=None, max_length=200)
@@ -141,6 +144,10 @@ class PlannerProject(BaseModel):
         default_factory=list,
         max_length=MAX_PROBE_REGION_ANALYSES,
     )
+    probe_vessel_analyses: list[ProbeVesselAnalysisBundle] = Field(
+        default_factory=list,
+        max_length=MAX_PROBE_VESSEL_ANALYSES,
+    )
     coordinate_convention: str = "BrainGlobe ASR: [AP,DV,ML], origin A/S/R, increasing P/I/L, µm"
     scientific_disclaimer_acknowledged: bool = False
     user_notes: str = ""
@@ -155,6 +162,15 @@ class PlannerProject(BaseModel):
             raise ValueError(
                 f"project schema {value} is unsupported; expected {PROJECT_SCHEMA_VERSION}"
             )
+        return value
+
+    @field_validator("project_revision", mode="before")
+    @classmethod
+    def validate_project_revision(cls, value: object) -> int:
+        """Reject booleans and coercible text at the persisted concurrency boundary."""
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("project revision must be a nonnegative integer")
         return value
 
     @model_validator(mode="after")
@@ -190,6 +206,9 @@ class PlannerProject(BaseModel):
         analyses_by_plan = [item.plan_uuid for item in self.probe_region_analyses]
         if len(analyses_by_plan) != len(set(analyses_by_plan)):
             raise ValueError("only one current region-analysis bundle is allowed per probe plan")
+        vessel_analyses_by_plan = [item.plan_uuid for item in self.probe_vessel_analyses]
+        if len(vessel_analyses_by_plan) != len(set(vessel_analyses_by_plan)):
+            raise ValueError("only one current vessel-analysis bundle is allowed per probe plan")
 
         if self.atlas is None:
             if self.linked_cursor is not None:
@@ -202,7 +221,7 @@ class PlannerProject(BaseModel):
                 raise ValueError("atlas region state requires atlas metadata")
             if self.calibrations or self.active_calibration_uuid is not None:
                 raise ValueError("atlas-registered calibration state requires atlas metadata")
-            if self.probe_plans or self.probe_region_analyses:
+            if self.probe_plans or self.probe_region_analyses or self.probe_vessel_analyses:
                 raise ValueError("probe planning state requires atlas metadata")
             if (
                 self.subject_vascular_images
@@ -282,6 +301,13 @@ class PlannerProject(BaseModel):
                 raise ValueError(
                     "probe plan calibration version does not match project calibration"
                 )
+            if plan.manipulator_input is not None and (
+                plan.manipulator_input.frame_id
+                != referenced_calibration.atlas_transform.source_frame.frame_id
+            ):
+                raise ValueError(
+                    "probe plan manipulator input frame does not match its calibration"
+                )
             if not plan.probe_model.permits_verified_device_label and not (
                 plan.placement.custom_geometry_acknowledged
             ):
@@ -294,17 +320,24 @@ class PlannerProject(BaseModel):
                 bundle.plan_input_sha256 != referenced_plan.input_sha256
             ):
                 raise ValueError("region analysis is stale for its current probe plan")
-            placement_ids = {
-                analysis.placement_uuid for analysis in bundle.shank_analyses
-            }
+            placement_ids = {analysis.placement_uuid for analysis in bundle.shank_analyses}
             if placement_ids != {referenced_plan.placement.placement_uuid}:
                 raise ValueError("region analysis placement does not match its probe plan")
-            expected_shanks = {
-                shank.shank_id for shank in referenced_plan.probe_model.shanks
-            }
+            expected_shanks = {shank.shank_id for shank in referenced_plan.probe_model.shanks}
             actual_shanks = {analysis.shank_id for analysis in bundle.shank_analyses}
             if actual_shanks != expected_shanks:
                 raise ValueError("region analysis does not cover every probe-model shank")
+        for vessel_bundle in self.probe_vessel_analyses:
+            referenced_plan = plans_by_id.get(vessel_bundle.plan_uuid)
+            if referenced_plan is None:
+                raise ValueError("vessel analysis references an unavailable probe plan")
+            if vessel_bundle.plan_version != referenced_plan.plan_version or (
+                vessel_bundle.plan_input_sha256 != referenced_plan.input_sha256
+            ):
+                raise ValueError("vessel analysis is stale for its current probe plan")
+            provenance = vessel_bundle.analysis.provenance
+            if (provenance.atlas_key, provenance.atlas_version) != expected_atlas_identity:
+                raise ValueError("vessel analysis atlas identity does not match project atlas")
 
         if self.viewer_slice_depths is not None:
             depth_limits = {
@@ -315,9 +348,7 @@ class PlannerProject(BaseModel):
             for orientation, limit in depth_limits.items():
                 depth = getattr(self.viewer_slice_depths, orientation)
                 if depth < 0 or depth >= limit:
-                    raise ValueError(
-                        f"{orientation} viewer slice {depth} is outside [0, {limit})"
-                    )
+                    raise ValueError(f"{orientation} viewer slice {depth} is outside [0, {limit})")
 
         if self.viewer_region_selection is not None:
             if self.viewer_slice_depths is None:

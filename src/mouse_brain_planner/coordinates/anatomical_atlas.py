@@ -28,8 +28,7 @@ def canonical_atlas_frame(metadata: AtlasMetadata) -> AnatomicalFrameDefinition:
 
     return AnatomicalFrameDefinition(
         frame_id=(
-            "ATLAS_CANONICAL_AP_ML_DV_UM:"
-            f"{metadata.atlas_key}:{metadata.atlas_package_version}"
+            f"ATLAS_CANONICAL_AP_ML_DV_UM:{metadata.atlas_key}:{metadata.atlas_package_version}"
         ),
         kind=CoordinateSystemKind.ATLAS,
         origin_description=(

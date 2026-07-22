@@ -46,6 +46,19 @@ trajectory transforms, overlays, traversal, persistence, and stale-result reject
 do not establish manufacturing tolerances, physical-probe conformance, insertion deformation, or
 procedural accuracy.
 
+## Calibrated placement geometry
+
+Planning algorithm `calibrated-stereotaxic-probe-transform-v2` preserves the operator's exact
+subject-stereotaxic azimuth, elevation, insertion depth, and axial rotation separately from the
+derived atlas pose. It constructs entry, target, tip, insertion direction, and the probe's local
+lateral/normal basis in the stereotaxic frame, then maps the complete pose through the same rigid
+or similarity calibration. Shank offsets, site offsets, width, and thickness follow that mapped
+basis and uniform scale; they are not reconstructed from atlas-global ML after rotation.
+
+Full affine calibration is rejected for probe planning because shear would turn a physical
+rectangular cross-section into a different envelope. Legacy v1 plans must be explicitly updated
+before region or vessel analysis; their previously derived geometry is never treated as current.
+
 ## Adding another hardware model
 
 Any additional model needs a stable ID/version, exact product revision, pinned primary sources

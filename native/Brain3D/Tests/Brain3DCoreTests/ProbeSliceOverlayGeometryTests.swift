@@ -146,6 +146,68 @@ struct ProbeSliceOverlayGeometryTests {
         #expect(otherSlice.shankIntersections.isEmpty)
     }
 
+    @Test("Dorsal keeps every shank readable without a depth-collapsed site cloud")
+    func dorsalProjection() {
+        let diagonalShank = ProbePlacedShank(
+            shankId: "s1",
+            entry: point(ap: -25, dv: -500, ml: -25, inside: false),
+            tip: point(ap: 250, dv: 500, ml: 250, inside: false),
+            widthMicrometres: 70,
+            thicknessMicrometres: 20,
+            conservativeEnvelopeRadiusMicrometres: 36.4,
+            envelopeDefinition: "conservative radius"
+        )
+        let depthOnlyShank = ProbePlacedShank(
+            shankId: "s2",
+            entry: point(ap: 50, dv: -500, ml: 125, inside: false),
+            tip: point(ap: 50, dv: 5_000, ml: 125, inside: false),
+            widthMicrometres: 70,
+            thicknessMicrometres: 20,
+            conservativeEnvelopeRadiusMicrometres: 36.4,
+            envelopeDefinition: "conservative radius"
+        )
+        let overlay = ProbeSliceOverlayGeometry.makeDorsalProjection(
+            resolution: resolution,
+            shape: shape,
+            entry: point(ap: 25, dv: -100, ml: 50, inside: false),
+            target: point(ap: 50, dv: 100, ml: 75),
+            tip: point(ap: 75, dv: 500, ml: 100, inside: false),
+            shanks: [diagonalShank, depthOnlyShank],
+            recordingSites: (0 ..< 960).map { index in
+                ProbeRecordingSite(
+                    shankId: index.isMultiple(of: 2) ? "s1" : "s2",
+                    siteId: "site-\(index)",
+                    role: "recording",
+                    point: point(
+                        ap: 50,
+                        dv: Double(index) * 10,
+                        ml: 75,
+                        inside: false
+                    )
+                )
+            }
+        )
+        #expect(overlay.orientation == .horizontal)
+        #expect(overlay.markers.map(\.id) == [
+            "placement-entry", "placement-target", "placement-tip",
+        ])
+        #expect(!overlay.markers.contains(where: { $0.role == .recordingSite }))
+        #expect(overlay.shankIntersections.count == 2)
+        #expect(overlay.markers[0].imagePoint == .init(column: 2, row: 1))
+        guard case let .segment(start, end) = overlay.shankIntersections[0].geometry else {
+            Issue.record("A nonvertical Dorsal probe must remain a clipped AP/ML segment")
+            return
+        }
+        #expect(start == .init(column: 0, row: 0))
+        #expect(end.column < 8)
+        #expect(end.row < 8)
+        guard case let .point(depthOnlyPoint) = overlay.shankIntersections[1].geometry else {
+            Issue.record("A depth-only Dorsal probe must remain a visible AP/ML point")
+            return
+        }
+        #expect(depthOnlyPoint == .init(column: 5, row: 2))
+    }
+
     @Test("Continuous image coordinates map through the viewport with half-open edges")
     func viewportContinuousMapping() throws {
         let viewport = AtlasSliceViewport(

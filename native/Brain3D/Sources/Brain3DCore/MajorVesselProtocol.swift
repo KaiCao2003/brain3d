@@ -65,6 +65,10 @@ public struct MajorVesselSourceProvenance: Decodable, Equatable, Sendable {
     public let pialVesselsExcluded: Bool
     public let choroidalVesselsExcluded: Bool
     public let arteryVeinClassificationAvailable: Bool
+    public let registrationTransformId: String?
+    public let registrationUncertaintyBoundMicrometres: Double?
+    public let tissueDistortionUncertaintyBoundMicrometres: Double?
+    public let uncertaintyBoundsReviewed: Bool
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
         case sourceId
@@ -91,6 +95,10 @@ public struct MajorVesselSourceProvenance: Decodable, Equatable, Sendable {
         case pialVesselsExcluded
         case choroidalVesselsExcluded
         case arteryVeinClassificationAvailable
+        case registrationTransformId
+        case registrationUncertaintyBoundMicrometres
+        case tissueDistortionUncertaintyBoundMicrometres
+        case uncertaintyBoundsReviewed
     }
 
     public init(from decoder: any Decoder) throws {
@@ -132,6 +140,22 @@ public struct MajorVesselSourceProvenance: Decodable, Equatable, Sendable {
             Bool.self,
             forKey: .arteryVeinClassificationAvailable
         )
+        registrationTransformId = try container.decodeIfPresent(
+            String.self,
+            forKey: .registrationTransformId
+        )
+        registrationUncertaintyBoundMicrometres = try container.decodeIfPresent(
+            Double.self,
+            forKey: .registrationUncertaintyBoundMicrometres
+        )
+        tissueDistortionUncertaintyBoundMicrometres = try container.decodeIfPresent(
+            Double.self,
+            forKey: .tissueDistortionUncertaintyBoundMicrometres
+        )
+        uncertaintyBoundsReviewed = try container.decode(
+            Bool.self,
+            forKey: .uncertaintyBoundsReviewed
+        )
         try validate()
     }
 
@@ -157,6 +181,10 @@ public struct MajorVesselSourceProvenance: Decodable, Equatable, Sendable {
               pialVesselsExcluded,
               choroidalVesselsExcluded,
               !arteryVeinClassificationAvailable,
+              registrationTransformId == nil,
+              registrationUncertaintyBoundMicrometres == nil,
+              tissueDistortionUncertaintyBoundMicrometres == nil,
+              !uncertaintyBoundsReviewed,
               sourceLicense == "CC BY 4.0",
               !datasetTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !sourceVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,

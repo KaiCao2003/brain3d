@@ -23,10 +23,7 @@ struct ProjectSidebar: View {
     @State private var probeGeometryAcknowledged = false
     @State private var showingProbeRegionInspector = false
     @State private var confirmingProbeRemoval = false
-    @State private var vesselMarginMicrometres = ""
-    @State private var vesselUncertaintyMicrometres = ""
-    @State private var vesselRiskProfileConfirmed = false
-    @State private var vesselCoverageAcknowledged = false
+    @State private var vesselAnalysisDraft = VesselAnalysisDraft()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -73,8 +70,20 @@ struct ProjectSidebar: View {
         .onChange(of: model.selectedProbePlan?.inputSha256, initial: true) {
             _, _ in
             populateProbeDraft()
-            vesselRiskProfileConfirmed = false
-            vesselCoverageAcknowledged = false
+            populateVesselAnalysisDraftForCurrentPlan()
+        }
+        .onChange(of: model.backendState?.project?.projectId) { _, _ in
+            populateVesselAnalysisDraftForCurrentPlan()
+        }
+        .onChange(of: model.selectedProbeVesselAnalysis?.analysis.inputSha256) { _, _ in
+            guard let result = model.selectedProbeVesselAnalysis else { return }
+            populateVesselAnalysisDraft(from: result)
+        }
+        .onChange(of: vesselAnalysisDraft) { _, draft in
+            guard let result = model.selectedProbeVesselAnalysis,
+                  !draft.matches(result.analysis)
+            else { return }
+            model.invalidateMajorVesselAnalysis()
         }
     }
 
@@ -154,34 +163,48 @@ struct ProjectSidebar: View {
                         Task { _ = await createProbePlan() }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmitProbeDraft)
                 } else {
                     Button("Update plan", systemImage: "checkmark") {
                         Task { _ = await updateProbePlan() }
                     }
                     .buttonStyle(.borderedProminent)
+                    .disabled(!canSubmitProbeDraft)
                     Button("Remove", systemImage: "trash", role: .destructive) {
                         confirmingProbeRemoval = true
                     }
+                    .disabled(!model.canRemoveSelectedProbePlan)
                 }
             }
             .controlSize(.small)
-            .disabled(!canSubmitProbeDraft)
 
             if let plan = model.selectedProbePlan {
-                Text(
-                    "v\(plan.planVersion) · \(plan.modelDisplayName) · planning only · not navigation"
-                )
+                Text(plan.requiresPlanningGeometryUpdate
+                    ? "v\(plan.planVersion) · legacy geometry hidden · update required"
+                    : "v\(plan.planVersion) · \(plan.modelDisplayName) · planning only · not navigation")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
+
+                if plan.requiresPlanningGeometryUpdate {
+                    Label(
+                        "This legacy plan uses obsolete projection geometry. Review the restored inputs and choose Update plan to recompute it. Slice, 3D, region, and vessel analysis are disabled until then.",
+                        systemImage: "arrow.triangle.2.circlepath"
+                    )
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
 
                 HStack {
                     Button("Analyze regions", systemImage: "list.bullet.indent") {
                         Task { _ = await model.analyzeSelectedProbeRegions() }
                     }
-                    .disabled(!model.canManageProbePlanning)
+                    .disabled(!model.canAnalyzeSelectedProbeRegions)
 
-                    if model.selectedProbeRegionAnalysis != nil {
+                    if plan.hasCurrentPlanningGeometry,
+                       model.selectedProbeRegionAnalysis != nil
+                    {
                         Button("Inspect…", systemImage: "tablecells") {
                             showingProbeRegionInspector = true
                         }
@@ -190,7 +213,9 @@ struct ProjectSidebar: View {
                 .buttonStyle(.bordered)
                 .controlSize(.small)
 
-                if model.selectedProbeRegionAnalysis != nil {
+                if plan.hasCurrentPlanningGeometry,
+                   model.selectedProbeRegionAnalysis != nil
+                {
                     HStack {
                         Button("Save CSV…") { saveProbeRegions(.csv) }
                         Button("Save JSON…") { saveProbeRegions(.json) }
@@ -316,12 +341,13 @@ struct ProjectSidebar: View {
 
     private func populateProbeDraft() {
         guard let plan = model.selectedProbePlan else { return }
+        let manipulator = plan.manipulatorDraft
         probeName = plan.name
         probeTargetId = plan.targetId
-        probeAzimuth = decimalText(plan.placement.azimuthDegrees)
-        probeElevation = decimalText(plan.placement.elevationDegrees)
-        probeDepth = decimalText(plan.placement.insertionDepthMicrometres)
-        probeAxialRotation = decimalText(plan.placement.axialRotationDegrees)
+        probeAzimuth = decimalText(manipulator.azimuthDegrees)
+        probeElevation = decimalText(manipulator.elevationDegrees)
+        probeDepth = decimalText(manipulator.insertionDepthMicrometres)
+        probeAxialRotation = decimalText(manipulator.axialRotationDegrees)
         probeGeometryAcknowledged = ProbePlanningContract.requiresExplicitAcknowledgement(
             verificationStatus: plan.verificationStatus
         )
@@ -339,6 +365,30 @@ struct ProjectSidebar: View {
 
     private func decimalText(_ value: Double) -> String {
         String(format: "%.12g", value)
+    }
+
+    private func populateVesselAnalysisDraftForCurrentPlan() {
+        guard let projectId = model.backendState?.project?.projectId,
+              let plan = model.selectedProbePlan,
+              let result = model.selectedProbeVesselAnalysis,
+              result.projectId == projectId,
+              result.planId == plan.planId,
+              result.planInputSha256 == plan.inputSha256
+        else {
+            vesselAnalysisDraft = VesselAnalysisDraft()
+            return
+        }
+        vesselAnalysisDraft = VesselAnalysisDraft(analysis: result.analysis)
+    }
+
+    private func populateVesselAnalysisDraft(from result: MajorVesselAnalysisResult) {
+        guard let projectId = model.backendState?.project?.projectId,
+              let plan = model.selectedProbePlan,
+              result.projectId == projectId,
+              result.planId == plan.planId,
+              result.planInputSha256 == plan.inputSha256
+        else { return }
+        vesselAnalysisDraft = VesselAnalysisDraft(analysis: result.analysis)
     }
 
     private func saveProbeRegions(_ format: ProbeRegionExportFormat) {
@@ -392,34 +442,30 @@ struct ProjectSidebar: View {
                 }
                 .font(.caption)
             }
-            if model.selectedProbePlan != nil, model.majorVesselGeometry != nil {
+            if model.selectedProbePlan?.hasCurrentPlanningGeometry == true,
+               model.majorVesselGeometry != nil
+            {
                 Divider()
                 Text("Probe clearance")
                     .font(.caption.weight(.semibold))
                 vesselDistanceField(
                     "Required margin (µm)",
-                    text: $vesselMarginMicrometres
+                    text: $vesselAnalysisDraft.requiredMarginMicrometres
                 )
                 vesselDistanceField(
                     "Registration uncertainty (µm)",
-                    text: $vesselUncertaintyMicrometres
+                    text: $vesselAnalysisDraft.registrationUncertaintyMicrometres
                 )
                 Toggle(
                     "I reviewed these lab-defined inputs",
-                    isOn: $vesselRiskProfileConfirmed
+                    isOn: $vesselAnalysisDraft.riskProfileConfirmed
                 )
                 .font(.caption)
-                .onChange(of: vesselRiskProfileConfirmed) { _, _ in
-                    model.invalidateMajorVesselAnalysis()
-                }
                 Toggle(
                     "I understand this is a single fixed reference with missing vessels",
-                    isOn: $vesselCoverageAcknowledged
+                    isOn: $vesselAnalysisDraft.referenceCoverageAcknowledged
                 )
                 .font(.caption)
-                .onChange(of: vesselCoverageAcknowledged) { _, _ in
-                    model.invalidateMajorVesselAnalysis()
-                }
                 Button("Analyze probe", systemImage: "waveform.path.ecg") {
                     analyzeProbeMajorVessels()
                 }
@@ -450,30 +496,36 @@ struct ProjectSidebar: View {
             TextField("0", text: text)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
-                .onChange(of: text.wrappedValue) { _, _ in
-                    model.invalidateMajorVesselAnalysis()
-                }
         }
     }
 
     private var canAnalyzeProbeMajorVessels: Bool {
         model.canAnalyzeMajorVesselClearance
-            && parsedVesselDistance(vesselMarginMicrometres) != nil
-            && parsedVesselDistance(vesselUncertaintyMicrometres) != nil
-            && vesselRiskProfileConfirmed
-            && vesselCoverageAcknowledged
+            && parsedVesselDistance(vesselAnalysisDraft.requiredMarginMicrometres) != nil
+            && parsedVesselDistance(
+                vesselAnalysisDraft.registrationUncertaintyMicrometres
+            ) != nil
+            && vesselAnalysisDraft.riskProfileConfirmed
+            && vesselAnalysisDraft.referenceCoverageAcknowledged
     }
 
     private func analyzeProbeMajorVessels() {
-        guard let margin = parsedVesselDistance(vesselMarginMicrometres),
-              let uncertainty = parsedVesselDistance(vesselUncertaintyMicrometres)
+        guard let margin = parsedVesselDistance(
+            vesselAnalysisDraft.requiredMarginMicrometres
+        ),
+              let uncertainty = parsedVesselDistance(
+                  vesselAnalysisDraft.registrationUncertaintyMicrometres
+              )
         else { return }
+        let riskProfileConfirmed = vesselAnalysisDraft.riskProfileConfirmed
+        let referenceCoverageAcknowledged =
+            vesselAnalysisDraft.referenceCoverageAcknowledged
         Task {
             _ = await model.analyzeSelectedProbeMajorVessels(
                 requiredMarginMicrometres: margin,
                 registrationUncertaintyMicrometres: uncertainty,
-                riskProfileConfirmed: vesselRiskProfileConfirmed,
-                referenceCoverageAcknowledged: vesselCoverageAcknowledged
+                riskProfileConfirmed: riskProfileConfirmed,
+                referenceCoverageAcknowledged: referenceCoverageAcknowledged
             )
         }
     }
@@ -547,7 +599,7 @@ struct ProjectSidebar: View {
         case .marginViolation: "Margin violation"
         case .uncertaintyViolation: "Uncertainty-bound violation"
         case .noConflictDetected: "Loaded reference evaluated"
-        case .insufficientGeometry: "Inputs not confirmed"
+        case .insufficientGeometry: "Result not classifiable"
         }
     }
 
@@ -908,6 +960,41 @@ struct ProjectSidebar: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+private struct VesselAnalysisDraft: Equatable {
+    var requiredMarginMicrometres = ""
+    var registrationUncertaintyMicrometres = ""
+    var riskProfileConfirmed = false
+    var referenceCoverageAcknowledged = false
+
+    init() {}
+
+    init(analysis: MajorVesselClearanceAnalysis) {
+        let profile = analysis.riskProfile
+        requiredMarginMicrometres = String(profile.requiredMarginMicrometres)
+        registrationUncertaintyMicrometres = String(
+            profile.registrationUncertaintyMicrometres
+        )
+        riskProfileConfirmed = profile.confirmedByUser
+        referenceCoverageAcknowledged = profile.referenceOnlyCoverageAcknowledged
+    }
+
+    func matches(_ analysis: MajorVesselClearanceAnalysis) -> Bool {
+        let profile = analysis.riskProfile
+        guard let margin = Double(requiredMarginMicrometres.trimmingCharacters(
+            in: .whitespacesAndNewlines
+        )),
+              let uncertainty = Double(registrationUncertaintyMicrometres.trimmingCharacters(
+                  in: .whitespacesAndNewlines
+              ))
+        else { return false }
+        return margin == profile.requiredMarginMicrometres
+            && uncertainty == profile.registrationUncertaintyMicrometres
+            && riskProfileConfirmed == profile.confirmedByUser
+            && referenceCoverageAcknowledged
+                == profile.referenceOnlyCoverageAcknowledged
     }
 }
 

@@ -289,7 +289,7 @@ private struct DorsalVesselWorkspace: View {
                         viewportIdentity: "dorsal-reference-vessels",
                         selection: canvasSelection,
                         majorVesselOverlay: model.majorVesselDorsalOverlay,
-                        probeOverlay: nil,
+                        probeOverlay: model.probeDorsalOverlay,
                         interactionHelp: "Click to identify the dorsal-most annotated region. Drag to pan and pinch to zoom.",
                         accessibilityLabel: "Dorsal atlas with reference major vessels",
                         accessibilityValue: accessibilityValue,

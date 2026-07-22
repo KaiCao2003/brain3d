@@ -23,7 +23,8 @@ Create or open a `.mouseplan`, then open/download the reviewed 25 µm atlas when
 
 The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, with one full-size view:
 
-- **Dorsal** shows the atlas surface and the depth-collapsed LAMBADA reference-vessel projection.
+- **Dorsal** shows the atlas surface, depth-collapsed LAMBADA reference vessels, and the selected
+  probe's AP/ML landmarks and shank path; recording sites remain in true-depth slice views.
 - **Coronal**, **Sagittal**, and **Horizontal** each keep an independent depth. Use the slider,
   previous/next buttons, or wheel to move; drag pans and pinch zooms.
 - **3D** shows a SceneKit brain mesh, planned probe envelopes, and radius-bearing reference-vessel
@@ -93,9 +94,12 @@ then acknowledge both:
 1. the lab-defined risk inputs were reviewed; and
 2. this is a single reference with missing vessels.
 
-The V2 calculation measures the conservative probe envelope against tapered vessel surfaces and
-reports intersections, margin/uncertainty violations, or a bounded zero-conflict result. That
-result is worded exactly:
+The V3 calculation applies a conservative broad phase and measures the probe envelope against
+tapered vessel surfaces. It reports intersections and margin/uncertainty violations in the loaded
+reference. Because P60_606 has no reviewed registration/tissue-distortion uncertainty bound, a
+trajectory without a loaded-geometry conflict is reported as `insufficientGeometry`, not as an
+absence claim. For a future source with reviewed bounds covered by the entered uncertainty, the
+reserved zero-conflict wording is:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 
@@ -104,9 +108,10 @@ It does not imply the absence of omitted or subject-specific vessels.
 ## Save and reopen
 
 Save the project as `.mouseplan`. Persistence includes atlas identity, independent slice depths,
-region selection, implant targets, calibrations, probe plans, and archived backend state, with a
-project revision and checksums. The app rejects stale results and source mismatches. Keep the
-project file and exported analyses with their recorded provenance.
+region selection, implant targets, calibrations, probe plans, current region and major-vessel
+analyses, their reviewed inputs and provenance, and archived backend state. Project revisions are
+stored monotonically with checksums across save/reopen. The app rejects stale results and source
+mismatches. Keep the project file and exported analyses with their recorded provenance.
 
 Population density and subject-image registration are preserved only as archived backend paths
 for older work; they are not exposed in the primary UI and are not used for major-vessel analysis.

@@ -16,17 +16,36 @@ from mouse_brain_planner.domain.probe_models import (
     ProbeModelDefinition,
 )
 from mouse_brain_planner.domain.region_models import ProbeRegionAnalysis
+from mouse_brain_planner.domain.surgery_common import FiniteFloat, PositiveFiniteFloat
 
-PROBE_PLANNING_ALGORITHM_VERSION: Final[
-    Literal["calibrated-target-angle-depth-v1"]
-] = "calibrated-target-angle-depth-v1"
-REGION_ANALYSIS_BUNDLE_VERSION: Final[
-    Literal["probe-region-analysis-bundle-v1"]
-] = "probe-region-analysis-bundle-v1"
+LEGACY_PROBE_PLANNING_ALGORITHM_VERSION: Final[Literal["calibrated-target-angle-depth-v1"]] = (
+    "calibrated-target-angle-depth-v1"
+)
+PROBE_PLANNING_ALGORITHM_VERSION: Final[Literal["calibrated-stereotaxic-probe-transform-v2"]] = (
+    "calibrated-stereotaxic-probe-transform-v2"
+)
+REGION_ANALYSIS_BUNDLE_VERSION: Final[Literal["probe-region-analysis-bundle-v1"]] = (
+    "probe-region-analysis-bundle-v1"
+)
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+class ProbeManipulatorInput(BaseModel):
+    """Exact subject-stereotaxic controls entered by the operator."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    frame_id: str = Field(min_length=1, max_length=200)
+    azimuth_deg: FiniteFloat = Field(ge=-180, le=180)
+    elevation_deg: FiniteFloat = Field(ge=-90, le=90)
+    insertion_depth_um: PositiveFiniteFloat
+    axial_rotation_deg: FiniteFloat = Field(ge=-180, le=180)
+    angle_convention: Literal[
+        "azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"
+    ] = "azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"
 
 
 class ProbePlanRecord(BaseModel):
@@ -40,15 +59,17 @@ class ProbePlanRecord(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     source_target: UnprojectedBregmaTarget
     probe_model: ProbeModelDefinition
+    manipulator_input: ProbeManipulatorInput | None = None
     placement: NormalizedProbePlacement
     calibration_uuid: UUID
     calibration_version: int = Field(gt=0)
     calibration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     atlas_metadata_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     projection_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    planning_algorithm_version: Literal["calibrated-target-angle-depth-v1"] = (
-        PROBE_PLANNING_ALGORITHM_VERSION
-    )
+    planning_algorithm_version: Literal[
+        "calibrated-target-angle-depth-v1",
+        "calibrated-stereotaxic-probe-transform-v2",
+    ] = LEGACY_PROBE_PLANNING_ALGORITHM_VERSION
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=_utc_now)
     modified_at: datetime = Field(default_factory=_utc_now)
@@ -86,18 +107,25 @@ class ProbePlanRecord(BaseModel):
             raise ValueError("probe plan requires an explicit animal subject ID")
         if self.source_target.projected:
             raise ValueError("probe plan source must preserve the original unprojected target")
+        if self.planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
+            if self.manipulator_input is None:
+                raise ValueError("current probe plans require preserved manipulator inputs")
+            if self.placement.method.value != "stereotaxic-target-plus-manipulator-angles":
+                raise ValueError("current probe plans require stereotaxic manipulator placement")
         expected = probe_plan_input_digest(
             plan_uuid=self.plan_uuid,
             plan_version=self.plan_version,
             name=self.name,
             source_target=self.source_target,
             probe_model=self.probe_model,
+            manipulator_input=self.manipulator_input,
             placement=self.placement,
             calibration_uuid=self.calibration_uuid,
             calibration_version=self.calibration_version,
             calibration_sha256=self.calibration_sha256,
             atlas_metadata_sha256=self.atlas_metadata_sha256,
             projection_sha256=self.projection_sha256,
+            planning_algorithm_version=self.planning_algorithm_version,
         )
         if self.input_sha256 != expected:
             raise ValueError("probe plan input SHA-256 does not match its scientific inputs")
@@ -159,31 +187,44 @@ def probe_plan_input_digest(
     name: str,
     source_target: UnprojectedBregmaTarget,
     probe_model: ProbeModelDefinition,
+    manipulator_input: ProbeManipulatorInput | None = None,
     placement: NormalizedProbePlacement,
     calibration_uuid: UUID,
     calibration_version: int,
     calibration_sha256: str,
     atlas_metadata_sha256: str,
     projection_sha256: str,
+    planning_algorithm_version: Literal[
+        "calibrated-target-angle-depth-v1",
+        "calibrated-stereotaxic-probe-transform-v2",
+    ] = LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
 ) -> str:
     """Hash every input that can change displayed or analyzed geometry."""
 
-    return _canonical_sha256(
-        {
-            "planUuid": str(plan_uuid),
-            "planVersion": plan_version,
-            "name": name,
-            "sourceTarget": source_target.model_dump(mode="json"),
-            "probeModel": probe_model.model_dump(mode="json"),
-            "placement": placement.model_dump(mode="json"),
-            "calibrationUuid": str(calibration_uuid),
-            "calibrationVersion": calibration_version,
-            "calibrationSha256": calibration_sha256,
-            "atlasMetadataSha256": atlas_metadata_sha256,
-            "projectionSha256": projection_sha256,
-            "planningAlgorithmVersion": PROBE_PLANNING_ALGORITHM_VERSION,
-        }
-    )
+    placement_payload = placement.model_dump(mode="json")
+    if planning_algorithm_version == LEGACY_PROBE_PLANNING_ALGORITHM_VERSION:
+        placement_payload.pop("local_lateral_direction", None)
+        placement_payload.pop("local_normal_direction", None)
+        placement_payload.pop("model_to_placement_uniform_scale", None)
+    payload: dict[str, object] = {
+        "planUuid": str(plan_uuid),
+        "planVersion": plan_version,
+        "name": name,
+        "sourceTarget": source_target.model_dump(mode="json"),
+        "probeModel": probe_model.model_dump(mode="json"),
+        "placement": placement_payload,
+        "calibrationUuid": str(calibration_uuid),
+        "calibrationVersion": calibration_version,
+        "calibrationSha256": calibration_sha256,
+        "atlasMetadataSha256": atlas_metadata_sha256,
+        "projectionSha256": projection_sha256,
+        "planningAlgorithmVersion": planning_algorithm_version,
+    }
+    if planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
+        payload["manipulatorInput"] = (
+            None if manipulator_input is None else manipulator_input.model_dump(mode="json")
+        )
+    return _canonical_sha256(payload)
 
 
 def probe_region_bundle_digest(

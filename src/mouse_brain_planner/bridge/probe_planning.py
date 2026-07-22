@@ -20,6 +20,7 @@ from mouse_brain_planner.analysis.probe_region_service import (
 )
 from mouse_brain_planner.analysis.region_traversal import RegionTraversalInputError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
+from mouse_brain_planner.bridge.major_vessels import major_vessel_analysis_result_payload
 from mouse_brain_planner.bridge.protocol_validation import (
     boolean_value,
     finite_number,
@@ -54,6 +55,7 @@ from mouse_brain_planner.domain.probe_models import (
     ProbeVerificationStatus,
 )
 from mouse_brain_planner.domain.probe_plan_models import (
+    PROBE_PLANNING_ALGORITHM_VERSION,
     ProbePlanRecord,
     ProbeRegionAnalysisBundle,
 )
@@ -61,6 +63,7 @@ from mouse_brain_planner.domain.project_models import MAX_PROBE_PLANS, PlannerPr
 from mouse_brain_planner.domain.region_models import AtlasPhysicalPointAPMLDV
 from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
 from mouse_brain_planner.domain.transform_models import AnatomicalPoint
+from mouse_brain_planner.domain.vessel_plan_models import ProbeVesselAnalysisBundle
 from mouse_brain_planner.probes.catalog import (
     PROBE_CATALOG_VERSION,
     get_probe_model,
@@ -93,8 +96,6 @@ class ProbePlanningBridge:
     get_revision: RevisionGetter
     replace_project: ProjectReplacer
     get_atlas: AtlasGetter
-    _annotation_cache_key: tuple[str, tuple[int, ...], str] | None = None
-    _annotation_sha256: str | None = None
 
     def register(self) -> None:
         self.dispatcher.register("probe.catalog.list", self.catalog_list)
@@ -162,13 +163,24 @@ class ProbePlanningBridge:
         project = self._validated_project(params["projectId"])
         plan = _find_plan(project, params["planId"])
         analysis = _find_analysis(project, plan.plan_uuid, required=False)
+        vessel_analysis = _find_vessel_analysis(project, plan.plan_uuid)
+        project_revision = self.get_revision()
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "found",
             "projectId": str(project.project_uuid),
-            "projectRevision": self.get_revision(),
+            "projectRevision": project_revision,
             "plan": _plan_detail(plan, project.atlas),
             "regionAnalysis": (None if analysis is None else _region_bundle_payload(analysis)),
+            "majorVesselAnalysis": (
+                None
+                if vessel_analysis is None
+                else major_vessel_analysis_result_payload(
+                    vessel_analysis,
+                    project_uuid=project.project_uuid,
+                    project_revision=project_revision,
+                )
+            ),
         }
 
     def plan_create(self, params: Mapping[str, object]) -> JsonObject:
@@ -211,6 +223,12 @@ class ProbePlanningBridge:
         project = self._validated_mutation_project(params)
         existing = _find_plan(project, params["planId"])
         _require_plan_hash(existing, params["expectedPlanInputSha256"])
+        region_analysis_cleared = any(
+            item.plan_uuid == existing.plan_uuid for item in project.probe_region_analyses
+        )
+        vessel_analysis_cleared = any(
+            item.plan_uuid == existing.plan_uuid for item in project.probe_vessel_analyses
+        )
         plan = self._build_plan(
             project,
             params,
@@ -229,11 +247,18 @@ class ProbePlanningBridge:
                 for item in project.probe_region_analyses
                 if item.plan_uuid != existing.plan_uuid
             ],
+            probe_vessel_analyses=[
+                item
+                for item in project.probe_vessel_analyses
+                if item.plan_uuid != existing.plan_uuid
+            ],
         )
         updated.touch(
             "probe-plan-updated",
             f"plan={plan.plan_uuid}; version={plan.plan_version}; "
-            f"inputSha256={plan.input_sha256}; priorAnalysisCleared=true",
+            f"inputSha256={plan.input_sha256}; "
+            f"regionAnalysisCleared={str(region_analysis_cleared).lower()}; "
+            f"majorVesselAnalysisCleared={str(vessel_analysis_cleared).lower()}",
         )
         return self._publish(
             updated,
@@ -259,16 +284,23 @@ class ProbePlanningBridge:
         analysis_removed = any(
             item.plan_uuid == plan.plan_uuid for item in project.probe_region_analyses
         )
+        vessel_analysis_removed = any(
+            item.plan_uuid == plan.plan_uuid for item in project.probe_vessel_analyses
+        )
         updated = _project_update(
             project,
             probe_plans=[item for item in project.probe_plans if item.plan_uuid != plan.plan_uuid],
             probe_region_analyses=[
                 item for item in project.probe_region_analyses if item.plan_uuid != plan.plan_uuid
             ],
+            probe_vessel_analyses=[
+                item for item in project.probe_vessel_analyses if item.plan_uuid != plan.plan_uuid
+            ],
         )
         updated.touch(
             "probe-plan-removed",
-            f"plan={plan.plan_uuid}; regionAnalysisRemoved={str(analysis_removed).lower()}",
+            f"plan={plan.plan_uuid}; regionAnalysisRemoved={str(analysis_removed).lower()}; "
+            f"majorVesselAnalysisRemoved={str(vessel_analysis_removed).lower()}",
         )
         return self._publish(
             updated,
@@ -312,6 +344,7 @@ class ProbePlanningBridge:
         project = self._validated_mutation_project(params)
         plan = _find_plan(project, params["planId"])
         _require_plan_hash(plan, params["expectedPlanInputSha256"])
+        _require_current_probe_geometry(plan)
         atlas = self.get_atlas()
         if project.atlas is None or project.atlas.metadata_sha256 != atlas.metadata.metadata_sha256:
             raise BridgeError(
@@ -554,11 +587,13 @@ class ProbePlanningBridge:
         annotation: np.ndarray[Any, Any],
         metadata: AtlasMetadata,
     ) -> str:
-        key = (metadata.metadata_sha256, tuple(annotation.shape), annotation.dtype.str)
-        if key != self._annotation_cache_key or self._annotation_sha256 is None:
-            self._annotation_sha256 = annotation_array_sha256(annotation)
-            self._annotation_cache_key = key
-        return self._annotation_sha256
+        del metadata
+        # Content provenance must describe the exact array analyzed. Shape,
+        # dtype, and atlas metadata cannot detect replacement or in-place
+        # mutation, so a cached digest would let changed labels inherit an old
+        # scientific hash. Correctness takes priority over avoiding this
+        # bounded sequential read.
+        return annotation_array_sha256(annotation)
 
     def _publish(
         self,
@@ -670,6 +705,30 @@ def _find_analysis(
             details={"planId": str(plan_uuid)},
         )
     return analysis
+
+
+def _find_vessel_analysis(
+    project: PlannerProject,
+    plan_uuid: UUID,
+) -> ProbeVesselAnalysisBundle | None:
+    return next(
+        (item for item in project.probe_vessel_analyses if item.plan_uuid == plan_uuid),
+        None,
+    )
+
+
+def _require_current_probe_geometry(plan: ProbePlanRecord) -> None:
+    if plan.planning_algorithm_version != PROBE_PLANNING_ALGORITHM_VERSION:
+        raise BridgeError(
+            "PROBE_PLAN_RECOMPUTE_REQUIRED",
+            "This legacy probe plan must be updated through its subject calibration "
+            "before analysis.",
+            details={
+                "planId": str(plan.plan_uuid),
+                "planningAlgorithmVersion": plan.planning_algorithm_version,
+                "requiredPlanningAlgorithmVersion": PROBE_PLANNING_ALGORITHM_VERSION,
+            },
+        )
 
 
 def _require_plan_hash(plan: ProbePlanRecord, raw_hash: object) -> None:
@@ -807,6 +866,18 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
             "mlMillimetres": plan.source_target.ml_mm,
             "dvMillimetres": plan.source_target.dv_mm,
         },
+        "manipulatorInput": (
+            None
+            if plan.manipulator_input is None
+            else {
+                "frameId": plan.manipulator_input.frame_id,
+                "azimuthDegrees": plan.manipulator_input.azimuth_deg,
+                "elevationDegrees": plan.manipulator_input.elevation_deg,
+                "insertionDepthMicrometres": plan.manipulator_input.insertion_depth_um,
+                "axialRotationDegrees": plan.manipulator_input.axial_rotation_deg,
+                "angleConvention": plan.manipulator_input.angle_convention,
+            }
+        ),
         "placement": {
             "placementId": str(plan.placement.placement_uuid),
             "method": plan.placement.method.value,

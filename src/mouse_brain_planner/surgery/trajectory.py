@@ -8,6 +8,7 @@ from collections.abc import Iterable
 import numpy as np
 from numpy.typing import NDArray
 
+from mouse_brain_planner.coordinates.transforms import transform_point, transform_vector
 from mouse_brain_planner.domain.probe_models import (
     NormalizedProbePlacement,
     PlacedProbeShank,
@@ -24,7 +25,12 @@ from mouse_brain_planner.domain.surgery_common import (
     AnimalSurgeryContext,
     UnitDirectionAPMLDV,
 )
-from mouse_brain_planner.domain.transform_models import AnatomicalPoint
+from mouse_brain_planner.domain.transform_models import (
+    AnatomicalPoint,
+    AnatomicalTransform,
+    AnatomicalVector,
+    TransformMethod,
+)
 from mouse_brain_planner.surgery.stereotaxy import bregma_relative_target_to_point
 
 
@@ -282,6 +288,125 @@ def placement_from_bregma_relative_mm(
     )
 
 
+def transform_probe_placement_uniform(
+    placement: NormalizedProbePlacement,
+    transform: AnatomicalTransform,
+) -> NormalizedProbePlacement:
+    """Map a complete probe pose through a proper rigid/similarity transform.
+
+    A probe pose is more than its target point: its insertion direction, local
+    lateral/normal basis, recording-site offsets, shank offsets, and envelope
+    dimensions must cross the same calibration boundary.  Full affine maps are
+    deliberately rejected because they shear a physical probe cross-section;
+    that requires an explicit non-rigid envelope model rather than an
+    orthonormal-placement approximation.
+    """
+
+    if transform.method not in {TransformMethod.RIGID, TransformMethod.SIMILARITY}:
+        raise ProbePlacementError(
+            "probe geometry projection requires a rigid or similarity atlas transform; "
+            "an affine transform would shear the physical probe envelope"
+        )
+    if placement.entry.frame_id != transform.source_frame.frame_id:
+        raise ProbePlacementError("probe placement frame does not match calibration transform")
+
+    source_lateral, source_normal = _placement_cross_section_axes(placement)
+    source_basis = (
+        np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64),
+        source_lateral,
+        source_normal,
+    )
+    transformed_basis: list[NDArray[np.float64]] = []
+    scales: list[float] = []
+    for values in source_basis:
+        mapped = transform_vector(
+            transform,
+            AnatomicalVector(
+                frame_id=placement.entry.frame_id,
+                ap_um=float(values[0]),
+                ml_um=float(values[1]),
+                dv_um=float(values[2]),
+            ),
+        )
+        mapped_values = np.asarray(mapped.as_ap_ml_dv(), dtype=np.float64)
+        scale = float(np.linalg.norm(mapped_values))
+        if not math.isfinite(scale) or scale <= 0:
+            raise ProbePlacementError("calibration transform produced an invalid probe basis")
+        transformed_basis.append(mapped_values / scale)
+        scales.append(scale)
+    uniform_scale = scales[0]
+    if any(
+        not math.isclose(value, uniform_scale, rel_tol=1e-9, abs_tol=1e-12) for value in scales[1:]
+    ):
+        raise ProbePlacementError("calibration transform does not preserve a uniform probe scale")
+
+    inward, lateral, normal = transformed_basis
+    if not np.allclose(np.cross(-inward, lateral), normal, rtol=0, atol=1e-9):
+        raise ProbePlacementError("calibration transform changed the probe basis handedness")
+
+    entry = transform_point(transform, placement.entry)
+    target = transform_point(transform, placement.target)
+    tip = transform_point(transform, placement.tip)
+    transformed_vector = _array(tip) - _array(entry)
+    transformed_depth = float(np.linalg.norm(transformed_vector))
+    if transformed_depth <= 0 or not math.isclose(
+        transformed_depth,
+        placement.insertion_depth_um * uniform_scale,
+        rel_tol=1e-9,
+        abs_tol=1e-6,
+    ):
+        raise ProbePlacementError("calibration transform produced inconsistent probe depth")
+    transformed_direction = transformed_vector / transformed_depth
+    if not np.allclose(transformed_direction, inward, rtol=0, atol=1e-9):
+        raise ProbePlacementError("calibration transform produced inconsistent probe direction")
+    azimuth, elevation = angles_from_direction(
+        UnitDirectionAPMLDV(
+            frame_id=entry.frame_id,
+            ap=float(inward[0]),
+            ml=float(inward[1]),
+            dv=float(inward[2]),
+        )
+    )
+
+    def optional_point(point: AnatomicalPoint | None) -> AnatomicalPoint | None:
+        return None if point is None else transform_point(transform, point)
+
+    return NormalizedProbePlacement.model_validate(
+        {
+            **placement.model_dump(mode="python"),
+            "entry": entry,
+            "target": target,
+            "tip": tip,
+            "skull_entry": optional_point(placement.skull_entry),
+            "brain_entry": optional_point(placement.brain_entry),
+            "inward_direction": UnitDirectionAPMLDV(
+                frame_id=entry.frame_id,
+                ap=float(inward[0]),
+                ml=float(inward[1]),
+                dv=float(inward[2]),
+            ),
+            "local_lateral_direction": UnitDirectionAPMLDV(
+                frame_id=entry.frame_id,
+                ap=float(lateral[0]),
+                ml=float(lateral[1]),
+                dv=float(lateral[2]),
+            ),
+            "local_normal_direction": UnitDirectionAPMLDV(
+                frame_id=entry.frame_id,
+                ap=float(normal[0]),
+                ml=float(normal[1]),
+                dv=float(normal[2]),
+            ),
+            "model_to_placement_uniform_scale": (
+                placement.model_to_placement_uniform_scale * uniform_scale
+            ),
+            "insertion_depth_um": transformed_depth,
+            "azimuth_deg": azimuth,
+            "elevation_deg": elevation,
+        }
+    )
+
+
 def attach_surface_entries(
     placement: NormalizedProbePlacement,
     *,
@@ -317,10 +442,8 @@ def placed_recording_sites(
 
     inward = np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64)
     axial_toward_base = -inward
-    lateral, normal = _local_cross_section_axes(
-        inward,
-        axial_rotation_deg=placement.axial_rotation_deg,
-    )
+    lateral, normal = _placement_cross_section_axes(placement)
+    geometry_scale = placement.model_to_placement_uniform_scale
     tip = _array(placement.tip)
     selected = set(placement.selected_site_ids)
     placed: list[PlacedRecordingSite] = []
@@ -331,9 +454,9 @@ def placed_recording_sites(
             local = site.local
             point = (
                 tip
-                + axial_toward_base * local.axial_from_tip_um
-                + lateral * (shank.center_lateral_um + local.lateral_um)
-                + normal * (shank.center_normal_um + local.normal_um)
+                + axial_toward_base * (local.axial_from_tip_um * geometry_scale)
+                + lateral * ((shank.center_lateral_um + local.lateral_um) * geometry_scale)
+                + normal * ((shank.center_normal_um + local.normal_um) * geometry_scale)
             )
             placed.append(
                 PlacedRecordingSite(
@@ -357,11 +480,8 @@ def placed_shank_centerlines(
     """Map every source-defined shank offset into the anatomical frame."""
 
     _validate_model_placement_pair(model, placement)
-    inward = np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64)
-    lateral, normal = _local_cross_section_axes(
-        inward,
-        axial_rotation_deg=placement.axial_rotation_deg,
-    )
+    lateral, normal = _placement_cross_section_axes(placement)
+    geometry_scale = placement.model_to_placement_uniform_scale
     entry = _array(placement.entry)
     tip = _array(placement.tip)
     return tuple(
@@ -373,17 +493,17 @@ def placed_shank_centerlines(
             entry=_point(
                 placement.entry.frame_id,
                 entry
-                + lateral * shank.center_lateral_um
-                + normal * shank.center_normal_um,
+                + lateral * (shank.center_lateral_um * geometry_scale)
+                + normal * (shank.center_normal_um * geometry_scale),
             ),
             tip=_point(
                 placement.entry.frame_id,
                 tip
-                + lateral * shank.center_lateral_um
-                + normal * shank.center_normal_um,
+                + lateral * (shank.center_lateral_um * geometry_scale)
+                + normal * (shank.center_normal_um * geometry_scale),
             ),
-            width_um=shank.width_um,
-            thickness_um=shank.thickness_um,
+            width_um=shank.width_um * geometry_scale,
+            thickness_um=shank.thickness_um * geometry_scale,
         )
         for shank in model.shanks
     )
@@ -436,6 +556,10 @@ def _placement(
         dv=float(direction_values[2]),
     )
     azimuth, elevation = angles_from_direction(direction)
+    lateral, normal = _local_cross_section_axes(
+        direction_values,
+        axial_rotation_deg=axial_rotation_deg,
+    )
     return NormalizedProbePlacement(
         name=name,
         context=context,
@@ -446,6 +570,19 @@ def _placement(
         target=target,
         tip=tip,
         inward_direction=direction,
+        local_lateral_direction=UnitDirectionAPMLDV(
+            frame_id=entry.frame_id,
+            ap=float(lateral[0]),
+            ml=float(lateral[1]),
+            dv=float(lateral[2]),
+        ),
+        local_normal_direction=UnitDirectionAPMLDV(
+            frame_id=entry.frame_id,
+            ap=float(normal[0]),
+            ml=float(normal[1]),
+            dv=float(normal[2]),
+        ),
+        model_to_placement_uniform_scale=1.0,
         insertion_depth_um=depth,
         azimuth_deg=azimuth,
         elevation_deg=elevation,
@@ -453,6 +590,24 @@ def _placement(
         selected_site_ids=tuple(selected_site_ids),
         custom_geometry_acknowledged=custom_geometry_acknowledged,
         notes=notes,
+    )
+
+
+def _placement_cross_section_axes(
+    placement: NormalizedProbePlacement,
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    if (
+        placement.local_lateral_direction is not None
+        and placement.local_normal_direction is not None
+    ):
+        return (
+            np.asarray(placement.local_lateral_direction.as_ap_ml_dv(), dtype=np.float64),
+            np.asarray(placement.local_normal_direction.as_ap_ml_dv(), dtype=np.float64),
+        )
+    inward = np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64)
+    return _local_cross_section_axes(
+        inward,
+        axial_rotation_deg=placement.axial_rotation_deg,
     )
 
 

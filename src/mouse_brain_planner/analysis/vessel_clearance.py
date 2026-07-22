@@ -21,7 +21,7 @@ from mouse_brain_planner.domain.vessel_clearance_models import (
     VesselRiskProfile,
 )
 
-VESSEL_CLEARANCE_ALGORITHM_VERSION: Final = "major-vessel-aabb-tapered-surface-v2"
+VESSEL_CLEARANCE_ALGORITHM_VERSION: Final = "major-vessel-aabb-tapered-surface-v3"
 TAPERED_SEARCH_ITERATIONS: Final = 80
 CLEARANCE_NUMERICAL_TOLERANCE_UM: Final = 1e-6
 NO_CONFLICT_STATEMENT: Final = (
@@ -34,6 +34,14 @@ REFERENCE_GRAPH_WARNINGS: Final[tuple[str, ...]] = (
     "without vascular-type classification.",
     "The source does not support artery-versus-vein classification.",
     "A reference-graph result is not surgical navigation or an individual-animal guarantee.",
+)
+UNBOUNDED_SOURCE_STATEMENT: Final = (
+    "Clearance absence cannot be classified because the source provenance does not bound "
+    "registration and tissue-distortion uncertainty."
+)
+UNDERSPECIFIED_UNCERTAINTY_STATEMENT: Final = (
+    "Clearance absence cannot be classified because the stated uncertainty is below the "
+    "reviewed source registration and tissue-distortion bound."
 )
 
 
@@ -132,11 +140,10 @@ def analyze_probe_vessel_clearance(
 ) -> ProbeVesselAnalysis:
     """Measure every shank against explicit radius-bearing finite segments.
 
-    An AABB broad phase identifies every segment capable of violating the
-    envelope + margin + uncertainty bound.  The narrow phase minimizes distance
-    to the probe minus the linearly interpolated vessel radius over each finite
-    segment.  A separate exact segment scan preserves the nearest-centerline
-    summary.
+    A conservative AABB lower bound and feasible endpoint upper bounds first
+    identify every segment that can contain the global centerline/surface minimum
+    or violate the envelope + margin + uncertainty bound.  Exact finite-segment
+    and tapered-surface calculations then run only on that candidate subset.
     """
 
     if not shanks:
@@ -162,6 +169,8 @@ def analyze_probe_vessel_clearance(
     segments = _segments(vessels)
     if segments.start.shape[0] == 0:
         raise VesselClearanceInputError("vessel graph contains no finite segments")
+    if bool(np.any(np.all(segments.start == segments.end, axis=1))):
+        raise VesselClearanceInputError("vessel runs contain a zero-length segment")
     minimum_loaded_radius = provenance.minimum_included_diameter_um / 2.0
     if bool(np.any(segments.start_radius < minimum_loaded_radius - 1e-6)) or bool(
         np.any(segments.end_radius < minimum_loaded_radius - 1e-6)
@@ -177,17 +186,37 @@ def analyze_probe_vessel_clearance(
     profile_confirmed = (
         risk_profile.confirmed_by_user and risk_profile.reference_only_coverage_acknowledged
     )
+    source_uncertainty_bound = provenance.minimum_spatial_uncertainty_bound_um
+    source_uncertainty_qualified = (
+        source_uncertainty_bound is not None
+        and risk_profile.registration_uncertainty_um + CLEARANCE_NUMERICAL_TOLERANCE_UM
+        >= source_uncertainty_bound
+    )
+    analysis_warnings = _analysis_warnings(
+        provenance=provenance,
+        risk_profile=risk_profile,
+    )
 
     for shank in shanks:
+        broad_phase = _broad_phase_mask(
+            shank,
+            segments,
+            required_margin_um=risk_profile.required_margin_um,
+            registration_uncertainty_um=risk_profile.registration_uncertainty_um,
+        )
+        candidate_count = int(np.count_nonzero(broad_phase))
+        if candidate_count == 0:
+            raise RuntimeError("vessel AABB broad phase produced no minimum candidate")
+        candidate_segments = _take_segments(segments, broad_phase)
         centerline = _closest_probe_to_segments(
             shank.entry_asr_um,
             shank.tip_asr_um,
-            segments,
+            candidate_segments,
         )
         tapered = _closest_probe_to_tapered_segments(
             shank.entry_asr_um,
             shank.tip_asr_um,
-            segments,
+            candidate_segments,
         )
         all_nearest.append(float(centerline.distance.min()))
         geometric = tapered.distance - tapered.vessel_radius - shank.envelope_radius_um
@@ -197,19 +226,9 @@ def analyze_probe_vessel_clearance(
         all_minimum_geometric.append(float(geometric.min()))
         all_minimum_adjusted.append(float(adjusted.min()))
 
-        broad_phase = _broad_phase_mask(
-            shank,
-            segments,
-            required_margin_um=risk_profile.required_margin_um,
-            registration_uncertainty_um=risk_profile.registration_uncertainty_um,
-        )
-        total_candidates += int(np.count_nonzero(broad_phase))
-        total_measured += int(centerline.distance.size)
+        total_candidates += candidate_count
+        total_measured += int(tapered.distance.size)
         conflict_mask = adjusted <= CLEARANCE_NUMERICAL_TOLERANCE_UM
-        # An adjusted conflict outside the AABB candidate set would make the
-        # broad phase unsound and must fail closed instead of being hidden.
-        if bool(np.any(conflict_mask & ~broad_phase)):
-            raise RuntimeError("vessel AABB broad phase omitted an exact adjusted conflict")
 
         conflicts: list[ProbeVesselConflict] = []
         if profile_confirmed:
@@ -224,9 +243,9 @@ def analyze_probe_vessel_clearance(
                     classification = VesselConflictClassification.MARGIN_VIOLATION
                 else:
                     classification = VesselConflictClassification.UNCERTAINTY_VIOLATION
-                run_index = int(segments.run_index[index])
-                local_segment_index = int(segments.segment_index_in_run[index])
-                edge_index = int(segments.source_edge_index[index])
+                run_index = int(candidate_segments.run_index[index])
+                local_segment_index = int(candidate_segments.segment_index_in_run[index])
+                edge_index = int(candidate_segments.source_edge_index[index])
                 insertion_depth = tapered.first_fraction[index] * float(
                     np.linalg.norm(shank.tip_asr_um - shank.entry_asr_um)
                 )
@@ -251,7 +270,7 @@ def analyze_probe_vessel_clearance(
                         probe_point=_point(tapered.first_point[index]),
                         vessel_point=_point(tapered.second_point[index]),
                         insertion_depth_um=float(insertion_depth),
-                        warnings=REFERENCE_GRAPH_WARNINGS,
+                        warnings=analysis_warnings,
                     )
                 )
         classifications_per_shank.append((shank, conflicts))
@@ -279,9 +298,6 @@ def analyze_probe_vessel_clearance(
         )
         published_conflicts = ()
         truncated = False
-    elif not all_conflicts:
-        status = ProbeVesselResultStatus.NO_CONFLICT_DETECTED
-        statement = NO_CONFLICT_STATEMENT
     elif any(
         conflict.classification is VesselConflictClassification.INTERSECTION
         for conflict in all_conflicts
@@ -294,12 +310,21 @@ def analyze_probe_vessel_clearance(
     ):
         status = ProbeVesselResultStatus.MARGIN_VIOLATION
         statement = "Required geometric margin violation detected in the loaded reference geometry."
-    else:
+    elif all_conflicts:
         status = ProbeVesselResultStatus.UNCERTAINTY_VIOLATION
         statement = (
             "Registration-uncertainty-adjusted clearance violation detected in the loaded "
             "reference geometry."
         )
+    elif source_uncertainty_bound is None:
+        status = ProbeVesselResultStatus.INSUFFICIENT_GEOMETRY
+        statement = UNBOUNDED_SOURCE_STATEMENT
+    elif not source_uncertainty_qualified:
+        status = ProbeVesselResultStatus.INSUFFICIENT_GEOMETRY
+        statement = UNDERSPECIFIED_UNCERTAINTY_STATEMENT
+    else:
+        status = ProbeVesselResultStatus.NO_CONFLICT_DETECTED
+        statement = NO_CONFLICT_STATEMENT
 
     input_sha256 = _analysis_input_sha256(shanks, risk_profile, provenance)
     return ProbeVesselAnalysis(
@@ -315,7 +340,7 @@ def analyze_probe_vessel_clearance(
         risk_profile=risk_profile,
         provenance=provenance,
         statement=statement,
-        warnings=REFERENCE_GRAPH_WARNINGS,
+        warnings=analysis_warnings,
     )
 
 
@@ -532,20 +557,72 @@ def _broad_phase_mask(
     required_margin_um: float,
     registration_uncertainty_um: float,
 ) -> NDArray[np.bool_]:
-    vessel_expansion = np.maximum(segments.start_radius, segments.end_radius)[:, None]
-    vessel_lower = np.minimum(segments.start, segments.end) - vessel_expansion
-    vessel_upper = np.maximum(segments.start, segments.end) + vessel_expansion
-    probe_expansion = (
-        shank.envelope_radius_um
-        + required_margin_um
-        + registration_uncertainty_um
-        + CLEARANCE_NUMERICAL_TOLERANCE_UM
+    """Return a sound candidate set before any exact tapered narrow phase.
+
+    AABB distance is a lower bound on finite-segment distance.  Subtracting
+    the larger endpoint radius gives a lower bound on the tapered surface
+    objective.  Feasible endpoint-pair distances provide global upper bounds,
+    so segments unable to beat either global minimum can be discarded while
+    every possible adjusted conflict remains included.
+    """
+
+    vessel_lower = np.minimum(segments.start, segments.end)
+    vessel_upper = np.maximum(segments.start, segments.end)
+    probe_lower = np.minimum(shank.entry_asr_um, shank.tip_asr_um)
+    probe_upper = np.maximum(shank.entry_asr_um, shank.tip_asr_um)
+    separation = np.maximum(
+        np.maximum(vessel_lower - probe_upper, probe_lower - vessel_upper),
+        0.0,
     )
-    probe_lower = np.minimum(shank.entry_asr_um, shank.tip_asr_um) - probe_expansion
-    probe_upper = np.maximum(shank.entry_asr_um, shank.tip_asr_um) + probe_expansion
-    return np.all(vessel_upper >= probe_lower, axis=1) & np.all(
-        vessel_lower <= probe_upper,
-        axis=1,
+    centerline_lower_bound = np.linalg.norm(separation, axis=1)
+
+    endpoint_distances = np.stack(
+        (
+            np.linalg.norm(segments.start - shank.entry_asr_um, axis=1),
+            np.linalg.norm(segments.start - shank.tip_asr_um, axis=1),
+            np.linalg.norm(segments.end - shank.entry_asr_um, axis=1),
+            np.linalg.norm(segments.end - shank.tip_asr_um, axis=1),
+        )
+    )
+    centerline_upper_bound = float(endpoint_distances.min())
+    endpoint_surface_values = (
+        np.stack(
+            (
+                endpoint_distances[0] - segments.start_radius,
+                endpoint_distances[1] - segments.start_radius,
+                endpoint_distances[2] - segments.end_radius,
+                endpoint_distances[3] - segments.end_radius,
+            )
+        )
+        - shank.envelope_radius_um
+    )
+    surface_upper_bound = float(endpoint_surface_values.min())
+    maximum_radius = np.maximum(segments.start_radius, segments.end_radius)
+    surface_lower_bound = centerline_lower_bound - maximum_radius - shank.envelope_radius_um
+    adjusted_conflict_limit = (
+        required_margin_um + registration_uncertainty_um + CLEARANCE_NUMERICAL_TOLERANCE_UM
+    )
+    centerline_candidate = (
+        centerline_lower_bound <= centerline_upper_bound + CLEARANCE_NUMERICAL_TOLERANCE_UM
+    )
+    surface_candidate = surface_lower_bound <= max(
+        surface_upper_bound + CLEARANCE_NUMERICAL_TOLERANCE_UM,
+        adjusted_conflict_limit,
+    )
+    return np.asarray(centerline_candidate | surface_candidate, dtype=np.bool_)
+
+
+def _take_segments(segments: _Segments, mask: NDArray[np.bool_]) -> _Segments:
+    """Return one metadata-preserving candidate subset."""
+
+    return _Segments(
+        start=segments.start[mask],
+        end=segments.end[mask],
+        start_radius=segments.start_radius[mask],
+        end_radius=segments.end_radius[mask],
+        run_index=segments.run_index[mask],
+        segment_index_in_run=segments.segment_index_in_run[mask],
+        source_edge_index=segments.source_edge_index[mask],
     )
 
 
@@ -588,6 +665,27 @@ def _segments(vessels: RadiusBearingVesselRuns) -> _Segments:
         segment_index_in_run=segment_index,
         source_edge_index=source_edge_index,
     )
+
+
+def _analysis_warnings(
+    *,
+    provenance: MajorVesselSourceProvenance,
+    risk_profile: VesselRiskProfile,
+) -> tuple[str, ...]:
+    source_bound = provenance.minimum_spatial_uncertainty_bound_um
+    if source_bound is None:
+        uncertainty_warning = (
+            "Registration error and tissue distortion are not bounded by the source provenance; "
+            "absence of loaded-geometry conflicts cannot be classified."
+        )
+    elif risk_profile.registration_uncertainty_um + CLEARANCE_NUMERICAL_TOLERANCE_UM < source_bound:
+        uncertainty_warning = (
+            "The stated uncertainty is below the reviewed combined source bound of "
+            f"{source_bound:g} micrometres; absence of conflicts cannot be classified."
+        )
+    else:
+        return REFERENCE_GRAPH_WARNINGS
+    return (*REFERENCE_GRAPH_WARNINGS, uncertainty_warning)
 
 
 def _analysis_input_sha256(

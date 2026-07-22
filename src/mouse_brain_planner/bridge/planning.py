@@ -169,6 +169,7 @@ class PlanningBridgeSession:
             self.dispatcher,
             get_project=self._require_project,
             get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_probe_mutation,
         )
         self.dispatcher.declare_capability("populationReferenceDensityPrepare")
         self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
@@ -323,6 +324,8 @@ class PlanningBridgeSession:
         _require_protocol(params)
         atlas = self.dispatcher.context.loaded_atlas
         project = self.project
+        if project is not None and project.project_revision != self.project_revision:
+            raise RuntimeError("session and persisted project revisions diverged")
         if atlas is None:
             atlas_state: JsonObject = {
                 "identifier": SUPPORTED_ATLAS_IDENTIFIER,
@@ -502,6 +505,7 @@ class PlanningBridgeSession:
             project = PlannerProject(
                 title=title or "Untitled animal surgery plan",
                 subject_id=subject_id,
+                project_revision=1,
                 atlas=atlas.metadata,
                 linked_cursor=centre,
                 renderer_anchor=centre,
@@ -523,7 +527,7 @@ class PlanningBridgeSession:
         self.project_path = None
         self.asset_source_package = None
         self.recovered_from_backup = False
-        self.project_revision = 1
+        self.project_revision = project.project_revision
         self.saved_revision = None
         self._working_package = None
         self._reference_density_cache = None
@@ -595,8 +599,8 @@ class PlanningBridgeSession:
         self.project_path = result.writable_path
         self.asset_source_package = result.source_path
         self.recovered_from_backup = result.recovered_from_backup or result.requires_save_as
-        self.project_revision = 0
-        self.saved_revision = None if result.requires_save_as else 0
+        self.project_revision = project.project_revision
+        self.saved_revision = None if result.requires_save_as else project.project_revision
         self._working_package = None
         self._restore_reference_density_cache(project, atlas)
         return {
@@ -626,11 +630,14 @@ class PlanningBridgeSession:
         destination = normalize_project_path(destination)
         previous = project.model_copy(deep=True)
         previous_revision = self.project_revision
-        project.touch("project-saved")
-        self.project_revision += 1
+        candidate = project.model_copy(deep=True)
+        candidate.touch("project-saved")
+        candidate = self._project_at_revision(candidate, previous_revision + 1)
+        self.project = candidate
+        self.project_revision = candidate.project_revision
         try:
             saved = save_project(
-                project,
+                candidate,
                 destination,
                 asset_source_package=self.asset_source_package,
             )
@@ -650,7 +657,7 @@ class PlanningBridgeSession:
             "protocolVersion": PROTOCOL_VERSION,
             "status": "saved",
             "path": str(saved),
-            "projectId": str(project.project_uuid),
+            "projectId": str(candidate.project_uuid),
         }
 
     def vascular_import(self, params: Mapping[str, object]) -> JsonObject:
@@ -693,9 +700,8 @@ class PlanningBridgeSession:
             "subject-vascular-image-imported",
             f"{image.original_name}; sha256={image.source_sha256}",
         )
-        self.project = updated
+        self._publish_project_mutation(updated)
         self.asset_source_package = working
-        self.project_revision += 1
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "imported",
@@ -811,8 +817,7 @@ class PlanningBridgeSession:
             f"method={registration.method.value}; rms={registration.rms_residual_um:g} µm; "
             f"max={registration.max_residual_um:g} µm; laterality={laterality}",
         )
-        self.project = updated
-        self.project_revision += 1
+        self._publish_project_mutation(updated)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "registered",
@@ -974,10 +979,9 @@ class PlanningBridgeSession:
             f"archive_sha256={STXVN5SV44_V1_SOURCE.archive_sha256}; "
             f"prepared_sha256={cached.prepared_density_sha256}",
         )
-        self.project = updated
+        self._publish_project_mutation(updated)
         self._reference_density_cache = cached
         self._reference_density_cache_error = None
-        self.project_revision += 1
         return _reference_prepare_result(cached, atlas.metadata)
 
     def vascular_reference_display(self, params: Mapping[str, object]) -> JsonObject:
@@ -1039,8 +1043,7 @@ class PlanningBridgeSession:
             "population-reference-density-display-updated",
             f"visible={str(visible).lower()}; opacity={opacity:g}",
         )
-        self.project = updated
-        self.project_revision += 1
+        self._publish_project_mutation(updated)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "updatedReferenceDensityDisplay",
@@ -1185,34 +1188,56 @@ class PlanningBridgeSession:
     def _require_project(self) -> PlannerProject:
         if self.project is None:
             raise BridgeError("PROJECT_NOT_OPEN", "Create or open a project first.")
+        if self.project.project_revision != self.project_revision:
+            raise RuntimeError("session and persisted project revisions diverged")
         return self.project
 
     def _replace_project_after_implant_mutation(self, project: PlannerProject) -> None:
         """Publish one validated implant mutation and mark the session dirty."""
 
-        self.project = project
-        self.project_revision += 1
+        self._publish_project_mutation(project)
 
     def _replace_project_after_viewer_mutation(self, project: PlannerProject) -> int:
         """Publish one independent viewer mutation and return its new revision."""
 
-        self.project = project
-        self.project_revision += 1
-        return self.project_revision
+        return self._publish_project_mutation(project)
 
     def _replace_project_after_calibration_mutation(self, project: PlannerProject) -> int:
         """Publish one validated calibration mutation and return its revision."""
 
-        self.project = project
-        self.project_revision += 1
-        return self.project_revision
+        return self._publish_project_mutation(project)
 
     def _replace_project_after_probe_mutation(self, project: PlannerProject) -> int:
         """Publish one validated probe/analysis mutation and return its revision."""
 
-        self.project = project
-        self.project_revision += 1
-        return self.project_revision
+        return self._publish_project_mutation(project)
+
+    def _publish_project_mutation(self, project: PlannerProject) -> int:
+        """Atomically advance both in-memory and persistable revision state."""
+
+        if project.project_revision != self.project_revision:
+            raise BridgeError(
+                "PROJECT_REVISION_CONFLICT",
+                "The project mutation was built from a stale revision.",
+                details={
+                    "mutationProjectRevision": project.project_revision,
+                    "actualProjectRevision": self.project_revision,
+                },
+            )
+        updated = self._project_at_revision(project, self.project_revision + 1)
+        self.project = updated
+        self.project_revision = updated.project_revision
+        return updated.project_revision
+
+    @staticmethod
+    def _project_at_revision(project: PlannerProject, revision: int) -> PlannerProject:
+        if revision != project.project_revision + 1:
+            raise ValueError("project revision must advance exactly once")
+        # Every handler supplies an already validated project graph and the bridge
+        # alone derives this integer. Avoid serializing/revalidating potentially
+        # thousands of recording sites and vessel conflicts on the slice-wheel
+        # hot path; save/load still revalidate the entire graph.
+        return project.model_copy(update={"project_revision": revision})
 
     def _find_image(self, raw_image_id: object) -> SubjectVascularImage:
         project = self._require_project()

@@ -227,8 +227,7 @@ class AtlasRegisteredCalibration(BaseModel):
         if destination.atlas_key is None or destination.atlas_version is None:
             raise ValueError("calibration atlas transform requires exact atlas identity")
         expected_frame_id = (
-            "ATLAS_CANONICAL_AP_ML_DV_UM:"
-            f"{destination.atlas_key}:{destination.atlas_version}"
+            f"ATLAS_CANONICAL_AP_ML_DV_UM:{destination.atlas_key}:{destination.atlas_version}"
         )
         if destination.frame_id != expected_frame_id:
             raise ValueError("calibration atlas transform is not in the canonical atlas frame")
@@ -236,9 +235,7 @@ class AtlasRegisteredCalibration(BaseModel):
             destination.ml_positive_direction.startswith("right")
             and destination.dv_positive_direction.startswith("dorsal/up")
         ):
-            raise ValueError(
-                "calibration atlas frame must be anterior/right/dorsal-positive"
-            )
+            raise ValueError("calibration atlas frame must be anterior/right/dorsal-positive")
         return self
 
     @property

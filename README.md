@@ -20,7 +20,7 @@ claim.
 | Atlas | BrainGlobe `allen_mouse_25um` package `1.2` only; 10 µm is excluded from this testing phase |
 | Slice navigation | One full-size coronal, sagittal, or horizontal view; each retains an independent depth with buttons, slider, wheel, pan, and zoom |
 | Region inspection | Clicking replaces one compact acronym/name label and does not change any slice depth |
-| Dorsal | Atlas surface with the reference major-vessel projection |
+| Dorsal | Atlas surface with reference major vessels and the selected probe's AP/ML projection |
 | 3D | Native SceneKit brain mesh with camera control, atlas-region picking, probes, and radius-bearing major-vessel tubes |
 | Stereotaxy | Signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC and guarded target projection |
 | Probes | Versioned catalog, placement, slice/3D overlays, recording sites, exact region traversal, inspection, and CSV/JSON export |
@@ -75,10 +75,16 @@ vasculature. The source omits pial and choroidal vessels; this derivative also o
 vessels. Sex/side are unpublished, artery/vein identity is unavailable, and registration error,
 tissue distortion, biological variation, and omitted vessels are not bounded by the graph.
 
-The V2 analysis minimizes distance from the conservative probe envelope to each tapered vessel
-surface, then applies the user-declared required margin and registration uncertainty. It requires
-separate acknowledgement of those inputs and the reference's incomplete coverage. The only
-bounded zero-conflict statement is:
+The V3 analysis uses a conservative AABB broad phase, then minimizes distance from the probe
+envelope to candidate tapered vessel surfaces and applies the declared margin and uncertainty.
+It requires separate acknowledgement of those inputs and the reference's incomplete coverage.
+
+The bundled P60_606 source does not publish reviewed bounds for atlas-registration error or
+tissue distortion. Therefore a trajectory with no loaded-geometry conflict returns
+`insufficientGeometry`; entering zero or another user value cannot manufacture an absence claim.
+Measured intersections and threshold violations in the loaded reference are still reported. The
+following wording is reserved for a future source that supplies reviewed bounds and for which the
+stated uncertainty meets those bounds:
 
 > No conflict detected within the loaded geometry and stated uncertainty assumptions.
 
