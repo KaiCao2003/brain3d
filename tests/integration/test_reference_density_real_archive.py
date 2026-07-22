@@ -73,10 +73,20 @@ def test_real_pinned_archive_prepares_and_reopens_on_cached_25um_atlas(
     context = BridgeContext(repository_factory=lambda: repository)
     context.set_loaded_atlas(atlas)
     dispatcher = BridgeDispatcher(context)
-    register_planning_handlers(dispatcher, reference_density_store=store)
+    session = register_planning_handlers(dispatcher, reference_density_store=store)
+    # Population density is archived from the production bridge. This real-data
+    # test binds the preserved implementation explicitly to verify it remains
+    # readable without re-advertising the feature to the application.
+    dispatcher.register("vascular.reference.prepare", session.vascular_reference_prepare)
+    dispatcher.register("vascular.reference.display", session.vascular_reference_display)
+    dispatcher.register("vascular.reference.overlay", session.vascular_reference_overlay)
     dispatcher.dispatch(
         "project.new",
-        {"protocolVersion": 1, "animalResearchOnlyAcknowledged": True},
+        {
+            "protocolVersion": 1,
+            "animalResearchOnlyAcknowledged": True,
+            "subjectId": "reference-density-mouse-A",
+        },
     )
     bridge_prepared = dispatcher.dispatch(
         "vascular.reference.prepare",

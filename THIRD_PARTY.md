@@ -1,6 +1,6 @@
 # Third-party software, data, and prior art
 
-This inventory was reviewed on **2026-07-21**. Exact direct pins come from `pyproject.toml`;
+This inventory was reviewed on **2026-07-22**. Exact direct pins come from `pyproject.toml`;
 `uv.lock` is the machine-resolved transitive inventory. Before each release, generate an SBOM
 from the final lock/build environment, retain all license texts and notices required by the
 bundled artifacts, and reconcile it with this human-readable list.
@@ -13,11 +13,15 @@ The classification column is intentional:
 - **Data — optional downloaded:** a reviewed source acquired only when the user enables the
   corresponding feature; it is cached outside the application bundle.
 - **Candidate data:** a source reviewed for possible later work, but not integrated.
+- **Cited source:** factual geometry or terminology was independently encoded with a pinned
+  citation/digest; the upstream document, code, diagram, or binary is not copied or bundled.
 - **Concept only:** documentation or workflow reviewed as prior art; no code or assets copied.
 
-The supported interactive shell uses Apple SwiftUI/AppKit system frameworks and a versioned
-subprocess bridge to the Python scientific service. The former PySide6/PyVista/VTK application
-was removed from the package and lockfile after the Phase 1 reachability audit.
+The supported interactive shell uses Apple SwiftUI/AppKit/SceneKit system frameworks and a
+versioned subprocess bridge to the Python scientific service. SceneKit displays backend-validated
+brain and probe geometry payloads; archived vessel primitives receive no runtime payload.
+Scientific coordinate conversion and analysis remain in Python. The former PySide6/PyVista/VTK
+application was removed from the package and lockfile after the Phase 1 reachability audit.
 
 ## Direct runtime dependencies
 
@@ -63,13 +67,15 @@ This is a review aid, not a substitute for the full lockfile/SBOM.
 | Item/version | Terms | Use in this project | Classification / source |
 |---|---|---|---|
 | Allen Mouse CCF via BrainGlobe `allen_mouse_25um`, atlas version 1.2 as observed 2026-07-21 | [Allen Institute Terms of Use](https://alleninstitute.org/legal/terms-of-use); scientific citation required | The only current reference/annotation/mesh atlas; downloaded on demand to user cache, never bundled in the `.app` or installer | Data — downloaded; [BrainGlobe version manifest](https://gin.g-node.org/brainglobe/atlases/raw/master/last_versions.conf), [generator/citation](https://github.com/brainglobe/brainglobe-atlasapi/blob/v2.3.1/atlas_scripts/allen_mouse.py) |
-| Kim, Yongsoo (2022), *Cerebrovascular, pericyte, and neuronal cell type mapping data 2022*, Mendeley Data V1, DOI `10.17632/stxvn5sv44.1` | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Optional pinned population vascular length-density field. Archive `NVU_mapping_Adult_mouse_brain (1).7z`, 311,493,514 bytes, SHA-256 `c715c92ad153bff7f676b883f47108f886147e5d6fcd4502bcc04a0f92ed98fe`; downloaded to user cache and never bundled. The four-mouse scalar field is displayed as a symmetrized dorsal DV maximum projection; it is not subject-specific, not vessel paths, and not usable for clearance. | Data — optional downloaded; [versioned dataset](https://data.mendeley.com/datasets/stxvn5sv44/1), [Wu et al. Cell Reports paper](https://doi.org/10.1016/j.celrep.2022.110978), [open-access paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9271215/) |
+| Neuropixels 1.0 NP1000 / `PRB_1_4_0480_1` geometry sources, snapshots recorded 2026-07-22 | Source-specific terms; the cited artifacts are not redistributed | Complete 960-site factual transcription from the imec specification, ProbeTable 1.8, and SpikeGLX geometry/metadata snapshots. The catalog status is `source-transcribed-review-pending`; no independent full-table review is claimed. | Cited source; [imec specification](https://www.neuropixels.org/_files/ugd/328966_c5e4d31e8a974962b5eb8ec975408c9f.pdf), [exact sources and digests](PROBE_MODELS.md) |
+| Kim, Yongsoo (2022), *Cerebrovascular, pericyte, and neuronal cell type mapping data 2022*, Mendeley Data V1, DOI `10.17632/stxvn5sv44.1` | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Optional pinned population vascular length-density field. Archive `NVU_mapping_Adult_mouse_brain (1).7z`, 311,493,514 bytes, SHA-256 `c715c92ad153bff7f676b883f47108f886147e5d6fcd4502bcc04a0f92ed98fe`; downloaded to user cache and never bundled. The archived backend can prepare a symmetrized dorsal DV maximum projection, but it is absent from the primary UI, is not subject-specific, has no vessel paths, and is not used for clearance. | Data — optional downloaded; [versioned dataset](https://data.mendeley.com/datasets/stxvn5sv44/1), [Wu et al. Cell Reports paper](https://doi.org/10.1016/j.celrep.2022.110978), [open-access paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9271215/) |
+| Renier, Nicolas; de Launoit, Elisa; Skriabine, Sophie (2026), *Vascular graphs of the developing post-natal mouse brain*, record DOI `10.5281/zenodo.18876865` | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Packaged archived derivative evidence for specimen P60_606: maximal consecutive in-bounds graph runs with point radius at least 15 µm. NPZ is 814,393 bytes, SHA-256 `fb2344e845e604be3424bd63f4222d273eafba34db0df2eaff32f4400fa9afec`. The 5,050,194,723-byte source archive and 12,282,574,483-byte extracted graph are not bundled. Coordinate qualification is rejected because the source is a hemisphere and the graph lacks a persisted biological laterality binding. It is not displayed, mirrored, served, or analyzed. | Data — bundled derived evidence; [versioned Zenodo record](https://zenodo.org/records/18876865), [Cell paper](https://doi.org/10.1016/j.cell.2026.03.013), [derivation and qualification record](docs/LAMBADA_MAJOR_VESSELS.md) |
 | brainrender 2.2.0 | BSD-3-Clause | Scene/API design review only; package not imported or bundled | Concept only; [release](https://github.com/brainglobe/brainrender/releases/tag/v2.2.0) |
 | iblatlas 1.2.0 | MIT | Coordinate and trajectory design review only; package and PyQt5 GUI extra not imported or bundled | Concept only; [release](https://github.com/int-brain-lab/iblatlas/releases/tag/1.2.0) |
 | Neuropixels Trajectory Explorer v2.0.0 | GPL-3.0 | Workflow review only; no code or assets copied | Concept only; [release](https://github.com/petersaj/neuropixels_trajectory_explorer/releases/tag/v2.0.0) |
 | Pinpoint v2.0.0 | GPL-3.0 | Workflow review only; no Unity code or assets copied | Concept only; [release](https://github.com/VirtualBrainLab/Pinpoint/releases/tag/v2.0.0) |
 | cortex-lab/allenCCF, including SHARP-Track, commit `e5a57fe7e1c9…` reviewed 2026-07-21 | No explicit repository license found | Workflow review only; no code or assets copied | Concept only; [repository](https://github.com/cortex-lab/allenCCF) |
-| Simulation-ready vascular tracing data from adult mouse brains, version 1, DOI `10.17632/mjtyry6v85.1` | CC BY 4.0 | Candidate containing fully traced cerebrovascular graphs from four adult mouse brains in MATLAB format; it is separate from the integrated scalar-density deposit. No graph files are integrated or bundled; schema, file hashes, coordinate registration, and scientific suitability remain to be validated. | Candidate data; [versioned dataset](https://data.mendeley.com/datasets/mjtyry6v85/1), [associated open-access paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9271215/) |
+| Simulation-ready vascular tracing data from adult mouse brains, version 1, DOI `10.17632/mjtyry6v85.1` | CC BY 4.0 | Rejected for planning integration. The four adult-mouse MATLAB graphs are separate from the archived scalar-density deposit, and their documentation exposes raw specimen-space XYZ without qualified axis orientation, laterality, Allen registration, or a bregma relationship. No graph file is integrated or bundled. | Rejected data candidate; [versioned dataset](https://data.mendeley.com/datasets/mjtyry6v85/1), [associated open-access paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9271215/) |
 | VesselGraph | Software: MIT; data: CC BY-NC 4.0 | Vascular graph/data design review only; no code, models, or data copied; NC terms make the data unsuitable as an unrestricted redistributable default | Concept only; [repository and data terms](https://github.com/jocpae/VesselGraph) |
 | VesSAP | Repository code: MIT; external hosted data terms not established in this review | Vascular segmentation, feature, and atlas-registration workflow review only; no code, models, or data copied | Concept only; [repository](https://github.com/vessap/vessap), [paper data-availability statement](https://www.nature.com/articles/s41592-020-0792-1) |
 
@@ -84,6 +90,12 @@ scientific output that uses the layer. The dataset's four-animal population scop
 visible; attribution does not turn the scalar field into subject-specific vessels or a clearance
 model.
 
+The archived LAMBADA P60_606 derivative is likewise not relicensed by this application's
+source-code license. Preserve its CC BY 4.0 attribution, versioned record DOI, source and asset
+digests, adjacent manifest, rejected coordinate/coverage status, and fixed/cleared hemisphere
+limitations in every distributed evidence package or scientific output that studies the asset.
+Do not describe its presence in the package as a runtime vessel layer.
+
 ## Release obligations
 
 1. Build only from the reviewed lockfile and record Python, architecture, package, and atlas
@@ -91,6 +103,11 @@ model.
 2. Bundle required copyright notices and license texts for every exact release artifact.
 3. Keep downloaded Allen and Mendeley data outside the signed application and installer;
    preserve each source, terms, citation, version, and recorded digest.
-4. Re-review this file when a dependency, atlas version, packaging mode, copied asset, or
+4. Keep the archived LAMBADA derivative, manifest, and canonical rejection report together and
+   preserve exact attribution, identity, extraction rule, limitations, and fail-closed status.
+5. Preserve the NP1 model's pinned source identities/digests and review-pending status until a
+   separately recorded independent review is complete; do not bundle upstream documents or code
+   without a new terms review.
+6. Re-review this file when a dependency, atlas version, packaging mode, copied asset, or
    distribution model changes. A concept-only item must be reclassified before any code or asset
    is copied.

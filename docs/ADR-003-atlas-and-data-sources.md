@@ -4,6 +4,15 @@
 - **Decision date:** 2026-07-21
 - **Applies to:** atlas discovery, download, cache, provenance, and external reference material
 
+## Implementation update — 2026-07-22
+
+The atlas decision is unchanged. A CC BY 4.0 diameter-≥30 µm derivative of the LAMBADA P60_606
+graph, Zenodo record DOI `10.5281/zenodo.18876865`, is retained only as archived evidence.
+Coordinate qualification rejected runtime use: AP/DV evidence passed, but biological laterality
+and whole-brain coverage did not. Population density and subject-image registration also remain
+archived backend paths and are absent from the primary UI. See
+[the derivation and qualification record](LAMBADA_MAJOR_VESSELS.md).
+
 ## Decision
 
 Use [BrainGlobe AtlasAPI 2.3.1](https://pypi.org/project/brainglobe-atlasapi/2.3.1/)
@@ -54,7 +63,7 @@ declare uint16 reference and uint32 annotation arrays.
 |---|---:|---:|---:|
 | `allen_mouse_25um` | `528 × 320 × 456` | uint16 + uint32 | 0.462 GB / 0.43 GiB |
 
-These figures exclude Python objects, temporary copies, derived masks, and VTK meshes, so peak
+These figures exclude Python objects, temporary copies, derived masks, and display meshes, so peak
 resident memory is higher. Load structures and meshes on demand, release intermediates promptly,
 and never create an unbounded resident full-volume copy merely for display. Adding another
 resolution is a separate product/validation decision; no silent substitution is allowed.
@@ -64,7 +73,7 @@ introduces a newer storage path, but it is a prerelease and is not the productio
 adapter boundary exists so a future chunked implementation can be evaluated without changing
 project coordinates or provenance.
 
-## Population vascular-density decision
+## Archived population vascular-density decision
 
 The optional population layer uses exactly Yongsoo Kim's *Cerebrovascular, pericyte, and
 neuronal cell type mapping data 2022*,
@@ -87,12 +96,45 @@ reversed into BrainGlobe ASR, ML is deliberately symmetrized because source pola
 documented, and the prepared result is a 50 µm `[AP,DV,ML]` scalar field. Preparation requires an
 exact target-atlas identity and template correlation of at least 0.99.
 
-The SwiftUI layer receives only a declared transparent AP-by-ML DV maximum projection with the
-source, atlas binding, units, display window, and limitations intact. Alpha scales with the
-windowed density value, and the bridge clips it to the current atlas's exact nonzero annotation
-footprint before transport. This is a population scalar density, not individual vessel paths,
-not subject-specific anatomy, and not usable for vessel clearance. The separate simulation-ready
-graph deposit `10.17632/mjtyry6v85.1` is not integrated.
+The backend can produce a declared transparent AP-by-ML DV maximum projection with the source,
+atlas binding, units, display window, and limitations intact. That path is retained for archived
+work but is not requested by the primary SwiftUI workspace. This is a population scalar density,
+not individual vessel paths, not subject-specific anatomy, and not used for vessel analysis. The
+separate simulation-ready graph deposit `10.17632/mjtyry6v85.1` is rejected for planning
+integration: its documentation exposes raw specimen-space XYZ without a qualified axis
+orientation, laterality, Allen transform, or bregma relationship.
+
+## Archived LAMBADA major-vessel decision
+
+The archived evidence uses the atlas-registered P60_606 graph from Renier, de Launoit, and
+Skriabine's *Vascular graphs of the developing post-natal mouse brain*, Zenodo record
+`10.5281/zenodo.18876865`, CC BY 4.0. The repository bundles a deterministic compact derivative,
+not the 5.05 GB source archive or 12.28 GB extracted graph.
+
+Extraction keeps maximal consecutive in-bounds source-edge runs only where each point has radius
+≥15 µm. The manifest binds the source/archive identities, conversion from ClearMap to
+BrainGlobe `[AP,DV,ML]`, physical 25 µm scaling, output arrays/counts, asset SHA-256, and mandatory
+limitations. These checks establish deterministic derivation, not coordinate qualification.
+
+The exact qualification rerun found supporting AP and DV orientation evidence. It rejected the
+asset because the primary record describes hemisphere specimens and the exact graph does not
+persist a graph, vertex, or edge property that binds its numerical ML coordinates to biological
+hemisphere/laterality. Coordinates occurring on both sides of an array midpoint do not establish
+whole-brain coverage. No approved exact-specimen transform supports mirroring, so the application
+does not infer a side or mirror the derivative.
+
+The runtime omits `auditedReferenceMajorVessels` and
+`radiusAwareReferenceVesselAnalysis` from its capabilities. All three reference methods—
+`vessel.major.reference.get`, `vessel.major.reference.geometry`, and
+`vessel.major.reference.analyze`—return `VESSEL_GEOMETRY_UNAVAILABLE` without loading or serving
+geometry. The canonical rejection report is
+[`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+
+This remains a fixed cleared reference, not the animal being planned. The source omits pial and
+choroidal vessels; the derivative omits smaller vessels; artery/vein identity is unavailable;
+and biological variation, tissue distortion, registration error, and omitted vessels are not
+bounded. It cannot support a visual overlay, vessel conflict, or surgical-clearance claim.
 
 ## Cache, download, and offline behavior
 
@@ -147,8 +189,9 @@ files only when an authoritative expected hash is available.
 | Neuropixels Trajectory Explorer v2.0.0 | Prior-art workflow reference only | GPL-3.0; no copied code or assets |
 | Pinpoint v2.0.0 | Prior-art workflow reference only | GPL-3.0; no copied code or assets |
 | cortex-lab/allenCCF and SHARP-Track | Prior-art workflow reference only | No repository license found; no copied code or assets |
-| Kim 2022 population vascular length-density data, DOI `10.17632/stxvn5sv44.1` | Optional downloaded scientific data | Mendeley Data v1, CC BY 4.0; exact archive/member identities are pinned. Displayed only as a symmetrized four-mouse population scalar density; never as vessel paths, a subject layer, or clearance. |
-| Wu et al. simulation-ready vascular tracing data, DOI `10.17632/mjtyry6v85.1` | Candidate data; not integrated | Dataset page identifies four fully traced adult-mouse cerebrovascular graphs in MATLAB format and licenses version 1 under CC BY 4.0. Before any ingestion, inspect documentation, pin file-level identities/hashes, and validate units, axes, Allen registration, and suitability. |
+| Kim 2022 population vascular length-density data, DOI `10.17632/stxvn5sv44.1` | Optional downloaded scientific data | Mendeley Data v1, CC BY 4.0; exact archive/member identities are pinned. Archived backend preparation only; never vessel paths, a subject layer, or clearance geometry. |
+| LAMBADA P60_606 vascular graph, DOI `10.5281/zenodo.18876865` | Archived derived scientific evidence | CC BY 4.0; exact source and derivative identities are pinned. Coordinate qualification is rejected, so it is not displayed, served, mirrored, or analyzed. |
+| Wu et al. simulation-ready vascular tracing data, DOI `10.17632/mjtyry6v85.1` | Rejected for planning integration | Version 1 is CC BY 4.0 and documents four traced adult-mouse graphs in MATLAB format, but the documented coordinates are raw specimen-space XYZ with no qualified axis orientation, laterality, Allen transform, or bregma relationship. No graph is integrated or bundled. |
 | VesselGraph | Prior-art vascular graph/data reference only | Software is MIT; data is CC BY-NC 4.0. No code, models, or data copied. The noncommercial restriction prevents treating it as an unrestricted distributable default. |
 | VesSAP | Prior-art vascular workflow/reference only | Repository code is MIT; the paper links public scans and registered atlas data, but the external data terms were not established here. No code, models, or data copied. |
 
@@ -157,7 +200,7 @@ stated. The application must show the source and terms before first download, re
 and avoid redistributing the atlas inside the `.app` or an installer. Commercial distribution,
 hosted redistribution, or a change in Allen terms requires legal review before release.
 
-The integrated `stxvn5sv44.1` density and the candidate `mjtyry6v85.1` vessel graphs are distinct
+The archived `stxvn5sv44.1` density and rejected `mjtyry6v85.1` vessel graphs are distinct
 deposits and must never be conflated. A new source still needs a stable URL, version, coordinate
 registration, citation, redistribution terms, integrity strategy, scientific semantics, and
 fail-closed UI labeling before it can be displayed. Visual ideas from prior art may inform
@@ -172,8 +215,10 @@ must not be copied unless their license is explicitly compatible and the reuse i
   openable in the current build.
 - 10 µm is deferred. Existing source or derived cache data is left untouched but cannot enter a
   current project package.
-- The optional Mendeley density may overlay the dorsal atlas only with its four-mouse population,
-  symmetrization, no-paths, and no-clearance disclosures visible.
+- The Mendeley density and subject-image workflows remain archived and absent from the primary UI.
+- The LAMBADA derivative remains archived evidence and cannot render or enter analysis. Any future
+  vessel source needs a new qualification that binds trustworthy whole-brain coverage and
+  biological laterality without an inferred or mirrored hemisphere.
 - Project files carry enough provenance to enforce exact metadata identity and prevent silent
   coordinate reinterpretation; the current build does not claim package-wide content-drift
   detection.

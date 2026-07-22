@@ -5,8 +5,6 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     @ObservedObject var model: PlannerViewModel
-    @State private var isImportingVesselImage = false
-    @State private var isRegisteringVesselImage = false
     @State private var isConfirmingReconnect = false
     @State private var isConfirmingOpen = false
 
@@ -15,8 +13,6 @@ struct ContentView: View {
             NavigationSplitView(columnVisibility: .constant(.all)) {
                 ProjectSidebar(
                     model: model,
-                    importVesselImage: { isImportingVesselImage = true },
-                    registerVesselImage: { isRegisteringVesselImage = true },
                     saveProject: showSaveProjectPanel,
                     openProject: requestOpenProject,
                     reconnect: requestReconnect
@@ -38,27 +34,8 @@ struct ContentView: View {
                 .zIndex(1)
             }
         }
-        .fileImporter(
-            isPresented: $isImportingVesselImage,
-            allowedContentTypes: [.png, .jpeg, .tiff],
-            allowsMultipleSelection: false
-        ) { result in
-            switch result {
-            case let .success(urls):
-                guard let url = urls.first else { return }
-                Task { await model.importSubjectVesselImage(from: url) }
-            case .failure:
-                break
-            }
-        }
         .task {
             await model.connectIfNeeded()
-        }
-        .onChange(of: model.workspaceMode) { _, mode in
-            Task { await model.loadSlice(for: mode) }
-        }
-        .sheet(isPresented: $isRegisteringVesselImage) {
-            VascularRegistrationSheet(model: model)
         }
         .confirmationDialog(
             "Discard unsaved animal plan changes and reconnect?",
@@ -70,7 +47,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Save As first if you need this project, imported vessel image, or registration.")
+            Text("Save As first to keep these changes.")
         }
         .confirmationDialog(
             "Discard unsaved animal plan changes and open another project?",
@@ -82,7 +59,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Save As first if you need this project, imported vessel image, or registration.")
+            Text("Save As first to keep these changes.")
         }
     }
 

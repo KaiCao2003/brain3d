@@ -1,0 +1,111 @@
+{
+  "protocolVersion": 1,
+  "projectId": "00000000-0000-0000-0000-000000000001",
+  "projectRevision": 7,
+  "atlas": {
+    "identifier": "allen_mouse_25um",
+    "version": "1.2",
+    "metadataSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "resolutionMicrometres": [25.0, 25.0, 25.0],
+    "shapeVoxels": [4, 6, 8],
+    "orientation": "asr",
+    "frameworkName": "Allen CCFv3",
+    "sourceAnnotation": "annotation/ccf_2017",
+    "citation": "Allen Mouse Brain Common Coordinate Framework v3",
+    "brainGlobeAtlasApiVersion": "2.3.1"
+  },
+  "coordinateFrame": {
+    "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+    "unit": "micrometres",
+    "coordinateKind": "continuousPhysical",
+    "axisOrder": ["AP", "DV", "ML"],
+    "origin": ["anterior", "superior", "right"],
+    "positiveDirections": ["posterior", "inferior", "left"],
+    "axes": [
+      {
+        "arrayAxis": 0,
+        "anatomicalAxis": "AP",
+        "originDirection": "anterior",
+        "positiveDirection": "posterior",
+        "voxelSizeMicrometres": 25.0
+      },
+      {
+        "arrayAxis": 1,
+        "anatomicalAxis": "DV",
+        "originDirection": "superior",
+        "positiveDirection": "inferior",
+        "voxelSizeMicrometres": 25.0
+      },
+      {
+        "arrayAxis": 2,
+        "anatomicalAxis": "ML",
+        "originDirection": "right",
+        "positiveDirection": "left",
+        "voxelSizeMicrometres": 25.0
+      }
+    ],
+    "bregmaRelative": false,
+    "stereotaxicCalibrationApplied": false,
+    "voxelAnchorOffsetApplied": false,
+    "bounds": {
+      "minimumInclusiveMicrometres": [0.0, 0.0, 0.0],
+      "maximumExclusiveMicrometres": [100.0, 150.0, 200.0]
+    }
+  },
+  "slices": {
+    "coronal": {
+      "orientation": "coronal",
+      "index": 1,
+      "sliceCount": 4,
+      "fixedAxis": "AP",
+      "rowAxis": "DV",
+      "columnAxis": "ML",
+      "sliceCenterMicrometres": 37.5
+    },
+    "sagittal": {
+      "orientation": "sagittal",
+      "index": 5,
+      "sliceCount": 8,
+      "fixedAxis": "ML",
+      "rowAxis": "DV",
+      "columnAxis": "AP",
+      "sliceCenterMicrometres": 137.5
+    },
+    "horizontal": {
+      "orientation": "horizontal",
+      "index": 2,
+      "sliceCount": 6,
+      "fixedAxis": "DV",
+      "rowAxis": "AP",
+      "columnAxis": "ML",
+      "sliceCenterMicrometres": 62.5
+    }
+  },
+  "selection": {
+    "orientation": "horizontal",
+    "index": 2,
+    "column": 3,
+    "row": 1,
+    "atlasPoint": {
+      "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+      "apMicrometres": 37.5,
+      "dvMicrometres": 62.5,
+      "mlMicrometres": 87.5
+    },
+    "containingVoxelIndex": {
+      "frameId": "BRAINGLOBE_VOXEL_INDEX_ASR",
+      "ap": 1,
+      "dv": 2,
+      "ml": 3
+    },
+    "region": {
+      "structureId": 385,
+      "acronym": "VISp",
+      "name": "Primary visual area",
+      "parentStructureId": 315,
+      "structureIdPath": [997, 315, 385],
+      "rgb": [8, 133, 140]
+    },
+    "hemisphere": "right"
+  }
+}

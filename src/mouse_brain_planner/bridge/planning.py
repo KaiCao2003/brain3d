@@ -1,4 +1,4 @@
-"""Project and subject-vasculature methods for the native hybrid bridge."""
+"""Project bridge methods and archived legacy vasculature implementations."""
 
 from __future__ import annotations
 
@@ -16,8 +16,16 @@ import numpy as np
 from PIL import Image
 from pydantic import ValidationError
 
+from mouse_brain_planner.atlas.brainglobe_adapter import AtlasAdapterError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
+from mouse_brain_planner.bridge.atlas_interaction import (
+    ATLAS_PHYSICAL_FRAME_ID,
+    _region_payload,
+)
+from mouse_brain_planner.bridge.calibration import register_calibration_handlers
 from mouse_brain_planner.bridge.implant_targets import register_implant_target_handlers
+from mouse_brain_planner.bridge.major_vessels import register_major_vessel_handlers
+from mouse_brain_planner.bridge.probe_planning import register_probe_planning_handlers
 from mouse_brain_planner.bridge.server import (
     SUPPORTED_ATLAS_IDENTIFIER,
     SUPPORTED_ATLAS_VERSION,
@@ -25,12 +33,20 @@ from mouse_brain_planner.bridge.server import (
     BridgeError,
     JsonObject,
     LoadedAtlasProtocol,
+    atlas_provenance,
     encode_rgb_png,
 )
+from mouse_brain_planner.bridge.viewer_state import (
+    ViewerStateBridge,
+    register_viewer_state_handlers,
+)
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
-from mouse_brain_planner.domain.atlas_models import AtlasMetadata
-from mouse_brain_planner.domain.coordinate_models import BrainGlobeVoxelIndex
-from mouse_brain_planner.domain.project_models import PlannerProject
+from mouse_brain_planner.domain.atlas_models import AtlasMetadata, RegionRecord
+from mouse_brain_planner.domain.coordinate_models import (
+    BrainGlobePhysicalPoint,
+    BrainGlobeVoxelIndex,
+)
+from mouse_brain_planner.domain.project_models import PlannerProject, ViewerSliceDepths
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
     DorsalVascularLandmark,
@@ -107,30 +123,52 @@ class PlanningBridgeSession:
     _working_package: Path | None = None
     _reference_density_cache: CachedReferenceDensity | None = None
     _reference_density_cache_error: str | None = None
+    _viewer_state: ViewerStateBridge | None = None
 
     def register(self) -> None:
         """Install project handlers and replace the placeholder state snapshot."""
 
         self.dispatcher.register("state.get", self.state_get, replace=True)
         self.dispatcher.register("atlas.dorsal", self.atlas_dorsal)
+        self.dispatcher.register("atlas.dorsal.pick", self.atlas_dorsal_pick)
         self.dispatcher.register("project.new", self.project_new)
         self.dispatcher.register("project.open", self.project_open)
         self.dispatcher.register("project.save", self.project_save)
-        self.dispatcher.register("vascular.import", self.vascular_import)
-        self.dispatcher.register("vascular.preview", self.vascular_preview)
-        self.dispatcher.register("vascular.register", self.vascular_register)
-        self.dispatcher.register("vascular.overlay", self.vascular_overlay)
-        self.dispatcher.register("vascular.reference.prepare", self.vascular_reference_prepare)
-        self.dispatcher.register("vascular.reference.display", self.vascular_reference_display)
-        self.dispatcher.register("vascular.reference.overlay", self.vascular_reference_overlay)
+        # The legacy subject-image and population-density implementations remain
+        # below for package compatibility and archive verification, but are not
+        # reachable through the primary surgery-planning bridge.
         register_implant_target_handlers(
             self.dispatcher,
             get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
             replace_project=self._replace_project_after_implant_mutation,
         )
-        self.dispatcher.declare_capability("populationReferenceDensityPrepare")
-        self.dispatcher.declare_capability("populationReferenceDensityDisplayMutation")
-        self.dispatcher.declare_capability("populationReferenceDensityOverlay")
+        self._viewer_state = register_viewer_state_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_viewer_mutation,
+        )
+        register_calibration_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_calibration_mutation,
+        )
+        register_probe_planning_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_probe_mutation,
+            get_atlas=self._require_loaded_atlas,
+        )
+        register_major_vessel_handlers(
+            self.dispatcher,
+            get_project=self._require_project,
+            get_revision=lambda: self.project_revision,
+            replace_project=self._replace_project_after_probe_mutation,
+        )
+        self.dispatcher.declare_capability("atlasDorsalRegionPick")
 
     def atlas_dorsal(self, params: Mapping[str, object]) -> JsonObject:
         """Return the real atlas dorsal-boundary projection on the AP/ML grid."""
@@ -148,7 +186,7 @@ class PlanningBridgeSession:
         except (TypeError, ValueError) as error:
             raise BridgeError(
                 "DORSAL_SURFACE_RENDER_FAILED",
-                "The atlas dorsal surface projection could not be rendered safely.",
+                "The atlas dorsal surface projection could not be rendered.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         height, width = frame.rgb.shape[:2]
@@ -185,11 +223,103 @@ class PlanningBridgeSession:
             },
         }
 
+    def atlas_dorsal_pick(self, params: Mapping[str, object]) -> JsonObject:
+        """Resolve an AP/ML dorsal pixel to its first annotated DV voxel."""
+
+        _validate_params(
+            params,
+            required={"protocolVersion", "column", "row"},
+        )
+        _require_protocol(params)
+        atlas = self._require_loaded_atlas()
+        row = _nonnegative_integer(params["row"], field_name="row")
+        column = _nonnegative_integer(params["column"], field_name="column")
+        ap_count, dv_count, ml_count = atlas.metadata.shape_voxels
+        if row >= ap_count or column >= ml_count:
+            raise BridgeError(
+                "DORSAL_PICK_OUT_OF_RANGE",
+                "The selected intrinsic dorsal pixel is outside the AP/ML atlas grid.",
+                details={
+                    "column": column,
+                    "row": row,
+                    "width": ml_count,
+                    "height": ap_count,
+                },
+            )
+
+        annotation_column = np.asarray(atlas.annotation[row, :, column])
+        if annotation_column.shape != (dv_count,):
+            raise BridgeError(
+                "ATLAS_CONTRACT_VIOLATION",
+                "The dorsal annotation column does not match the reviewed atlas DV extent.",
+                details={
+                    "expectedShape": [dv_count],
+                    "actualShape": list(annotation_column.shape),
+                },
+            )
+        annotated_dv_indices = np.flatnonzero(annotation_column)
+        result: JsonObject = {
+            "protocolVersion": PROTOCOL_VERSION,
+            "status": "noAnnotatedVoxel",
+            "column": column,
+            "row": row,
+            "atlasPoint": None,
+            "containingVoxelIndex": None,
+            "annotationStructureId": None,
+            "region": None,
+            "hemisphere": None,
+            "atlas": atlas_provenance(atlas),
+        }
+        if annotated_dv_indices.size == 0:
+            return result
+
+        dv_index = int(annotated_dv_indices[0])
+        annotation_structure_id = int(annotation_column[dv_index])
+        if annotation_structure_id <= 0:
+            raise BridgeError(
+                "ATLAS_CONTRACT_VIOLATION",
+                "The first nonzero dorsal annotation is not a positive structure ID.",
+                details={"annotationStructureId": annotation_structure_id},
+            )
+        index = BrainGlobeVoxelIndex(
+            atlas_key=atlas.metadata.atlas_key,
+            atlas_version=atlas.metadata.atlas_package_version,
+            ap=row,
+            dv=dv_index,
+            ml=column,
+        )
+        point = BrainGlobeAtlasSpace(atlas.metadata).index_to_center(index)
+        region = _dorsal_pick_region(atlas, point, annotation_structure_id)
+
+        result.update(
+            {
+                "status": "hit",
+                "atlasPoint": {
+                    "frameId": ATLAS_PHYSICAL_FRAME_ID,
+                    "apMicrometres": point.ap_um,
+                    "dvMicrometres": point.dv_um,
+                    "mlMicrometres": point.ml_um,
+                },
+                "containingVoxelIndex": {
+                    "frameId": index.frame_id,
+                    "ap": index.ap,
+                    "dv": index.dv,
+                    "ml": index.ml,
+                },
+                "annotationStructureId": annotation_structure_id,
+                "region": _region_payload(region),
+                "hemisphere": BrainGlobeAtlasSpace(atlas.metadata).hemisphere(point).value,
+            }
+        )
+        return result
+
     def state_get(self, params: Mapping[str, object]) -> JsonObject:
         _validate_params(params, required={"protocolVersion"})
         _require_protocol(params)
         atlas = self.dispatcher.context.loaded_atlas
         project = self.project
+        if project is not None and project.project_revision != self.project_revision:
+            raise RuntimeError("session and persisted project revisions diverged")
         if atlas is None:
             atlas_state: JsonObject = {
                 "identifier": SUPPORTED_ATLAS_IDENTIFIER,
@@ -254,6 +384,14 @@ class PlanningBridgeSession:
                 project.atlas,
             )
         )
+        viewer = None
+        if project is not None:
+            if self._viewer_state is None:
+                raise BridgeError(
+                    "VIEWER_STATE_UNAVAILABLE",
+                    "The independent slice viewer handlers are not registered.",
+                )
+            viewer = self._viewer_state.snapshot(project, self.project_revision)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "animalOnly": True,
@@ -273,8 +411,28 @@ class PlanningBridgeSession:
                     "revision": self.project_revision,
                     "isDirty": self.saved_revision != self.project_revision,
                     "animalResearchOnlyAcknowledged": (project.scientific_disclaimer_acknowledged),
+                    "calibrationCount": len(project.calibrations),
+                    "activeCalibrationId": (
+                        None
+                        if project.active_calibration_uuid is None
+                        else str(project.active_calibration_uuid)
+                    ),
+                    "probePlanCount": len(project.probe_plans),
+                    "probeRegionAnalysisCount": len(project.probe_region_analyses),
+                    "eventLog": [event.model_dump(mode="json") for event in project.event_log],
+                    "rendererAnchor": (
+                        None
+                        if project.renderer_anchor is None
+                        else {
+                            "frameId": "BRAINGLOBE_PHYSICAL_ASR_UM",
+                            "apMicrometres": project.renderer_anchor.ap_um,
+                            "dvMicrometres": project.renderer_anchor.dv_um,
+                            "mlMicrometres": project.renderer_anchor.ml_um,
+                        }
+                    ),
                 }
             ),
+            "viewer": viewer,
             "subjectVessels": {
                 "imported": bool(images),
                 "registered": any(bool(item["registered"]) for item in images),
@@ -328,6 +486,12 @@ class PlanningBridgeSession:
         atlas = self._require_loaded_atlas()
         title = _optional_text(params.get("title"), field_name="title", maximum=200)
         subject_id = _optional_text(params.get("subjectId"), field_name="subjectId", maximum=200)
+        if subject_id is None:
+            raise BridgeError(
+                "ANIMAL_SUBJECT_ID_REQUIRED",
+                "Creating an animal surgery plan requires a nonempty animal subject ID.",
+                details={"field": "subjectId"},
+            )
         space = BrainGlobeAtlasSpace(atlas.metadata)
         shape = atlas.metadata.shape_voxels
         centre_index = BrainGlobeVoxelIndex(
@@ -342,9 +506,15 @@ class PlanningBridgeSession:
             project = PlannerProject(
                 title=title or "Untitled animal surgery plan",
                 subject_id=subject_id,
+                project_revision=1,
                 atlas=atlas.metadata,
                 linked_cursor=centre,
                 renderer_anchor=centre,
+                viewer_slice_depths=ViewerSliceDepths(
+                    coronal=centre_index.ap,
+                    sagittal=centre_index.ml,
+                    horizontal=centre_index.dv,
+                ),
                 scientific_disclaimer_acknowledged=True,
             )
         except ValidationError as error:  # defensive atlas/project integration boundary
@@ -358,7 +528,7 @@ class PlanningBridgeSession:
         self.project_path = None
         self.asset_source_package = None
         self.recovered_from_backup = False
-        self.project_revision = 1
+        self.project_revision = project.project_revision
         self.saved_revision = None
         self._working_package = None
         self._reference_density_cache = None
@@ -387,6 +557,17 @@ class PlanningBridgeSession:
                 details={"exceptionType": type(error).__name__},
             ) from error
         project = result.project
+        if project.subject_id is None or not project.subject_id.strip():
+            raise BridgeError(
+                "ANIMAL_SUBJECT_ID_REQUIRED",
+                "This legacy project has no animal subject ID and cannot be opened for "
+                "surgery planning. Create a new animal plan with an explicit subject ID, "
+                "then review and recreate the required planning records.",
+                details={
+                    "projectOpened": False,
+                    "suggestedAction": "Create a new animal plan with an explicit subject ID.",
+                },
+            )
         if project.atlas is None:
             raise BridgeError(
                 "PROJECT_ATLAS_REQUIRED",
@@ -408,12 +589,30 @@ class PlanningBridgeSession:
                 "ANIMAL_ONLY_ACKNOWLEDGEMENT_REQUIRED",
                 "The project does not record the required animal-only acknowledgement.",
             )
+        if project.viewer_slice_depths is None:
+            anchor = project.linked_cursor or project.renderer_anchor
+            if anchor is None:  # guarded by the project model, retained defensively
+                raise BridgeError(
+                    "VIEWER_STATE_UNAVAILABLE",
+                    "The atlas-bound project cannot initialize independent slice depths.",
+                )
+            anchor_index = BrainGlobeAtlasSpace(atlas.metadata).physical_to_index(anchor)
+            project = project.model_copy(
+                update={
+                    "viewer_slice_depths": ViewerSliceDepths(
+                        coronal=anchor_index.ap,
+                        sagittal=anchor_index.ml,
+                        horizontal=anchor_index.dv,
+                    ),
+                    "viewer_region_selection": None,
+                }
+            )
         self.project = project
         self.project_path = result.writable_path
         self.asset_source_package = result.source_path
         self.recovered_from_backup = result.recovered_from_backup or result.requires_save_as
-        self.project_revision = 0
-        self.saved_revision = None if result.requires_save_as else 0
+        self.project_revision = project.project_revision
+        self.saved_revision = None if result.requires_save_as else project.project_revision
         self._working_package = None
         self._restore_reference_density_cache(project, atlas)
         return {
@@ -428,9 +627,36 @@ class PlanningBridgeSession:
         }
 
     def project_save(self, params: Mapping[str, object]) -> JsonObject:
-        _validate_params(params, required={"protocolVersion"}, optional={"path"})
+        _validate_params(
+            params,
+            required={"protocolVersion", "projectId", "expectedProjectRevision"},
+            optional={"path"},
+        )
         _require_protocol(params)
         project = self._require_project()
+        requested_project_id = _uuid(params["projectId"], field_name="projectId")
+        if requested_project_id != project.project_uuid:
+            raise BridgeError(
+                "PROJECT_ID_MISMATCH",
+                "The save request does not belong to the current project.",
+                details={
+                    "requestedProjectId": str(requested_project_id),
+                    "currentProjectId": str(project.project_uuid),
+                },
+            )
+        expected_revision = _nonnegative_integer(
+            params["expectedProjectRevision"],
+            field_name="expectedProjectRevision",
+        )
+        if expected_revision != self.project_revision:
+            raise BridgeError(
+                "PROJECT_REVISION_CONFLICT",
+                "The save request was based on a stale project revision.",
+                details={
+                    "expectedProjectRevision": expected_revision,
+                    "actualProjectRevision": self.project_revision,
+                },
+            )
         raw_path = params.get("path")
         destination = (
             self.project_path if raw_path is None else _absolute_path(raw_path, field_name="path")
@@ -441,24 +667,26 @@ class PlanningBridgeSession:
                 "This project has no writable path; choose a Save As destination.",
             )
         destination = normalize_project_path(destination)
-        previous = project.model_copy(deep=True)
-        previous_revision = self.project_revision
-        project.touch("project-saved")
-        self.project_revision += 1
+        candidate = project.model_copy(deep=True)
+        candidate.touch("project-saved")
+        candidate = self._project_at_revision(candidate, expected_revision + 1)
         try:
             saved = save_project(
-                project,
+                candidate,
                 destination,
                 asset_source_package=self.asset_source_package,
             )
         except (OSError, ValueError, ValidationError, ProjectIntegrityError) as error:
-            self.project = previous
-            self.project_revision = previous_revision
             raise BridgeError(
                 "PROJECT_SAVE_FAILED",
                 "The project was left unchanged because its atomic save failed.",
                 details={"exceptionType": type(error).__name__},
             ) from error
+        # Publish only after the exact candidate snapshot is durably saved. The
+        # package and the live session therefore expose the same single new
+        # revision, while a failed save leaves both live references untouched.
+        self.project = candidate
+        self.project_revision = candidate.project_revision
         self.project_path = saved
         self.asset_source_package = saved
         self.recovered_from_backup = False
@@ -467,7 +695,8 @@ class PlanningBridgeSession:
             "protocolVersion": PROTOCOL_VERSION,
             "status": "saved",
             "path": str(saved),
-            "projectId": str(project.project_uuid),
+            "projectId": str(candidate.project_uuid),
+            "projectRevision": candidate.project_revision,
         }
 
     def vascular_import(self, params: Mapping[str, object]) -> JsonObject:
@@ -510,9 +739,8 @@ class PlanningBridgeSession:
             "subject-vascular-image-imported",
             f"{image.original_name}; sha256={image.source_sha256}",
         )
-        self.project = updated
+        self._publish_project_mutation(updated)
         self.asset_source_package = working
-        self.project_revision += 1
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "imported",
@@ -628,8 +856,7 @@ class PlanningBridgeSession:
             f"method={registration.method.value}; rms={registration.rms_residual_um:g} µm; "
             f"max={registration.max_residual_um:g} µm; laterality={laterality}",
         )
-        self.project = updated
-        self.project_revision += 1
+        self._publish_project_mutation(updated)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "registered",
@@ -791,10 +1018,9 @@ class PlanningBridgeSession:
             f"archive_sha256={STXVN5SV44_V1_SOURCE.archive_sha256}; "
             f"prepared_sha256={cached.prepared_density_sha256}",
         )
-        self.project = updated
+        self._publish_project_mutation(updated)
         self._reference_density_cache = cached
         self._reference_density_cache_error = None
-        self.project_revision += 1
         return _reference_prepare_result(cached, atlas.metadata)
 
     def vascular_reference_display(self, params: Mapping[str, object]) -> JsonObject:
@@ -849,15 +1075,14 @@ class PlanningBridgeSession:
         except (ValueError, ValidationError) as error:
             raise BridgeError(
                 "REFERENCE_DENSITY_DISPLAY_UPDATE_FAILED",
-                "The population density display state could not be stored safely.",
+                "The population density display state could not be stored.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         updated.touch(
             "population-reference-density-display-updated",
             f"visible={str(visible).lower()}; opacity={opacity:g}",
         )
-        self.project = updated
-        self.project_revision += 1
+        self._publish_project_mutation(updated)
         return {
             "protocolVersion": PROTOCOL_VERSION,
             "status": "updatedReferenceDensityDisplay",
@@ -915,7 +1140,7 @@ class PlanningBridgeSession:
         except (OSError, TypeError, ValueError) as error:
             raise BridgeError(
                 "REFERENCE_DENSITY_OVERLAY_FAILED",
-                "The population density projection could not be rendered safely.",
+                "The population density projection could not be rendered.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         height, width = projection.rgba.shape[:2]
@@ -1002,13 +1227,56 @@ class PlanningBridgeSession:
     def _require_project(self) -> PlannerProject:
         if self.project is None:
             raise BridgeError("PROJECT_NOT_OPEN", "Create or open a project first.")
+        if self.project.project_revision != self.project_revision:
+            raise RuntimeError("session and persisted project revisions diverged")
         return self.project
 
-    def _replace_project_after_implant_mutation(self, project: PlannerProject) -> None:
-        """Publish one validated implant mutation and mark the session dirty."""
+    def _replace_project_after_implant_mutation(self, project: PlannerProject) -> int:
+        """Publish one validated implant mutation and return its new revision."""
 
-        self.project = project
-        self.project_revision += 1
+        return self._publish_project_mutation(project)
+
+    def _replace_project_after_viewer_mutation(self, project: PlannerProject) -> int:
+        """Publish one independent viewer mutation and return its new revision."""
+
+        return self._publish_project_mutation(project)
+
+    def _replace_project_after_calibration_mutation(self, project: PlannerProject) -> int:
+        """Publish one validated calibration mutation and return its revision."""
+
+        return self._publish_project_mutation(project)
+
+    def _replace_project_after_probe_mutation(self, project: PlannerProject) -> int:
+        """Publish one validated probe/analysis mutation and return its revision."""
+
+        return self._publish_project_mutation(project)
+
+    def _publish_project_mutation(self, project: PlannerProject) -> int:
+        """Atomically advance both in-memory and persistable revision state."""
+
+        if project.project_revision != self.project_revision:
+            raise BridgeError(
+                "PROJECT_REVISION_CONFLICT",
+                "The project mutation was built from a stale revision.",
+                details={
+                    "mutationProjectRevision": project.project_revision,
+                    "actualProjectRevision": self.project_revision,
+                },
+            )
+        updated = self._project_at_revision(project, self.project_revision + 1)
+        self.project = updated
+        self.project_revision = updated.project_revision
+        return updated.project_revision
+
+    @staticmethod
+    def _project_at_revision(project: PlannerProject, revision: int) -> PlannerProject:
+        if revision != project.project_revision + 1:
+            raise ValueError("project revision must advance exactly once")
+        # Every handler supplies an already validated project graph and the bridge
+        # alone derives this integer. Avoid serializing/revalidating potentially
+        # thousands of recording sites and vessel conflicts on the slice-wheel
+        # hot path; save/load still revalidate the entire graph.
+        return project.model_copy(update={"project_revision": revision})
 
     def _find_image(self, raw_image_id: object) -> SubjectVascularImage:
         project = self._require_project()
@@ -1197,6 +1465,50 @@ def register_planning_handlers(
     )
     session.register()
     return session
+
+
+def _dorsal_pick_region(
+    atlas: LoadedAtlasProtocol,
+    point: BrainGlobePhysicalPoint,
+    annotation_structure_id: int,
+) -> RegionRecord:
+    try:
+        region = atlas.region_at(point)
+    except (AtlasAdapterError, KeyError, OSError, TypeError, ValueError) as error:
+        raise BridgeError(
+            "ATLAS_POINT_LOOKUP_FAILED",
+            "The reviewed atlas could not resolve the dorsal annotation region.",
+            details={"exceptionType": type(error).__name__},
+        ) from error
+    if not isinstance(region, RegionRecord):
+        raise BridgeError(
+            "ATLAS_CONTRACT_VIOLATION",
+            "A nonzero dorsal annotation did not resolve to a normalized region record.",
+            details={
+                "annotationStructureId": annotation_structure_id,
+                "returnedType": type(region).__name__,
+            },
+        )
+    if region.structure_id != annotation_structure_id:
+        raise BridgeError(
+            "ATLAS_CONTRACT_VIOLATION",
+            "The dorsal annotation ID does not match the resolved region identity.",
+            details={
+                "annotationStructureId": annotation_structure_id,
+                "regionStructureId": region.structure_id,
+            },
+        )
+    return region
+
+
+def _nonnegative_integer(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            f"{field_name} must be a nonnegative integer.",
+            details={"field": field_name},
+        )
+    return value
 
 
 def _validate_params(

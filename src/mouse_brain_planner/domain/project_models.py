@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
-from typing import Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -12,18 +12,54 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.probe_plan_models import (
+    ProbePlacementMode,
+    ProbePlanRecord,
+    ProbeRegionAnalysisBundle,
+)
+from mouse_brain_planner.domain.stereotaxy_models import (
+    AtlasRegisteredCalibration,
+    atlas_registered_calibration_sha256,
+)
 from mouse_brain_planner.domain.vessel_models import (
     DorsalVascularRegistration,
     ReferenceVascularDensityProjectState,
     SubjectVascularImage,
     SubjectVascularOverlayState,
 )
+from mouse_brain_planner.domain.vessel_plan_models import ProbeVesselAnalysisBundle
 from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION, __version__
 
 MAX_PROJECT_EVENTS = 1_000
 MAX_SUBJECT_VASCULAR_IMAGES = 128
 MAX_DORSAL_VASCULAR_REGISTRATIONS = 1_024
 MAX_UNPROJECTED_BREGMA_TARGETS = 256
+MAX_CALIBRATIONS = 32
+MAX_PROBE_PLANS = 32
+MAX_PROBE_REGION_ANALYSES = 32
+MAX_PROBE_VESSEL_ANALYSES = 32
+
+
+class ViewerSliceDepths(BaseModel):
+    """Independent zero-based slice indices for the three orthogonal views."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    coronal: int = Field(ge=0)
+    sagittal: int = Field(ge=0)
+    horizontal: int = Field(ge=0)
+
+
+class ViewerRegionSelection(BaseModel):
+    """One explicit region pick on one persisted slice image."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    orientation: Literal["coronal", "sagittal", "horizontal"]
+    index: int = Field(ge=0)
+    column: int = Field(ge=0)
+    row: int = Field(ge=0)
+    atlas_point: BrainGlobePhysicalPoint
 
 
 def utc_now() -> datetime:
@@ -35,7 +71,7 @@ def utc_now() -> datetime:
 class RegionDisplayState(BaseModel):
     """Project-local display settings that never mutate atlas metadata."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     structure_id: int = Field(gt=0)
     visible: bool = False
@@ -55,7 +91,7 @@ class RegionDisplayState(BaseModel):
 class ProjectEvent(BaseModel):
     """A meaningful project action without private OS information."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     timestamp: datetime = Field(default_factory=utc_now)
     action: str = Field(min_length=1, max_length=200)
@@ -65,10 +101,11 @@ class ProjectEvent(BaseModel):
 class PlannerProject(BaseModel):
     """Versioned animal surgery-planning project state."""
 
-    model_config = ConfigDict(validate_assignment=True)
+    model_config = ConfigDict(validate_assignment=True, extra="forbid")
 
     schema_version: int = PROJECT_SCHEMA_VERSION
     application_version: str = __version__
+    project_revision: int = Field(default=0, ge=0)
     project_uuid: UUID = Field(default_factory=uuid4)
     title: str = Field(default="Untitled surgery plan", min_length=1, max_length=200)
     subject_id: str | None = Field(default=None, max_length=200)
@@ -77,7 +114,11 @@ class PlannerProject(BaseModel):
     atlas: AtlasMetadata | None = None
     linked_cursor: BrainGlobePhysicalPoint | None = None
     renderer_anchor: BrainGlobePhysicalPoint | None = None
+    viewer_slice_depths: ViewerSliceDepths | None = None
+    viewer_region_selection: ViewerRegionSelection | None = None
     selected_region_id: int | None = Field(default=None, gt=0)
+    # Schema 6 originally accepted any collection that fit the bounded regions.json member.
+    # Narrowing this field requires a schema migration, not an in-place validation change.
     region_display: list[RegionDisplayState] = Field(default_factory=list)
     subject_vascular_images: list[SubjectVascularImage] = Field(
         default_factory=list,
@@ -96,8 +137,26 @@ class PlannerProject(BaseModel):
         default_factory=list,
         max_length=MAX_UNPROJECTED_BREGMA_TARGETS,
     )
+    calibrations: list[AtlasRegisteredCalibration] = Field(
+        default_factory=list,
+        max_length=MAX_CALIBRATIONS,
+    )
+    active_calibration_uuid: UUID | None = None
+    probe_plans: list[ProbePlanRecord] = Field(
+        default_factory=list,
+        max_length=MAX_PROBE_PLANS,
+    )
+    probe_region_analyses: list[ProbeRegionAnalysisBundle] = Field(
+        default_factory=list,
+        max_length=MAX_PROBE_REGION_ANALYSES,
+    )
+    probe_vessel_analyses: list[ProbeVesselAnalysisBundle] = Field(
+        default_factory=list,
+        max_length=MAX_PROBE_VESSEL_ANALYSES,
+    )
     coordinate_convention: str = "BrainGlobe ASR: [AP,DV,ML], origin A/S/R, increasing P/I/L, µm"
     scientific_disclaimer_acknowledged: bool = False
+    # Schema 6 originally accepted any text that fit the bounded project.json member.
     user_notes: str = ""
     event_log: list[ProjectEvent] = Field(default_factory=list, max_length=MAX_PROJECT_EVENTS)
 
@@ -112,6 +171,15 @@ class PlannerProject(BaseModel):
             )
         return value
 
+    @field_validator("project_revision", mode="before")
+    @classmethod
+    def validate_project_revision(cls, value: object) -> int:
+        """Reject booleans and coercible text at the persisted concurrency boundary."""
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("project revision must be a nonnegative integer")
+        return value
+
     @model_validator(mode="after")
     def validate_atlas_bound_state(self) -> Self:
         """Reject mixed atlas identities and out-of-bounds persisted cursors."""
@@ -120,13 +188,48 @@ class PlannerProject(BaseModel):
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("unprojected bregma targets contain duplicate UUIDs")
 
+        calibration_ids = [item.calibration_uuid for item in self.calibrations]
+        if len(calibration_ids) != len(set(calibration_ids)):
+            raise ValueError("calibrations contain duplicate UUIDs")
+        calibration_versions = [
+            (item.profile_id, item.calibration_version) for item in self.calibrations
+        ]
+        if len(calibration_versions) != len(set(calibration_versions)):
+            raise ValueError("each calibration profile version must be unique")
+        calibrations_by_id = {item.calibration_uuid: item for item in self.calibrations}
+        active_calibration = (
+            None
+            if self.active_calibration_uuid is None
+            else calibrations_by_id.get(self.active_calibration_uuid)
+        )
+        if self.active_calibration_uuid is not None and active_calibration is None:
+            raise ValueError("active calibration UUID does not identify a persisted calibration")
+        if active_calibration is not None and not active_calibration.permits_planning:
+            raise ValueError("a failed calibration cannot be active")
+
+        plan_ids = [item.plan_uuid for item in self.probe_plans]
+        if len(plan_ids) != len(set(plan_ids)):
+            raise ValueError("probe plans contain duplicate UUIDs")
+        analyses_by_plan = [item.plan_uuid for item in self.probe_region_analyses]
+        if len(analyses_by_plan) != len(set(analyses_by_plan)):
+            raise ValueError("only one current region-analysis bundle is allowed per probe plan")
+        vessel_analyses_by_plan = [item.plan_uuid for item in self.probe_vessel_analyses]
+        if len(vessel_analyses_by_plan) != len(set(vessel_analyses_by_plan)):
+            raise ValueError("only one current vessel-analysis bundle is allowed per probe plan")
+
         if self.atlas is None:
             if self.linked_cursor is not None:
                 raise ValueError("a linked atlas cursor requires atlas metadata")
             if self.renderer_anchor is not None:
                 raise ValueError("a renderer anchor requires atlas metadata")
+            if self.viewer_slice_depths is not None or self.viewer_region_selection is not None:
+                raise ValueError("viewer slice state requires atlas metadata")
             if self.selected_region_id is not None or self.region_display:
                 raise ValueError("atlas region state requires atlas metadata")
+            if self.calibrations or self.active_calibration_uuid is not None:
+                raise ValueError("atlas-registered calibration state requires atlas metadata")
+            if self.probe_plans or self.probe_region_analyses or self.probe_vessel_analyses:
+                raise ValueError("probe planning state requires atlas metadata")
             if (
                 self.subject_vascular_images
                 or self.dorsal_vascular_registrations
@@ -137,7 +240,7 @@ class PlannerProject(BaseModel):
             return self
 
         for label, point in (
-            ("linked cursor", self.linked_cursor),
+            ("legacy atlas point", self.linked_cursor),
             ("renderer anchor", self.renderer_anchor),
         ):
             if point is None:
@@ -171,6 +274,145 @@ class PlannerProject(BaseModel):
         if self.renderer_anchor is None:
             raise ValueError("an atlas-bound project requires a renderer anchor")
 
+        expected_atlas_identity = (
+            self.atlas.atlas_key,
+            self.atlas.atlas_package_version,
+        )
+        for calibration in self.calibrations:
+            destination = calibration.atlas_transform.destination_frame
+            calibration_identity = (destination.atlas_key, destination.atlas_version)
+            if calibration_identity != expected_atlas_identity:
+                raise ValueError(
+                    "calibration atlas identity "
+                    f"{calibration_identity} does not match project atlas "
+                    f"{expected_atlas_identity}"
+                )
+            if calibration.atlas_metadata_sha256 != self.atlas.metadata_sha256:
+                raise ValueError("calibration atlas metadata digest does not match project atlas")
+            calibration_subject = calibration.skull_calibration.context.subject_id
+            if calibration_subject != self.subject_id:
+                raise ValueError(
+                    "calibration animal subject ID does not match the current project subject"
+                )
+
+        plans_by_id = {item.plan_uuid: item for item in self.probe_plans}
+        for plan in self.probe_plans:
+            if plan.atlas_metadata_sha256 != self.atlas.metadata_sha256:
+                raise ValueError("probe plan atlas metadata digest does not match project atlas")
+            if plan.placement.context.subject_id != self.subject_id:
+                raise ValueError("probe plan animal subject ID does not match the project subject")
+            referenced_calibration = calibrations_by_id.get(plan.calibration_uuid)
+            if referenced_calibration is None:
+                raise ValueError("probe plan references an unavailable calibration")
+            if referenced_calibration.calibration_version != plan.calibration_version:
+                raise ValueError(
+                    "probe plan calibration version does not match project calibration"
+                )
+            if plan.calibration_sha256 != atlas_registered_calibration_sha256(
+                referenced_calibration
+            ):
+                raise ValueError("probe plan calibration digest does not match project calibration")
+            if plan.manipulator_input is not None and (
+                plan.manipulator_input.frame_id
+                != referenced_calibration.atlas_transform.source_frame.frame_id
+            ):
+                raise ValueError(
+                    "probe plan manipulator input frame does not match its calibration"
+                )
+            if plan.placement_input is not None and (
+                plan.placement_input.mode is not ProbePlacementMode.ENTRY_AND_TARGET
+            ):
+                expected_angle_frame = (
+                    referenced_calibration.atlas_transform.destination_frame.frame_id
+                    if plan.placement_input.mode is ProbePlacementMode.TARGET_ANGLES_DEPTH
+                    else referenced_calibration.atlas_transform.source_frame.frame_id
+                )
+                if plan.placement_input.angle_frame_id != expected_angle_frame:
+                    raise ValueError(
+                        "probe placement angle frame does not match its calibration mode"
+                    )
+            if not plan.probe_model.permits_verified_device_label and not (
+                plan.placement.custom_geometry_acknowledged
+            ):
+                raise ValueError("unverified probe plan geometry requires explicit acknowledgment")
+        for bundle in self.probe_region_analyses:
+            referenced_plan = plans_by_id.get(bundle.plan_uuid)
+            if referenced_plan is None:
+                raise ValueError("region analysis references an unavailable probe plan")
+            if bundle.plan_version != referenced_plan.plan_version or (
+                bundle.plan_input_sha256 != referenced_plan.input_sha256
+            ):
+                raise ValueError("region analysis is stale for its current probe plan")
+            placement_ids = {analysis.placement_uuid for analysis in bundle.shank_analyses}
+            if placement_ids != {referenced_plan.placement.placement_uuid}:
+                raise ValueError("region analysis placement does not match its probe plan")
+            expected_shanks = {shank.shank_id for shank in referenced_plan.probe_model.shanks}
+            actual_shanks = {analysis.shank_id for analysis in bundle.shank_analyses}
+            if actual_shanks != expected_shanks:
+                raise ValueError("region analysis does not cover every probe-model shank")
+        for vessel_bundle in self.probe_vessel_analyses:
+            referenced_plan = plans_by_id.get(vessel_bundle.plan_uuid)
+            if referenced_plan is None:
+                raise ValueError("vessel analysis references an unavailable probe plan")
+            if vessel_bundle.plan_version != referenced_plan.plan_version or (
+                vessel_bundle.plan_input_sha256 != referenced_plan.input_sha256
+            ):
+                raise ValueError("vessel analysis is stale for its current probe plan")
+            provenance = vessel_bundle.analysis.provenance
+            if (provenance.atlas_key, provenance.atlas_version) != expected_atlas_identity:
+                raise ValueError("vessel analysis atlas identity does not match project atlas")
+
+        if self.viewer_slice_depths is not None:
+            depth_limits = {
+                "coronal": self.atlas.shape_voxels[0],
+                "sagittal": self.atlas.shape_voxels[2],
+                "horizontal": self.atlas.shape_voxels[1],
+            }
+            for orientation, limit in depth_limits.items():
+                depth = getattr(self.viewer_slice_depths, orientation)
+                if depth < 0 or depth >= limit:
+                    raise ValueError(f"{orientation} viewer slice {depth} is outside [0, {limit})")
+
+        if self.viewer_region_selection is not None:
+            if self.viewer_slice_depths is None:
+                raise ValueError("a viewer region selection requires persisted slice depths")
+            selection = self.viewer_region_selection
+            if selection.atlas_point.atlas_key != self.atlas.atlas_key or (
+                selection.atlas_point.atlas_version != self.atlas.atlas_package_version
+            ):
+                raise ValueError("viewer region selection atlas identity does not match project")
+            orientation_axes = {
+                "coronal": (0, 1, 2),
+                "sagittal": (2, 1, 0),
+                "horizontal": (1, 0, 2),
+            }
+            if selection.orientation not in orientation_axes:
+                raise ValueError("viewer region selection orientation is unsupported")
+            fixed_axis, row_axis, column_axis = orientation_axes[selection.orientation]
+            expected_depth = getattr(self.viewer_slice_depths, selection.orientation)
+            if selection.index < 0 or selection.row < 0 or selection.column < 0:
+                raise ValueError("viewer region selection indices must be nonnegative")
+            if selection.index != expected_depth:
+                raise ValueError("viewer region selection does not belong to the persisted slice")
+            if selection.row >= self.atlas.shape_voxels[row_axis] or (
+                selection.column >= self.atlas.shape_voxels[column_axis]
+            ):
+                raise ValueError("viewer region selection pixel is outside the slice image")
+            point_voxel = tuple(
+                math.floor(value / resolution)
+                for value, resolution in zip(
+                    selection.atlas_point.as_tuple(),
+                    self.atlas.resolution_um,
+                    strict=True,
+                )
+            )
+            expected_voxel = [0, 0, 0]
+            expected_voxel[fixed_axis] = selection.index
+            expected_voxel[row_axis] = selection.row
+            expected_voxel[column_axis] = selection.column
+            if point_voxel != tuple(expected_voxel):
+                raise ValueError("viewer region selection point does not match its intrinsic pixel")
+
         region_ids = [state.structure_id for state in self.region_display]
         if len(region_ids) != len(set(region_ids)):
             raise ValueError("project region display state contains duplicate structure IDs")
@@ -200,10 +442,6 @@ class PlannerProject(BaseModel):
             registration.registration_uuid: registration
             for registration in self.dorsal_vascular_registrations
         }
-        expected_atlas_identity = (
-            self.atlas.atlas_key,
-            self.atlas.atlas_package_version,
-        )
         for registration in self.dorsal_vascular_registrations:
             if registration.image_uuid not in images_by_id:
                 raise ValueError("dorsal vascular registration references an unknown image UUID")

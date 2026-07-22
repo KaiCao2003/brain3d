@@ -315,16 +315,22 @@ base atlas-to-world transform.
 Millimetre values in the UI are formatting conversions from a declared profile or frame. A
 unit conversion alone does not create stereotaxic calibration.
 
-## Dorsal overlay plane
+## Dorsal display plane and rejected vessel overlay
 
-The dorsal atlas image, the population-density projection, and a registered subject image share a
-display grid with AP as rows and ML as columns. The population layer is a maximum over DV, so it
-contains no recoverable DV position. A subject dorsal image is mapped from `[pixel column,
-pixel row]` into atlas physical `[AP,ML]` micrometres through an explicit registered transform.
+The current Dorsal view uses the atlas AP-by-ML grid for the atlas surface and selected probe.
+It does not display the archived LAMBADA P60_606 derivative. Coronal, sagittal, horizontal, and
+SceneKit 3D likewise receive no vessel geometry.
 
-Compositing either image over the brain is a visualization operation. It does not convert a
-two-dimensional image into a 3D vessel graph, and it cannot establish clearance to an
-unprojected bregma target.
+The exact qualification found supporting AP and DV orientation evidence but rejected biological
+ML/laterality and whole-brain coverage because the source is a hemisphere specimen and its graph
+has no persisted hemisphere binding. Numeric points on both sides of the atlas midpoint do not
+establish bilateral anatomy. No mirroring or display-axis guess is permitted; all reference
+geometry and analysis calls return `VESSEL_GEOMETRY_UNAVAILABLE`.
+
+Archived population-density and registered subject-image paths also use an AP-by-ML display grid,
+but they are absent from the primary UI and never substituted for a vessel graph. A population
+maximum contains no recoverable DV position, and a registered 2D image does not become 3D vessel
+geometry.
 
 ## Provenance and external Allen data
 

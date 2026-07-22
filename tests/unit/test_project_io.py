@@ -15,7 +15,13 @@ from pydantic import ValidationError
 from tests.fixtures.atlas_factory import make_allen_metadata_test_double
 
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
-from mouse_brain_planner.domain.project_models import MAX_SUBJECT_VASCULAR_IMAGES, PlannerProject
+from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.project_models import (
+    MAX_SUBJECT_VASCULAR_IMAGES,
+    PlannerProject,
+    RegionDisplayState,
+    ViewerSliceDepths,
+)
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
     DorsalVascularLandmark,
@@ -32,6 +38,7 @@ from mouse_brain_planner.persistence.project_io import (
     ATLAS_FILENAME,
     CHECKSUMMED_FILENAMES,
     CHECKSUMS_FILENAME,
+    MAX_PROJECT_JSON_BYTES,
     PROJECT_FILENAME,
     PROJECT_MEMBER_MAX_BYTES,
     REGIONS_FILENAME,
@@ -153,6 +160,69 @@ def test_project_round_trip_has_no_numeric_or_identity_drift(tmp_path: Path) -> 
     assert saved.name == "round-trip.mouseplan"
     assert loaded.model_dump(mode="json") == project.model_dump(mode="json")
     assert (saved / CHECKSUMS_FILENAME).is_file()
+
+
+def test_schema_six_round_trip_preserves_state_above_retracted_model_limits(
+    tmp_path: Path,
+) -> None:
+    """Do not narrow schema 6 while bounded package members can hold the state."""
+
+    metadata = make_allen_metadata_test_double(25)
+    anchor = BrainGlobePhysicalPoint(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=12.5,
+        dv_um=12.5,
+        ml_um=12.5,
+    )
+    project = PlannerProject(
+        atlas=metadata,
+        renderer_anchor=anchor,
+        user_notes="n" * 64_001,
+        region_display=[RegionDisplayState(structure_id=index + 1) for index in range(4_097)],
+    )
+
+    saved = save_project(project, tmp_path / "schema-six-large-state.mouseplan")
+    loaded = load_project(saved, recover_backup=False)
+
+    assert (saved / PROJECT_FILENAME).stat().st_size < MAX_PROJECT_JSON_BYTES
+    assert (saved / REGIONS_FILENAME).stat().st_size < PROJECT_MEMBER_MAX_BYTES[REGIONS_FILENAME]
+    assert loaded.schema_version == 6
+    assert loaded.user_notes == project.user_notes
+    assert loaded.region_display == project.region_display
+
+
+def test_checksummed_package_rejects_unknown_nested_atlas_field(tmp_path: Path) -> None:
+    """A valid checksum must not let a future/misspelled nested field disappear."""
+
+    metadata = make_allen_metadata_test_double(25)
+    anchor = BrainGlobePhysicalPoint(
+        atlas_key=metadata.atlas_key,
+        atlas_version=metadata.atlas_package_version,
+        ap_um=6612.5,
+        dv_um=4012.5,
+        ml_um=5712.5,
+    )
+    saved = save_project(
+        PlannerProject(atlas=metadata, renderer_anchor=anchor),
+        tmp_path / "unknown-nested-field.mouseplan",
+    )
+    atlas_path = saved / ATLAS_FILENAME
+    payload = json.loads(atlas_path.read_text(encoding="utf-8"))
+    payload["axes"][0]["misspelled_direction"] = "must not be discarded"
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    atlas_path.write_bytes(encoded)
+    checksums_path = saved / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[ATLAS_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(
+        json.dumps(checksums, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        load_project(saved, recover_backup=False)
 
 
 def test_vascular_state_and_exact_image_bytes_round_trip_with_checksum_coverage(
@@ -447,7 +517,7 @@ def test_schema_one_package_load_migrates_midline_and_renderer_anchor(tmp_path: 
 
     migrated = load_project(path)
 
-    assert migrated.schema_version == 3
+    assert migrated.schema_version == 6
     assert migrated.atlas is not None
     assert migrated.atlas.midline_ml_um == 5700.0
     assert migrated.renderer_anchor == anchor
@@ -476,11 +546,142 @@ def test_schema_two_package_without_vasculature_member_migrates_to_empty_state(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 3
+    assert migrated.schema_version == 6
     assert migrated.subject_vascular_images == []
     assert migrated.dorsal_vascular_registrations == []
     assert migrated.subject_vascular_overlays == []
     assert migrated.reference_vascular_density is None
+
+
+def test_schema_three_package_migration_preserves_vascular_target_and_viewer_state(
+    tmp_path: Path,
+) -> None:
+    project, source, _ = _vascular_project_and_source(tmp_path)
+    project = project.model_copy(
+        update={
+            "viewer_slice_depths": ViewerSliceDepths(
+                coronal=10,
+                sagittal=20,
+                horizontal=30,
+            ),
+            "unprojected_bregma_targets": [
+                UnprojectedBregmaTarget(
+                    label="legacy site",
+                    ap_mm=-1.25,
+                    ml_mm=-0.7,
+                    dv_mm=-2.4,
+                    notes="preserve exactly",
+                )
+            ],
+        }
+    )
+    path = save_project(
+        project,
+        tmp_path / "schema-three.mouseplan",
+        asset_source_package=source,
+    )
+    project_path = path / PROJECT_FILENAME
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 3
+    payload.pop("calibrations")
+    payload.pop("active_calibration_uuid")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    project_path.write_bytes(encoded)
+    checksums_path = path / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[PROJECT_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(
+        json.dumps(checksums, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    migrated = load_project(path, recover_backup=False)
+
+    assert migrated.schema_version == 6
+    assert migrated.viewer_slice_depths == project.viewer_slice_depths
+    assert migrated.unprojected_bregma_targets == project.unprojected_bregma_targets
+    assert migrated.subject_vascular_images == project.subject_vascular_images
+    assert migrated.dorsal_vascular_registrations == project.dorsal_vascular_registrations
+    assert migrated.subject_vascular_overlays == project.subject_vascular_overlays
+    assert migrated.reference_vascular_density == project.reference_vascular_density
+    assert migrated.calibrations == []
+    assert migrated.active_calibration_uuid is None
+
+
+@pytest.mark.parametrize("legacy_schema", [4, 5])
+def test_schema_four_and_five_packages_preserve_split_vascular_state_and_assets(
+    tmp_path: Path,
+    legacy_schema: int,
+) -> None:
+    project, source, image_bytes = _vascular_project_and_source(
+        tmp_path,
+        title=f"Schema {legacy_schema} vascular state",
+    )
+    path = save_project(
+        project,
+        tmp_path / f"schema-{legacy_schema}.mouseplan",
+        asset_source_package=source,
+    )
+    project_path = path / PROJECT_FILENAME
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = legacy_schema
+    payload.pop("project_revision")
+    payload.pop("probe_vessel_analyses")
+    if legacy_schema == 4:
+        payload.pop("probe_plans")
+        payload.pop("probe_region_analyses")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    project_path.write_bytes(encoded)
+    checksums_path = path / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[PROJECT_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(
+        json.dumps(checksums, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    migrated = load_project(path, recover_backup=False)
+
+    assert migrated.schema_version == 6
+    assert migrated.subject_vascular_images == project.subject_vascular_images
+    assert migrated.dorsal_vascular_registrations == project.dorsal_vascular_registrations
+    assert migrated.subject_vascular_overlays == project.subject_vascular_overlays
+    assert migrated.reference_vascular_density == project.reference_vascular_density
+    relative = project.subject_vascular_images[0].project_relative_path
+    assert (path / relative).read_bytes() == image_bytes
+
+
+@pytest.mark.parametrize("legacy_schema", [4, 5])
+def test_schema_four_and_five_packages_require_checksummed_vasculature_member(
+    tmp_path: Path,
+    legacy_schema: int,
+) -> None:
+    project, source, _ = _vascular_project_and_source(tmp_path)
+    path = save_project(
+        project,
+        tmp_path / f"schema-{legacy_schema}-missing-vascular.mouseplan",
+        asset_source_package=source,
+    )
+    project_path = path / PROJECT_FILENAME
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = legacy_schema
+    payload.pop("project_revision")
+    payload.pop("probe_vessel_analyses")
+    if legacy_schema == 4:
+        payload.pop("probe_plans")
+        payload.pop("probe_region_analyses")
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    project_path.write_bytes(encoded)
+    checksums_path = path / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[PROJECT_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(json.dumps(checksums), encoding="utf-8")
+    (path / VASCULATURE_FILENAME).unlink()
+
+    with pytest.raises(ProjectIntegrityError, match=r"vasculature\.json"):
+        load_project(path, recover_backup=False)
 
 
 def test_legacy_schema_rejects_hidden_unchecksummed_vasculature_member(tmp_path: Path) -> None:
@@ -639,6 +840,11 @@ def test_project_member_read_is_bounded_before_json_decode(
 
     with pytest.raises(ProjectIntegrityError, match=r"project\.json exceeds"):
         load_project(path, recover_backup=False)
+
+
+def test_project_json_limit_has_headroom_for_product_valid_maximum() -> None:
+    assert MAX_PROJECT_JSON_BYTES == 128 * 1024 * 1024
+    assert PROJECT_MEMBER_MAX_BYTES[PROJECT_FILENAME] == MAX_PROJECT_JSON_BYTES
 
 
 def test_generated_project_member_must_fit_reload_limit(

@@ -35,6 +35,14 @@ from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.rendering.slice_renderer import SliceOrientation, SliceRenderer
 from mouse_brain_planner.version import __version__
 
+# `python -m mouse_brain_planner.bridge.server` executes this file as `__main__`.
+# Extension modules import its public bridge types by package name, so bind both
+# names to the same module object before loading those extensions. Otherwise a
+# BridgeError raised by an extension is a different Python class and is
+# incorrectly reported as INTERNAL_ERROR by this module's containment boundary.
+if __name__ == "__main__":
+    sys.modules["mouse_brain_planner.bridge.server"] = sys.modules[__name__]
+
 SUPPORTED_ATLAS_IDENTIFIER: Final = "allen_mouse_25um"
 SUPPORTED_ATLAS_VERSION: Final = "1.2"
 MAX_REQUEST_BYTES: Final = 1024 * 1024
@@ -170,7 +178,7 @@ class BridgeContext:
         except (TypeError, ValueError) as error:
             raise BridgeError(
                 "ATLAS_CONTRACT_VIOLATION",
-                "Atlas arrays cannot be rendered safely.",
+                "Atlas arrays cannot be rendered.",
                 details={"exceptionType": type(error).__name__},
             ) from error
         self.loaded_atlas = atlas
@@ -189,9 +197,6 @@ class BridgeDispatcher:
             "atlasDownload": True,
             "atlasSlicePng": True,
             "projectPersistence": True,
-            "subjectVascularImport": True,
-            "subjectVascularOverlay": True,
-            "subjectVascularRegistration": True,
         }
         self._register_builtins()
 
@@ -401,39 +406,7 @@ class BridgeDispatcher:
                 details={"field": "index"},
             )
         orientation = SliceOrientation(raw_orientation)
-        try:
-            frame = renderer.render_slice(orientation, raw_index)
-            png = encode_rgb_png(frame.rgb)
-            height, width = frame.rgb.shape[:2]
-            center_um = renderer.slice_center_mm(orientation, raw_index) * 1000.0
-        except IndexError as error:
-            raise BridgeError(
-                "SLICE_OUT_OF_RANGE",
-                "The requested slice index is outside the atlas volume.",
-                details={
-                    "orientation": orientation.value,
-                    "index": raw_index,
-                    "sliceCount": renderer.slice_count(orientation),
-                },
-            ) from error
-        except (TypeError, ValueError, zlib.error) as error:
-            raise BridgeError(
-                "SLICE_RENDER_FAILED",
-                "The requested atlas slice could not be rendered safely.",
-                details={"exceptionType": type(error).__name__},
-            ) from error
-        return {
-            "protocolVersion": PROTOCOL_VERSION,
-            "mimeType": "image/png",
-            "pngBase64": base64.b64encode(png).decode("ascii"),
-            "width": int(width),
-            "height": int(height),
-            "orientation": orientation.value,
-            "index": raw_index,
-            "fixedAxis": orientation.fixed_axis_name,
-            "sliceCenterMicrometres": center_um,
-            "atlas": atlas_provenance(atlas),
-        }
+        return render_atlas_slice_payload(atlas, renderer, orientation, raw_index)
 
     def _shutdown(self, params: Mapping[str, object]) -> JsonObject:
         _validate_param_keys(params, required={"protocolVersion"})
@@ -707,7 +680,55 @@ def atlas_provenance(atlas: LoadedAtlasProtocol) -> JsonObject:
     }
 
 
-def encode_rgb_png(rgb: NDArray[np.uint8]) -> bytes:
+def render_atlas_slice_payload(
+    atlas: LoadedAtlasProtocol,
+    renderer: SliceRenderer,
+    orientation: SliceOrientation,
+    index: int,
+    *,
+    compression_level: int = 6,
+) -> JsonObject:
+    """Render one full-resolution slice with canonical axis/provenance metadata."""
+
+    try:
+        frame = renderer.render_slice(orientation, index)
+        png = encode_rgb_png(frame.rgb, compression_level=compression_level)
+        height, width = frame.rgb.shape[:2]
+        center_um = renderer.slice_center_mm(orientation, index) * 1000.0
+    except IndexError as error:
+        raise BridgeError(
+            "SLICE_OUT_OF_RANGE",
+            "The requested slice index is outside the atlas volume.",
+            details={
+                "orientation": orientation.value,
+                "index": index,
+                "sliceCount": renderer.slice_count(orientation),
+            },
+        ) from error
+    except (TypeError, ValueError, zlib.error) as error:
+        raise BridgeError(
+            "SLICE_RENDER_FAILED",
+            "The requested atlas slice could not be rendered.",
+            details={"exceptionType": type(error).__name__},
+        ) from error
+    return {
+        "protocolVersion": PROTOCOL_VERSION,
+        "mimeType": "image/png",
+        "pngBase64": base64.b64encode(png).decode("ascii"),
+        "width": int(width),
+        "height": int(height),
+        "orientation": orientation.value,
+        "index": index,
+        "sliceCount": renderer.slice_count(orientation),
+        "fixedAxis": orientation.fixed_axis_name,
+        "rowAxis": orientation.row_axis_name,
+        "columnAxis": orientation.column_axis_name,
+        "sliceCenterMicrometres": center_um,
+        "atlas": atlas_provenance(atlas),
+    }
+
+
+def encode_rgb_png(rgb: NDArray[np.uint8], *, compression_level: int = 6) -> bytes:
     """Encode a contiguous 8-bit RGB image as a deterministic PNG."""
 
     values = np.asarray(rgb)
@@ -716,6 +737,13 @@ def encode_rgb_png(rgb: NDArray[np.uint8]) -> bytes:
     height, width, _ = values.shape
     if height <= 0 or width <= 0 or height > 100_000 or width > 100_000:
         raise ValueError("PNG dimensions must be in [1, 100000]")
+    if (
+        isinstance(compression_level, bool)
+        or not isinstance(compression_level, int)
+        or compression_level < 0
+        or compression_level > 9
+    ):
+        raise ValueError("PNG compression_level must be an integer in [0, 9]")
     contiguous = np.ascontiguousarray(values)
     scanlines = b"".join(b"\x00" + contiguous[row].tobytes() for row in range(height))
     signature = b"\x89PNG\r\n\x1a\n"
@@ -723,7 +751,7 @@ def encode_rgb_png(rgb: NDArray[np.uint8]) -> bytes:
     return (
         signature
         + _png_chunk(b"IHDR", header)
-        + _png_chunk(b"IDAT", zlib.compress(scanlines, level=6))
+        + _png_chunk(b"IDAT", zlib.compress(scanlines, level=compression_level))
         + _png_chunk(b"IEND", b"")
     )
 

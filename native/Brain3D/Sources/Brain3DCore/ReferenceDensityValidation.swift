@@ -46,7 +46,7 @@ public enum ReferenceDensityValidationError: Error, Equatable, LocalizedError, S
         case .invalidPNG:
             "Reference density response did not contain a decodable PNG image."
         case .alphaChannelMissing:
-            "Reference density PNG has no alpha channel and cannot be safely composited as an overlay."
+            "Reference density PNG has no alpha channel and cannot be composited as an overlay."
         case .invalidAlphaCoverage:
             "Reference density PNG must contain both transparent and visible pixels."
         case .displayStateMismatch:

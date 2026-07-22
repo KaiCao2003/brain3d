@@ -34,3 +34,4 @@ data-cache/
 *.nii.gz
 *.npy
 *.npz
+!src/mouse_brain_planner/assets/vasculature/lambada_p60_606_major_vessels_v1.npz

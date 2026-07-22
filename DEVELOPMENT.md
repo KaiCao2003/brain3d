@@ -1,12 +1,13 @@
 # Development
 
-Brain3D has one supported product path: a SwiftUI macOS application and a Python 3.12 scientific
-service connected by typed NDJSON. Scientific transforms, atlas access, registration, analysis,
-and persistence stay in Python; Swift owns presentation, input, accessibility, and native file
-handling.
+Brain3D has one supported product path: a SwiftUI + SceneKit macOS application and a Python 3.12
+scientific service connected by typed NDJSON. Scientific transforms, atlas access, calibration,
+probe/region analysis, vessel qualification, and persistence stay in Python; Swift owns
+presentation, input, accessibility, native file handling, and schema-checked SceneKit display
+payloads. No vessel-analysis capability is currently exposed.
 
 Start with [Architecture](docs/ARCHITECTURE.md), [Code Audit](docs/CODE_AUDIT.md),
-[ADR-005](docs/ADR-005-linked-triplanar-mvp.md), and
+[ADR-005](docs/ADR-005-independent-slice-viewer.md), and
 [Scientific Validation](SCIENTIFIC_VALIDATION.md).
 
 ## Environment
@@ -75,6 +76,7 @@ for the native process boundary and integration diagnostics.
 
 ```text
 native/Brain3D/               SwiftUI shell, typed client, native tests/build
+  Sources/Brain3DScene/       SceneKit brain/probe rendering; archived vessel primitives
 src/mouse_brain_planner/
   atlas/                      BrainGlobe 2.3.1 boundary
   bridge/                     versioned service and handlers
@@ -82,8 +84,10 @@ src/mouse_brain_planner/
   domain/                     Pydantic scientific/project models
   persistence/                deterministic migrations and atomic packages
   rendering/                  raster slices and dorsal projection
-  surgery/                    tested planning math being connected to the product
-  vasculature/                density and subject-image workflows
+  probes/                     source-traceable NP1 and synthetic test catalog
+  surgery/                    product-reachable probe/measurement geometry
+  analysis/                   region traversal plus archived vessel-analysis algorithms
+  vasculature/                archived LAMBADA evidence and qualification workflows
 tests/                        headless unit/contract/integration tests
 docs/                         audit, architecture, validation, and ADRs
 ```
@@ -100,8 +104,9 @@ The old Qt/PyVista/VTK application was removed after the audit in
   transform/calibration identity.
 - Project files store model state and immutable data references, never UI objects or complete
   atlas/vessel volumes.
-- Population density, 2D subject evidence, and registered 3D vessel geometry remain separate
-  types and workflows.
+- The rejected LAMBADA derivative, archived population density, and archived 2D subject evidence
+  remain separate types and workflows. None is a subject-vessel layer; the LAMBADA geometry and
+  analysis endpoints fail closed with `VESSEL_GEOMETRY_UNAVAILABLE`.
 
 ## Coordinate-change checklist
 

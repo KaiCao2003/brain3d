@@ -32,6 +32,8 @@ struct ImplantTargetProtocolTests {
     func requestShapes() throws {
         let addData = try JSONEncoder().encode(
             ImplantAddParameters(
+                projectId: "10000000-0000-0000-0000-000000000001",
+                expectedProjectRevision: 9,
                 label: "left visual implant",
                 apMillimetres: -1.25,
                 mlMillimetres: -0.7,
@@ -41,18 +43,105 @@ struct ImplantTargetProtocolTests {
         let add = try #require(JSONSerialization.jsonObject(with: addData) as? [String: Any])
         #expect(
             Set(add.keys) == Set([
-                "protocolVersion", "label", "apMillimetres", "mlMillimetres",
-                "dvMillimetres",
+                "protocolVersion", "projectId", "expectedProjectRevision", "label",
+                "apMillimetres", "mlMillimetres", "dvMillimetres",
             ])
         )
 
         let removeData = try JSONEncoder().encode(
-            ImplantRemoveParameters(targetId: "00000000-0000-0000-0000-000000000001")
+            ImplantRemoveParameters(
+                projectId: "10000000-0000-0000-0000-000000000001",
+                expectedProjectRevision: 9,
+                targetId: "00000000-0000-0000-0000-000000000001"
+            )
         )
         let remove = try #require(
             JSONSerialization.jsonObject(with: removeData) as? [String: Any]
         )
-        #expect(Set(remove.keys) == Set(["protocolVersion", "targetId"]))
+        #expect(Set(remove.keys) == Set([
+            "protocolVersion", "projectId", "expectedProjectRevision", "targetId",
+        ]))
+    }
+
+    @Test("Mutation response must belong to the next revision of the same project")
+    func mutationIdentityAndRevision() throws {
+        let projectId = "10000000-0000-0000-0000-000000000001"
+        var payload = listPayload()
+        payload["status"] = "added"
+        payload["projectId"] = projectId
+        payload["projectRevision"] = 10
+        payload["target"] = targetPayload()
+        payload.removeValue(forKey: "targets")
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        let result = try JSONDecoder().decode(ImplantMutationResult.self, from: data)
+        try ImplantTargetValidator.validateMutation(
+            result,
+            expectedStatus: "added",
+            projectId: projectId,
+            projectRevision: 10
+        )
+        #expect(throws: ImplantTargetValidationError.projectRevisionMismatch) {
+            try ImplantTargetValidator.validateMutation(
+                result,
+                expectedStatus: "added",
+                projectId: projectId,
+                projectRevision: 11
+            )
+        }
+    }
+
+    @Test("Mutation acknowledgements must echo the submitted target")
+    func mutationBindsSubmittedTarget() throws {
+        let projectId = "10000000-0000-0000-0000-000000000001"
+        let addRequest = ImplantAddParameters(
+            projectId: projectId,
+            expectedProjectRevision: 9,
+            label: "left visual implant",
+            apMillimetres: -1.25,
+            mlMillimetres: -0.7,
+            dvMillimetres: -2.4,
+            notes: "Animal protocol target; not calibrated."
+        )
+        let added = try decodeMutation(
+            status: "added",
+            projectId: projectId,
+            projectRevision: 10,
+            target: targetPayload()
+        )
+        try ImplantTargetValidator.validateAddedMutation(added, request: addRequest)
+
+        var wrongCoordinates = targetPayload()
+        wrongCoordinates["mlMillimetres"] = 0.7
+        let mismatchedAdd = try decodeMutation(
+            status: "added",
+            projectId: projectId,
+            projectRevision: 10,
+            target: wrongCoordinates
+        )
+        #expect(throws: ImplantTargetValidationError.mutationTargetMismatch) {
+            try ImplantTargetValidator.validateAddedMutation(
+                mismatchedAdd,
+                request: addRequest
+            )
+        }
+
+        let removeRequest = ImplantRemoveParameters(
+            projectId: projectId,
+            expectedProjectRevision: 10,
+            targetId: "00000000-0000-0000-0000-000000000002"
+        )
+        let wrongRemoval = try decodeMutation(
+            status: "removed",
+            projectId: projectId,
+            projectRevision: 11,
+            target: targetPayload()
+        )
+        #expect(throws: ImplantTargetValidationError.mutationTargetMismatch) {
+            try ImplantTargetValidator.validateRemovedMutation(
+                wrongRemoval,
+                request: removeRequest
+            )
+        }
     }
 
     @Test("Exact unprojected frame and projection lock validate")
@@ -151,5 +240,28 @@ struct ImplantTargetProtocolTests {
     private func decodeList(from payload: [String: Any]) throws -> ImplantListResult {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
         return try JSONDecoder().decode(ImplantListResult.self, from: data)
+    }
+
+    private func decodeMutation(
+        status: String,
+        projectId: String,
+        projectRevision: Int,
+        target: [String: Any]
+    ) throws -> ImplantMutationResult {
+        try JSONDecoder().decode(
+            ImplantMutationResult.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "protocolVersion": 1,
+                "status": status,
+                "projectId": projectId,
+                "projectRevision": projectRevision,
+                "targetCount": 1,
+                "coordinateFrame": coordinateFrame(),
+                "projected": false,
+                "usableForNavigation": false,
+                "projectionStatus": "lockedUntilExplicitBregmaSkullCalibration",
+                "target": target,
+            ], options: [.sortedKeys])
+        )
     }
 }

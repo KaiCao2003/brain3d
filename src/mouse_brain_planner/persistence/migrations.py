@@ -17,18 +17,39 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Migrate a project payload to the current schema.
 
     Schema 1 omitted the explicit atlas midline and renderer anchor. Schema 2
-    records both. Schema 3 adds bounded vascular project state; the current
-    schema-3 model also adds bounded unprojected coordinate-entry targets.
-    Earlier projects default all of that state to empty.
+    records both. Schema 3 adds bounded vascular state and unprojected
+    coordinate-entry targets. Schema 4 adds versioned subject calibrations and
+    an explicit active-calibration UUID. Schema 5 adds persisted probe plans
+    and exact region-analysis bundles. Schema 6 persists the monotonic project
+    revision and plan-linked major-vessel analysis bundles. Earlier projects
+    default new state to empty without altering any legacy AP/ML/DV target.
     """
 
     version = payload.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise UnsupportedProjectSchemaError(
+            f"project schema {version!r} cannot be migrated to {PROJECT_SCHEMA_VERSION}"
+        )
     if version == PROJECT_SCHEMA_VERSION:
+        missing = {"project_revision", "probe_vessel_analyses"} - set(payload)
+        if missing:
+            raise UnsupportedProjectSchemaError(
+                "schema 6 project is missing required persisted state: "
+                + ", ".join(sorted(missing))
+            )
         return payload
     if version == 1:
-        return _migrate_v2_to_v3(_migrate_v1_to_v2(payload))
+        return _migrate_v5_to_v6(
+            _migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload))))
+        )
     if version == 2:
-        return _migrate_v2_to_v3(payload)
+        return _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload))))
+    if version == 3:
+        return _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload)))
+    if version == 4:
+        return _migrate_v5_to_v6(_migrate_v4_to_v5(payload))
+    if version == 5:
+        return _migrate_v5_to_v6(payload)
     raise UnsupportedProjectSchemaError(
         f"project schema {version!r} cannot be migrated to {PROJECT_SCHEMA_VERSION}"
     )
@@ -100,6 +121,66 @@ def _migrate_v2_to_v3(payload: dict[str, Any]) -> dict[str, Any]:
             )
         migrated[field] = copy.deepcopy(default)
     migrated["schema_version"] = 3
+    return migrated
+
+
+_SCHEMA_4_ADDED_DEFAULTS: dict[str, object] = {
+    "calibrations": [],
+    "active_calibration_uuid": None,
+}
+
+
+def _migrate_v3_to_v4(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add empty calibration state without modifying schema-3 target inputs."""
+
+    migrated = copy.deepcopy(payload)
+    for field, default in _SCHEMA_4_ADDED_DEFAULTS.items():
+        if field in migrated and migrated[field] != default:
+            raise UnsupportedProjectSchemaError(
+                f"schema 3 {field} must be the schema 4 migration default {default!r}"
+            )
+        migrated[field] = copy.deepcopy(default)
+    migrated["schema_version"] = 4
+    return migrated
+
+
+_SCHEMA_5_ADDED_DEFAULTS: dict[str, object] = {
+    "probe_plans": [],
+    "probe_region_analyses": [],
+}
+
+
+def _migrate_v4_to_v5(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add empty probe state without inventing a placement or analysis."""
+
+    migrated = copy.deepcopy(payload)
+    for field, default in _SCHEMA_5_ADDED_DEFAULTS.items():
+        if field in migrated and migrated[field] != default:
+            raise UnsupportedProjectSchemaError(
+                f"schema 4 {field} must be the schema 5 migration default {default!r}"
+            )
+        migrated[field] = copy.deepcopy(default)
+    migrated["schema_version"] = 5
+    return migrated
+
+
+_SCHEMA_6_ADDED_DEFAULTS: dict[str, object] = {
+    "project_revision": 0,
+    "probe_vessel_analyses": [],
+}
+
+
+def _migrate_v5_to_v6(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add only revision zero and empty vessel analyses to legacy projects."""
+
+    migrated = copy.deepcopy(payload)
+    for field, default in _SCHEMA_6_ADDED_DEFAULTS.items():
+        if field in migrated and migrated[field] != default:
+            raise UnsupportedProjectSchemaError(
+                f"schema 5 {field} must be the schema 6 migration default {default!r}"
+            )
+        migrated[field] = copy.deepcopy(default)
+    migrated["schema_version"] = 6
     return migrated
 
 

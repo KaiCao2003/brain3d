@@ -243,6 +243,39 @@ def _segment_closest_points(
     second_start: NDArray[np.float64],
     second_end: NDArray[np.float64],
 ) -> tuple[float, NDArray[np.float64], NDArray[np.float64]]:
+    distance, first_point, second_point, _, _ = finite_segment_closest_points(
+        first_start,
+        first_end,
+        second_start,
+        second_end,
+    )
+    return distance, first_point, second_point
+
+
+def finite_segment_closest_points(
+    first_start: NDArray[np.float64],
+    first_end: NDArray[np.float64],
+    second_start: NDArray[np.float64],
+    second_end: NDArray[np.float64],
+) -> tuple[
+    float,
+    NDArray[np.float64],
+    NDArray[np.float64],
+    float,
+    float,
+]:
+    """Return exact closest points and fractions for two finite 3-D segments.
+
+    Fractions are measured from each corresponding start point and are always
+    clamped to ``[0, 1]``.  This public kernel is shared by legacy centerline
+    measurements and radius-aware vessel clearance so the two paths cannot
+    silently diverge numerically.
+    """
+
+    first_start = _finite_vector(first_start, "first segment start")
+    first_end = _finite_vector(first_end, "first segment end")
+    second_start = _finite_vector(second_start, "second segment start")
+    second_end = _finite_vector(second_end, "second segment end")
     first_vector = first_end - first_start
     second_vector = second_end - second_start
     between_starts = first_start - second_start
@@ -273,7 +306,20 @@ def _segment_closest_points(
         )
     first_point = first_start + first_parameter * first_vector
     second_point = second_start + second_parameter * second_vector
-    return float(np.linalg.norm(first_point - second_point)), first_point, second_point
+    return (
+        float(np.linalg.norm(first_point - second_point)),
+        first_point,
+        second_point,
+        first_parameter,
+        second_parameter,
+    )
+
+
+def _finite_vector(value: NDArray[np.float64], label: str) -> NDArray[np.float64]:
+    vector = np.asarray(value, dtype=np.float64)
+    if vector.shape != (3,) or not bool(np.isfinite(vector).all()):
+        raise MeasurementError(f"{label} must contain three finite coordinates")
+    return vector
 
 
 def _same_frame(*points: AnatomicalPoint) -> None:

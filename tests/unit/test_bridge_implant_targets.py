@@ -27,9 +27,11 @@ from mouse_brain_planner.domain.project_models import (
 from mouse_brain_planner.persistence.project_io import load_project, save_project
 
 
-def _add_params(**updates: object) -> dict[str, object]:
+def _add_params(project: PlannerProject, **updates: object) -> dict[str, object]:
     params: dict[str, object] = {
         "protocolVersion": 1,
+        "projectId": str(project.project_uuid),
+        "expectedProjectRevision": project.project_revision,
         "label": "left visual implant",
         "apMillimetres": -1.25,
         "mlMillimetres": -0.7,
@@ -86,7 +88,7 @@ def test_add_returns_replacement_with_event_and_exact_unprojected_payload() -> N
     original_time = datetime(2026, 7, 20, 10, 0, tzinfo=UTC)
     original = PlannerProject(modified_at=original_time)
 
-    mutation = implant_add(original, _add_params(label="  left visual implant  "))
+    mutation = implant_add(original, _add_params(original, label="  left visual implant  "))
 
     assert original.unprojected_bregma_targets == []
     assert original.event_log == []
@@ -100,6 +102,8 @@ def test_add_returns_replacement_with_event_and_exact_unprojected_payload() -> N
 
     result = mutation.result
     assert result["status"] == "added"
+    assert result["projectId"] == str(original.project_uuid)
+    assert result["projectRevision"] == original.project_revision + 1
     assert result["targetCount"] == 1
     _assert_locked_contract(result)
     target = result["target"]
@@ -140,7 +144,7 @@ def test_add_rejects_boolean_nonfinite_and_invalid_text_without_mutation(
     project = PlannerProject()
 
     with pytest.raises(BridgeError) as captured:
-        implant_add(project, _add_params(**patch))
+        implant_add(project, _add_params(project, **patch))
 
     assert captured.value.code == "INVALID_PARAMS"
     assert captured.value.details["field"] == field
@@ -152,13 +156,23 @@ def test_all_operations_reject_unknown_or_missing_fields_and_boolean_protocol() 
     project = PlannerProject()
     cases = [
         lambda: implant_list(project, {"protocolVersion": 1, "unexpected": True}),
-        lambda: implant_add(project, {**_add_params(), "targetId": str(uuid4())}),
         lambda: implant_add(
-            project, {key: value for key, value in _add_params().items() if key != "label"}
+            project,
+            {**_add_params(project), "targetId": str(uuid4())},
+        ),
+        lambda: implant_add(
+            project,
+            {key: value for key, value in _add_params(project).items() if key != "label"},
         ),
         lambda: implant_remove(
             project,
-            {"protocolVersion": 1, "targetId": str(uuid4()), "label": "not allowed"},
+            {
+                "protocolVersion": 1,
+                "projectId": str(project.project_uuid),
+                "expectedProjectRevision": project.project_revision,
+                "targetId": str(uuid4()),
+                "label": "not allowed",
+            },
         ),
     ]
     for operation in cases:
@@ -178,7 +192,12 @@ def test_remove_returns_replacement_and_not_found_fails_without_mutation() -> No
 
     mutation = implant_remove(
         original,
-        {"protocolVersion": 1, "targetId": str(target.target_uuid)},
+        {
+            "protocolVersion": 1,
+            "projectId": str(original.project_uuid),
+            "expectedProjectRevision": original.project_revision,
+            "targetId": str(target.target_uuid),
+        },
     )
 
     assert original.unprojected_bregma_targets == [target]
@@ -186,6 +205,8 @@ def test_remove_returns_replacement_and_not_found_fails_without_mutation() -> No
     assert mutation.project.unprojected_bregma_targets == []
     assert mutation.project.event_log[-1].action == "implant-target-removed"
     assert mutation.result["status"] == "removed"
+    assert mutation.result["projectId"] == str(original.project_uuid)
+    assert mutation.result["projectRevision"] == original.project_revision + 1
     assert mutation.result["targetCount"] == 0
     assert mutation.result["target"]["targetId"] == str(target.target_uuid)  # type: ignore[index]
     _assert_locked_contract(mutation.result)
@@ -193,7 +214,12 @@ def test_remove_returns_replacement_and_not_found_fails_without_mutation() -> No
     with pytest.raises(BridgeError) as captured:
         implant_remove(
             original,
-            {"protocolVersion": 1, "targetId": str(uuid4())},
+            {
+                "protocolVersion": 1,
+                "projectId": str(original.project_uuid),
+                "expectedProjectRevision": original.project_revision,
+                "targetId": str(uuid4()),
+            },
         )
     assert captured.value.code == "IMPLANT_TARGET_NOT_FOUND"
     assert original.event_log == []
@@ -201,10 +227,16 @@ def test_remove_returns_replacement_and_not_found_fails_without_mutation() -> No
 
 @pytest.mark.parametrize("target_id", [True, 12, "not-a-uuid"])
 def test_remove_requires_uuid_string(target_id: object) -> None:
+    project = PlannerProject()
     with pytest.raises(BridgeError) as captured:
         implant_remove(
-            PlannerProject(),
-            {"protocolVersion": 1, "targetId": target_id},
+            project,
+            {
+                "protocolVersion": 1,
+                "projectId": str(project.project_uuid),
+                "expectedProjectRevision": project.project_revision,
+                "targetId": target_id,
+            },
         )
     assert captured.value.code == "INVALID_PARAMS"
 
@@ -246,7 +278,8 @@ def test_project_transform_reports_capacity_without_changing_full_project() -> N
 
 
 def test_added_target_persists_as_exact_list_truth(tmp_path: Path) -> None:
-    mutation = implant_add(PlannerProject(), _add_params())
+    project = PlannerProject()
+    mutation = implant_add(project, _add_params(project))
     saved = save_project(mutation.project, tmp_path / "implant-target")
     loaded = load_project(saved, recover_backup=False)
 
@@ -267,9 +300,15 @@ class _ProjectState:
     def get(self) -> PlannerProject:
         return self.project
 
-    def replace(self, project: PlannerProject) -> None:
-        self.project = project
+    @property
+    def revision(self) -> int:
+        return self.project.project_revision
+
+    def replace(self, project: PlannerProject) -> int:
+        next_revision = self.revision + 1
+        self.project = project.model_copy(update={"project_revision": next_revision})
         self.replacements += 1
+        return next_revision
 
 
 def test_registration_helper_uses_owner_callbacks_only_after_success() -> None:
@@ -278,10 +317,12 @@ def test_registration_helper_uses_owner_callbacks_only_after_success() -> None:
     extension = register_implant_target_handlers(
         dispatcher,
         get_project=state.get,
+        get_revision=lambda: state.revision,
         replace_project=state.replace,
     )
 
-    added = dispatcher.dispatch("implant.add", _add_params())
+    added = dispatcher.dispatch("implant.add", _add_params(state.project))
+    assert added["projectRevision"] == 1
     target_id = added["target"]["targetId"]  # type: ignore[index]
     listed = dispatcher.dispatch("implant.list", {"protocolVersion": 1})
     assert extension.get_project() is state.project
@@ -289,12 +330,20 @@ def test_registration_helper_uses_owner_callbacks_only_after_success() -> None:
     assert state.replacements == 1
 
     with pytest.raises(BridgeError):
-        dispatcher.dispatch("implant.add", {**_add_params(), "unknown": 1})
+        dispatcher.dispatch(
+            "implant.add",
+            {**_add_params(state.project), "unknown": 1},
+        )
     assert state.replacements == 1
 
     dispatcher.dispatch(
         "implant.remove",
-        {"protocolVersion": 1, "targetId": target_id},
+        {
+            "protocolVersion": 1,
+            "projectId": str(state.project.project_uuid),
+            "expectedProjectRevision": state.revision,
+            "targetId": target_id,
+        },
     )
     assert state.project.unprojected_bregma_targets == []
     assert state.replacements == 2
@@ -304,3 +353,77 @@ def test_registration_helper_uses_owner_callbacks_only_after_success() -> None:
         {"protocolVersion": 1, "client": "implant-target-test"},
     )
     assert hello["capabilities"]["unprojectedBregmaImplantTargets"] is True  # type: ignore[index]
+
+
+def test_mutations_reject_wrong_project_and_stale_or_replayed_revision_before_publish() -> None:
+    state = _ProjectState()
+    dispatcher = BridgeDispatcher()
+    register_implant_target_handlers(
+        dispatcher,
+        get_project=state.get,
+        get_revision=lambda: state.revision,
+        replace_project=state.replace,
+    )
+    initial = _add_params(state.project)
+
+    with pytest.raises(BridgeError) as wrong_project:
+        dispatcher.dispatch(
+            "implant.add",
+            {**initial, "projectId": str(uuid4())},
+        )
+    assert wrong_project.value.code == "PROJECT_ID_MISMATCH"
+    assert state.replacements == 0
+
+    added = dispatcher.dispatch("implant.add", initial)
+    assert added["projectRevision"] == 1
+    assert state.replacements == 1
+
+    with pytest.raises(BridgeError) as replayed:
+        dispatcher.dispatch("implant.add", initial)
+    assert replayed.value.code == "PROJECT_REVISION_CONFLICT"
+    assert replayed.value.details == {
+        "expectedProjectRevision": 0,
+        "actualProjectRevision": 1,
+    }
+    assert state.replacements == 1
+    assert len(state.project.unprojected_bregma_targets) == 1
+
+    target = added["target"]
+    assert isinstance(target, dict)
+    with pytest.raises(BridgeError) as stale_remove:
+        dispatcher.dispatch(
+            "implant.remove",
+            {
+                "protocolVersion": 1,
+                "projectId": str(state.project.project_uuid),
+                "expectedProjectRevision": 0,
+                "targetId": target["targetId"],
+            },
+        )
+    assert stale_remove.value.code == "PROJECT_REVISION_CONFLICT"
+    assert state.replacements == 1
+
+
+def test_registration_rejects_replacer_that_does_not_publish_exactly_one_revision() -> None:
+    state = _ProjectState()
+    calls = 0
+
+    def nonpublishing_replacer(project: PlannerProject) -> int:
+        nonlocal calls
+        del project
+        calls += 1
+        return state.revision + 1
+
+    dispatcher = BridgeDispatcher()
+    register_implant_target_handlers(
+        dispatcher,
+        get_project=state.get,
+        get_revision=lambda: state.revision,
+        replace_project=nonpublishing_replacer,
+    )
+
+    with pytest.raises(RuntimeError, match="increment revision exactly once"):
+        dispatcher.dispatch("implant.add", _add_params(state.project))
+    assert calls == 1
+    assert state.revision == 0
+    assert state.project.unprojected_bregma_targets == []

@@ -72,6 +72,18 @@ class SliceOrientation(StrEnum):
 
         return ("AP", "DV", "ML")[self.fixed_axis]
 
+    @property
+    def row_axis_name(self) -> str:
+        """Anatomical name of the image-row axis."""
+
+        return ("AP", "DV", "ML")[self.row_axis]
+
+    @property
+    def column_axis_name(self) -> str:
+        """Anatomical name of the image-column axis."""
+
+        return ("AP", "DV", "ML")[self.column_axis]
+
 
 @dataclass(frozen=True, slots=True)
 class SliceFrame:

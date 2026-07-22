@@ -399,7 +399,13 @@ public enum BridgeClientError: Error, Equatable, LocalizedError, Sendable {
         case let .mismatchedIdentifier(expected, actual):
             "Bridge response id \(actual) did not match request id \(expected)."
         case let .remote(error):
-            "\(error.code): \(error.message)"
+            if case let .object(details) = error.details,
+               case let .string(exceptionType) = details["exceptionType"]
+            {
+                "\(error.code): \(error.message) (\(exceptionType))"
+            } else {
+                "\(error.code): \(error.message)"
+            }
         }
     }
 }

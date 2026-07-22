@@ -5,6 +5,7 @@ from datetime import date
 import pytest
 from pydantic import ValidationError
 
+from mouse_brain_planner.coordinates.transforms import transform_point
 from mouse_brain_planner.domain.probe_models import (
     NormalizedProbePlacement,
     ProbeLocalPoint,
@@ -27,7 +28,9 @@ from mouse_brain_planner.domain.surgery_common import AnimalSurgeryContext
 from mouse_brain_planner.domain.transform_models import (
     AnatomicalFrameDefinition,
     AnatomicalPoint,
+    AnatomicalTransform,
     CoordinateSystemKind,
+    TransformMethod,
 )
 from mouse_brain_planner.surgery.stereotaxy import calibrate_skull_landmarks
 from mouse_brain_planner.surgery.trajectory import (
@@ -36,11 +39,13 @@ from mouse_brain_planner.surgery.trajectory import (
     attach_surface_entries,
     direction_from_angles,
     placed_recording_sites,
+    placed_shank_centerlines,
     placement_from_bregma_relative_mm,
     placement_from_entry_angles_depth,
     placement_from_entry_target,
     placement_from_target_angles_depth,
     placement_permits_final_export,
+    transform_probe_placement_uniform,
 )
 
 
@@ -85,6 +90,105 @@ def _custom_model(*, acknowledged_source: bool = False) -> ProbeModelDefinition:
         ),
         geometry_notes=("acknowledged" if acknowledged_source else "unverified test geometry"),
     )
+
+
+def test_complete_probe_pose_crosses_similarity_calibration_without_losing_local_axes() -> None:
+    context = AnimalSurgeryContext(subject_id="mouse-rotated")
+    base = _custom_model()
+    shank = base.shanks[0].model_copy(
+        update={
+            "center_lateral_um": 40.0,
+            "center_normal_um": -15.0,
+            "sites": (
+                base.shanks[0]
+                .sites[0]
+                .model_copy(
+                    update={
+                        "local": ProbeLocalPoint(
+                            axial_from_tip_um=100,
+                            lateral_um=12,
+                            normal_um=8,
+                        )
+                    }
+                ),
+                base.shanks[0].sites[1],
+            ),
+        }
+    )
+    model = ProbeModelDefinition.model_validate(
+        base.model_copy(update={"shanks": (shank,)}).model_dump(mode="python")
+    )
+    source_frame = AnatomicalFrameDefinition(
+        frame_id="STEREOTAXIC:ROTATED",
+        kind=CoordinateSystemKind.STEREOTAXIC,
+        origin_description="test bregma",
+        ap_positive_direction="anterior",
+        ml_positive_direction="right",
+        dv_positive_direction="dorsal",
+    )
+    destination_frame = AnatomicalFrameDefinition(
+        frame_id="ATLAS_TEST_ROTATED",
+        kind=CoordinateSystemKind.SURGERY_WORLD,
+        origin_description="test atlas world",
+        ap_positive_direction="anterior",
+        ml_positive_direction="right",
+        dv_positive_direction="dorsal",
+    )
+    scale = 1.5
+    transform = AnatomicalTransform(
+        source_frame=source_frame,
+        destination_frame=destination_frame,
+        method=TransformMethod.SIMILARITY,
+        matrix_row_major=(
+            0,
+            -scale,
+            0,
+            100,
+            scale,
+            0,
+            0,
+            200,
+            0,
+            0,
+            scale,
+            300,
+            0,
+            0,
+            0,
+            1,
+        ),
+    )
+    source = placement_from_target_angles_depth(
+        context=context,
+        model=model,
+        name="rotated pose",
+        target=_point(source_frame.frame_id, 1_000, -250, -500),
+        azimuth_deg=23,
+        elevation_deg=-65,
+        insertion_depth_um=2_000,
+        axial_rotation_deg=37,
+        custom_geometry_acknowledged=True,
+    )
+    source_sites = placed_recording_sites(model, source)
+    source_shanks = placed_shank_centerlines(model, source)
+
+    mapped = transform_probe_placement_uniform(source, transform)
+    mapped_sites = placed_recording_sites(model, mapped)
+    mapped_shanks = placed_shank_centerlines(model, mapped)
+
+    assert mapped.method == source.method
+    assert mapped.model_to_placement_uniform_scale == pytest.approx(scale)
+    assert mapped.insertion_depth_um == pytest.approx(source.insertion_depth_um * scale)
+    for expected_source, actual in zip(source_sites, mapped_sites, strict=True):
+        expected = transform_point(transform, expected_source.point)
+        assert actual.point.as_ap_ml_dv() == pytest.approx(expected.as_ap_ml_dv())
+    for expected_source, actual in zip(source_shanks, mapped_shanks, strict=True):
+        expected_entry = transform_point(transform, expected_source.entry)
+        expected_tip = transform_point(transform, expected_source.tip)
+        assert actual.entry.as_ap_ml_dv() == pytest.approx(expected_entry.as_ap_ml_dv())
+        assert actual.tip.as_ap_ml_dv() == pytest.approx(expected_tip.as_ap_ml_dv())
+        assert actual.width_um == pytest.approx(expected_source.width_um * scale)
+        assert actual.thickness_um == pytest.approx(expected_source.thickness_um * scale)
 
 
 def _calibration(context: AnimalSurgeryContext):
@@ -162,6 +266,54 @@ def test_verified_model_label_requires_complete_source_and_independent_review() 
     )
     verified = ProbeModelDefinition.model_validate(verified.model_dump(mode="python"))
     assert verified.permits_verified_device_label
+
+
+def test_source_transcribed_review_pending_cannot_claim_independent_review() -> None:
+    source = ProbeSourceArtifact(
+        title="Test-only source snapshot",
+        source_url="https://example.invalid/source-snapshot.json",
+        document_revision="fixture-1",
+        retrieved_on=date(2026, 7, 22),
+        sha256="b" * 64,
+        citation="Test fixture only",
+    )
+
+    with pytest.raises(ValidationError, match="requires primary sources"):
+        ProbeModelVerification(
+            status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+            complete_geometry_transcribed=True,
+            transcribed_by="Automated transcription",
+        )
+
+    pending = ProbeModelVerification(
+        status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+        primary_sources=(source,),
+        complete_geometry_transcribed=True,
+        independent_transcription_review_completed=False,
+        transcribed_by="Automated transcription",
+    )
+    assert not pending.independent_transcription_review_completed
+    assert pending.independently_reviewed_by is None
+
+    with pytest.raises(ValidationError, match="cannot claim completed independent review"):
+        ProbeModelVerification(
+            status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+            primary_sources=(source,),
+            complete_geometry_transcribed=True,
+            independent_transcription_review_completed=True,
+            transcribed_by="Automated transcription",
+            independently_reviewed_by="Reviewer",
+        )
+
+    with pytest.raises(ValidationError, match="cannot name an independent reviewer"):
+        ProbeModelVerification(
+            status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
+            primary_sources=(source,),
+            complete_geometry_transcribed=True,
+            independent_transcription_review_completed=False,
+            transcribed_by="Automated transcription",
+            independently_reviewed_by="Reviewer",
+        )
 
 
 def test_probe_model_rejects_sites_outside_declared_geometry() -> None:
@@ -283,6 +435,61 @@ def test_recording_sites_map_from_tip_toward_base_and_custom_export_is_acknowled
     assert not placement_permits_final_export(model, placement)
     acknowledged = placement.model_copy(update={"custom_geometry_acknowledged": True})
     assert placement_permits_final_export(model, acknowledged)
+
+
+def test_all_shank_centerlines_apply_lateral_offsets_and_keep_envelopes() -> None:
+    first = _custom_model().shanks[0]
+    second_payload = first.model_dump(mode="python")
+    second_payload.update(
+        {
+            "shank_id": "B",
+            "center_lateral_um": 250,
+            "center_normal_um": 40,
+            "sites": (),
+        }
+    )
+    second = ProbeShankDefinition.model_validate(second_payload)
+    model_payload = _custom_model().model_dump(mode="python")
+    model_payload.update(
+        {
+            "model_id": "user:test-two-shank",
+            "declared_shank_count": 2,
+            "expected_site_count": 2,
+            "shanks": (first, second),
+        }
+    )
+    model = ProbeModelDefinition.model_validate(model_payload)
+    placement = placement_from_entry_angles_depth(
+        context=AnimalSurgeryContext(),
+        model=model,
+        name="two shanks",
+        entry=_point("F", 0, 0, 0),
+        azimuth_deg=0,
+        elevation_deg=-90,
+        insertion_depth_um=2000,
+    )
+
+    shanks = placed_shank_centerlines(model, placement)
+
+    assert [shank.shank_id for shank in shanks] == ["A", "B"]
+    assert shanks[0].entry.as_ap_ml_dv() == pytest.approx((0, 0, 0))
+    assert shanks[0].tip.as_ap_ml_dv() == pytest.approx((0, 0, -2000))
+    assert shanks[1].entry.as_ap_ml_dv() == pytest.approx((-40, 250, 0))
+    assert shanks[1].tip.as_ap_ml_dv() == pytest.approx((-40, 250, -2000))
+    assert shanks[1].conservative_envelope_radius_um == pytest.approx((70**2 + 24**2) ** 0.5 / 2)
+
+
+def test_insertion_depth_cannot_exceed_any_declared_shank_length() -> None:
+    with pytest.raises(ProbePlacementError, match="exceeds declared shank length"):
+        placement_from_entry_angles_depth(
+            context=AnimalSurgeryContext(),
+            model=_custom_model(),
+            name="too deep",
+            entry=_point("F", 0, 0, 0),
+            azimuth_deg=0,
+            elevation_deg=-90,
+            insertion_depth_um=4000.1,
+        )
 
 
 def test_surface_intersections_must_be_collinear_and_ordered() -> None:

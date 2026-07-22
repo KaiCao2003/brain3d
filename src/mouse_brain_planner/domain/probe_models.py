@@ -30,6 +30,7 @@ class ProbeVerificationStatus(StrEnum):
     """Whether a geometry passed the full source/transcription review gate."""
 
     VERIFIED = "verified"
+    SOURCE_TRANSCRIBED_REVIEW_PENDING = "source-transcribed-review-pending"
     USER_DEFINED_UNVERIFIED = "user-defined-unverified"
 
 
@@ -44,6 +45,7 @@ class ProbeSiteRole(StrEnum):
 class ProbeTipGeometry(StrEnum):
     """Explicit tip classification without inferred dimensions."""
 
+    CHISEL = "chisel"
     FLAT = "flat"
     TRIANGULAR = "triangular"
     TAPERED = "tapered"
@@ -53,7 +55,7 @@ class ProbeTipGeometry(StrEnum):
 class ProbeSourceArtifact(BaseModel):
     """Exact primary artifact used to transcribe factual geometry."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     title: str = Field(min_length=1, max_length=500)
     source_url: str = Field(min_length=1, max_length=2000)
@@ -75,7 +77,7 @@ class ProbeSourceArtifact(BaseModel):
 class ProbeModelVerification(BaseModel):
     """Approval evidence controlling whether a model may be called verified."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     status: ProbeVerificationStatus
     primary_sources: tuple[ProbeSourceArtifact, ...] = ()
@@ -104,6 +106,23 @@ class ProbeModelVerification(BaseModel):
             )
             if same_reviewer:
                 raise ValueError("probe transcriber and independent reviewer must be different")
+        elif self.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING:
+            if not self.primary_sources:
+                raise ValueError("source-transcribed probe model requires primary sources")
+            if not self.complete_geometry_transcribed:
+                raise ValueError(
+                    "source-transcribed probe model requires complete geometry transcription"
+                )
+            if self.transcribed_by is None:
+                raise ValueError("source-transcribed probe model requires a named transcriber")
+            if self.independent_transcription_review_completed:
+                raise ValueError(
+                    "review-pending probe model cannot claim completed independent review"
+                )
+            if self.independently_reviewed_by is not None:
+                raise ValueError(
+                    "review-pending probe model cannot name an independent reviewer as completed"
+                )
         return self
 
 
@@ -114,7 +133,7 @@ class ProbeLocalPoint(BaseModel):
     Lateral and normal offsets complete a right-handed local frame.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     axial_from_tip_um: NonNegativeFiniteFloat
     lateral_um: FiniteFloat = 0
@@ -125,7 +144,7 @@ class ProbeLocalPoint(BaseModel):
 class RecordingSiteDefinition(BaseModel):
     """One source-defined recording/reference site in probe-local coordinates."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     site_id: str = Field(min_length=1, max_length=200)
     local: ProbeLocalPoint
@@ -136,7 +155,7 @@ class RecordingSiteDefinition(BaseModel):
 class ProbeShankDefinition(BaseModel):
     """One implantable planar shank and its complete local site table."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     shank_id: str = Field(min_length=1, max_length=200)
     length_um: PositiveFiniteFloat
@@ -176,7 +195,7 @@ class ProbeShankDefinition(BaseModel):
 class ProbeModelDefinition(BaseModel):
     """Versioned, unit-explicit probe geometry with verification provenance."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     model_id: str = Field(min_length=1, max_length=200)
     model_version: str = Field(min_length=1, max_length=100)
@@ -251,7 +270,7 @@ class PlacementMethod(StrEnum):
 class NormalizedProbePlacement(BaseModel):
     """One normalized AP/ML/DV probe trajectory and surface intersections."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID = Field(default_factory=uuid4)
     name: str = Field(min_length=1, max_length=200)
@@ -265,6 +284,9 @@ class NormalizedProbePlacement(BaseModel):
     skull_entry: AnatomicalPoint | None = None
     brain_entry: AnatomicalPoint | None = None
     inward_direction: UnitDirectionAPMLDV
+    local_lateral_direction: UnitDirectionAPMLDV | None = None
+    local_normal_direction: UnitDirectionAPMLDV | None = None
+    model_to_placement_uniform_scale: PositiveFiniteFloat = 1.0
     insertion_depth_um: PositiveFiniteFloat
     azimuth_deg: FiniteFloat = Field(ge=-180, le=180)
     elevation_deg: FiniteFloat = Field(ge=-90, le=90)
@@ -297,6 +319,38 @@ class NormalizedProbePlacement(BaseModel):
             raise ValueError("all placement coordinates must use one explicit frame")
         if self.inward_direction.frame_id != self.entry.frame_id:
             raise ValueError("placement direction frame does not match placement points")
+        if (self.local_lateral_direction is None) != (self.local_normal_direction is None):
+            raise ValueError(
+                "placement local lateral and normal directions must be stored together"
+            )
+        if self.local_lateral_direction is not None and self.local_normal_direction is not None:
+            local_directions = (
+                self.local_lateral_direction,
+                self.local_normal_direction,
+            )
+            if any(direction.frame_id != self.entry.frame_id for direction in local_directions):
+                raise ValueError("placement local directions must use the placement frame")
+            inward_vector = self.inward_direction.as_ap_ml_dv()
+            lateral_vector = self.local_lateral_direction.as_ap_ml_dv()
+            normal_vector = self.local_normal_direction.as_ap_ml_dv()
+            dot_products = (
+                sum(a * b for a, b in zip(inward_vector, lateral_vector, strict=True)),
+                sum(a * b for a, b in zip(inward_vector, normal_vector, strict=True)),
+                sum(a * b for a, b in zip(lateral_vector, normal_vector, strict=True)),
+            )
+            if any(not math.isclose(value, 0.0, rel_tol=0, abs_tol=1e-9) for value in dot_products):
+                raise ValueError("placement local directions must form an orthonormal basis")
+            # The probe convention defines normal = (-inward) x lateral.
+            expected_normal = (
+                -inward_vector[1] * lateral_vector[2] + inward_vector[2] * lateral_vector[1],
+                -inward_vector[2] * lateral_vector[0] + inward_vector[0] * lateral_vector[2],
+                -inward_vector[0] * lateral_vector[1] + inward_vector[1] * lateral_vector[0],
+            )
+            if any(
+                not math.isclose(actual, expected, rel_tol=0, abs_tol=1e-9)
+                for actual, expected in zip(normal_vector, expected_normal, strict=True)
+            ):
+                raise ValueError("placement local basis does not follow the probe right-hand rule")
         if len(self.selected_site_ids) != len(set(self.selected_site_ids)):
             raise ValueError("selected recording-site IDs must be unique")
 
@@ -366,7 +420,7 @@ class NormalizedProbePlacement(BaseModel):
 class PlacedRecordingSite(BaseModel):
     """One local site mapped into the placement's anatomical frame."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     placement_uuid: UUID
     probe_model_id: str
@@ -376,6 +430,38 @@ class PlacedRecordingSite(BaseModel):
     role: ProbeSiteRole
     bank: str | None = None
     point: AnatomicalPoint
+
+
+class PlacedProbeShank(BaseModel):
+    """One finite implanted shank centerline with its conservative envelope."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    placement_uuid: UUID
+    probe_model_id: str = Field(min_length=1, max_length=200)
+    probe_model_version: str = Field(min_length=1, max_length=100)
+    shank_id: str = Field(min_length=1, max_length=200)
+    entry: AnatomicalPoint
+    tip: AnatomicalPoint
+    width_um: PositiveFiniteFloat
+    thickness_um: PositiveFiniteFloat
+    envelope_definition: Literal["circumscribed-radius-of-rectangular-cross-section"] = (
+        "circumscribed-radius-of-rectangular-cross-section"
+    )
+
+    @model_validator(mode="after")
+    def validate_shank(self) -> Self:
+        if self.entry.frame_id != self.tip.frame_id:
+            raise ValueError("placed shank entry and tip must use one explicit frame")
+        if self.entry.as_ap_ml_dv() == self.tip.as_ap_ml_dv():
+            raise ValueError("placed shank entry and tip must be distinct")
+        return self
+
+    @property
+    def conservative_envelope_radius_um(self) -> float:
+        """Return the circumscribed radius used by conservative clearance."""
+
+        return math.hypot(self.width_um / 2.0, self.thickness_um / 2.0)
 
 
 def _angles_from_direction(direction: tuple[float, float, float]) -> tuple[float, float]:

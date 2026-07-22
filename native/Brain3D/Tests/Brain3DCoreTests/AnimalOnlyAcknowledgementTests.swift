@@ -9,7 +9,7 @@ struct AnimalOnlyAcknowledgementTests {
         let acknowledgement = AnimalOnlyAcknowledgementState()
 
         #expect(!acknowledgement.isExplicitlyAcknowledged)
-        #expect(ProjectNewParameters(acknowledgement: acknowledgement) == nil)
+        #expect(ProjectNewParameters(acknowledgement: acknowledgement, subjectId: "mouse-a") == nil)
     }
 
     @Test("The wire receives true only after the acknowledgement state is explicitly set")
@@ -33,7 +33,22 @@ struct AnimalOnlyAcknowledgementTests {
         #expect(object["subjectId"] as? String == "mouse-a")
 
         acknowledgement.setExplicitlyAcknowledged(false)
-        #expect(ProjectNewParameters(acknowledgement: acknowledgement) == nil)
+        #expect(ProjectNewParameters(acknowledgement: acknowledgement, subjectId: "mouse-a") == nil)
+    }
+
+    @Test("A new animal plan requires a nonempty normalized subject ID")
+    func subjectIdIsRequiredAndNormalized() throws {
+        var acknowledgement = AnimalOnlyAcknowledgementState()
+        acknowledgement.setExplicitlyAcknowledged(true)
+
+        #expect(ProjectNewParameters(acknowledgement: acknowledgement, subjectId: "   ") == nil)
+        let request = try #require(
+            ProjectNewParameters(
+                acknowledgement: acknowledgement,
+                subjectId: "  mouse-001  "
+            )
+        )
+        #expect(request.subjectId == "mouse-001")
     }
 
     @Test("Animal-only state validation fails closed for nil, false, and warning mismatch")

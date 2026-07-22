@@ -10,14 +10,26 @@ input.
 from __future__ import annotations
 
 import math
-from typing import Annotated, Literal, Self
+from typing import Literal, Self
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
-NonNegativeFiniteFloat = Annotated[float, Field(ge=0, allow_inf_nan=False)]
-PositiveFiniteFloat = Annotated[float, Field(gt=0, allow_inf_nan=False)]
+from mouse_brain_planner.domain.numeric_types import (
+    FiniteFloat,
+    NonNegativeFiniteFloat,
+    PositiveFiniteFloat,
+)
+
+__all__ = [
+    "ANIMAL_RESEARCH_WARNING",
+    "AnimalSurgeryContext",
+    "FinalPlanConfirmation",
+    "FiniteFloat",
+    "NonNegativeFiniteFloat",
+    "PositiveFiniteFloat",
+    "UnitDirectionAPMLDV",
+]
 
 
 class AnimalSurgeryContext(BaseModel):
@@ -27,7 +39,7 @@ class AnimalSurgeryContext(BaseModel):
     human, clinical, or certified-navigation use case.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context_uuid: UUID = Field(default_factory=uuid4)
     species: Literal["Mus musculus"] = "Mus musculus"
@@ -41,7 +53,7 @@ class AnimalSurgeryContext(BaseModel):
 class FinalPlanConfirmation(BaseModel):
     """Explicit user confirmation required at the later export boundary."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     context_uuid: UUID
     independently_verified_against_animal_and_rig: Literal[True]
@@ -54,7 +66,7 @@ class FinalPlanConfirmation(BaseModel):
 class UnitDirectionAPMLDV(BaseModel):
     """Dimensionless unit direction in a named AP/ML/DV frame."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     frame_id: str = Field(min_length=1, max_length=200)
     ap: FiniteFloat

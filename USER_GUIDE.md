@@ -1,176 +1,129 @@
 # User Guide
 
-Mouse Brain Surgery Planner is a native SwiftUI workspace backed by a Python scientific service.
-The current testing build displays one reviewed 25 µm mouse atlas, can overlay a published
-population vascular length-density field, can register a user-supplied dorsal image, and can
-preserve unprojected bregma-relative implant coordinates.
+Brain3D is a native SwiftUI + SceneKit workspace backed by a Python scientific service. It is
+restricted to mouse animal research and accepts only BrainGlobe `allen_mouse_25um` v1.2 during
+this testing phase.
 
-> **Animal-research-only warning:** This application is for mouse animal-research planning only,
-> never human or clinical use. It is not a certified surgical-navigation, medical, or veterinary
-> device. Nothing displayed by the application establishes that a target is accurate, reachable,
-> or clear of vessels. Independently verify every coordinate before every animal procedure.
+> **Non-human, non-clinical use only.** This development build is not a qualified navigation or
+> veterinary device. Independently review all coordinates, laterality, calibration inputs, probe
+> geometry, anatomy, vessel limitations, and procedure decisions.
 
-## Start the native application
-
-Follow [Installation](INSTALL.md), then build and open the development app:
+## Start a development build
 
 ```bash
+uv sync --frozen --group dev
 native/Brain3D/Scripts/build-app.sh
 open native/Brain3D/build/Brain3D.app
 ```
 
-The app starts a separately launched Python service through a typed protocol. The **Planning
-service** section reports connection and project state. If backend discovery fails, the app says
-**Backend not configured**; reconnecting does not substitute demo anatomy or fabricated data.
+Create or open a `.mouseplan`. A new project requires a stable subject identifier before planning;
+that identity is persisted with every revision and mutation. Then open/download the reviewed
+25 µm atlas when prompted. The 10 µm atlas is not offered; existing 10 µm cache data is left
+untouched.
 
-After the atlas opens, the workspace remains disabled behind **Confirm animal-only use**. The
-acknowledgement checkbox starts unchecked. Read it, check it explicitly, then choose
-**Acknowledge and Create Animal Plan** or **Open Existing Animal Plan…**. The app does not create
-a project or send an acknowledgement to the Python service before that user action.
+## Navigate the atlas
 
-## Load the reviewed atlas
+The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, with one full-size view:
 
-The current build accepts exactly:
+- **Dorsal** shows the atlas surface and the selected probe's AP/ML landmarks and shank path;
+  recording sites remain in true-depth slice views.
+- **Coronal**, **Sagittal**, and **Horizontal** each keep an independent depth. Use the slider,
+  previous/next buttons, or wheel to move; drag pans and pinch zooms.
+- **3D** shows a SceneKit brain mesh and planned probe envelopes. Drag/orbit and zoom use native
+  camera control; **Reset Camera** restores the overview.
 
-```text
-allen_mouse_25um, BrainGlobe package version 1.2
-resolution [AP,DV,ML] = [25,25,25] µm
-shape [AP,DV,ML]      = [528,320,456]
-```
+Click a slice or the 3D brain to replace the compact region acronym/name display. Clicking does
+not change a slice depth. There is no focus mode, crosshair, 2×2 layout, or capillary layer.
 
-Use **Download reviewed 25 µm atlas** when the package is not already in the application cache.
-The service validates the exact package identity before it becomes operational. The 10 µm atlas
-is intentionally not shown or opened during this testing phase; pre-existing 10 µm cache files
-are ignored and not deleted.
+## Enter an implant site
 
-## Brain views
+Enter millimetres from bregma in named `[AP, ML, DV]` fields:
 
-The mode bar exposes:
-
-- **Dorsal** — the atlas dorsal surface on an AP-by-ML grid; this is where vascular density and a
-  registered subject dorsal image are composited over the brain;
-- **Coronal** — fixed AP plane, with DV rows and ML columns;
-- **Sagittal** — fixed ML plane, with DV rows and AP columns;
-- **Horizontal** — fixed DV plane, with AP rows and ML columns; and
-- **3D** — an honest unavailable state in bridge protocol v1, not a placeholder rendering.
-
-The coronal, sagittal, and horizontal modes each display only the atlas midpoint. There is no
-slice slider, mouse-wheel stepping, index field, pan/zoom interaction, linked crosshair, or shared
-tri-planar cursor in the current SwiftUI build. The mode buttons change fixed images; they do not
-let the user navigate through x/y/z.
-
-Atlas values are BrainGlobe physical coordinates in micrometres. They are not bregma-relative
-stereotaxic coordinates. See [Coordinate Systems](COORDINATE_SYSTEMS.md).
-
-## Add an implant site by AP/ML/DV
-
-An implant site is entered in millimetres from bregma, in named `[AP, ML, DV]` fields:
-
-| Entry | Positive direction | Negative direction |
+| Axis | Positive | Negative |
 | --- | --- | --- |
 | AP | anterior / forward | posterior / back |
 | ML | right | left |
 | DV | dorsal / up | deep / ventral |
 
-For example, `AP -1.25`, `ML -0.70`, `DV -2.40` means 1.25 mm posterior, 0.70 mm left, and
-2.40 mm deep/ventral from bregma.
+`AP -1.25`, `ML -0.70`, `DV -2.40` means 1.25 mm posterior, 0.70 mm left, and 2.40 mm deep.
+**Store unprojected site** preserves those exact inputs without inventing an atlas point.
 
-The current build may save that exact entry as an **unprojected bregma target**. It does not infer
-an Allen-atlas point from the numbers, draw a navigation marker, or calculate a trajectory. Those
-operations remain locked until an explicit bregma/skull-to-atlas calibration with declared
-landmarks, transform, units, atlas identity, and validation exists. An unprojected entry is not
-usable for navigation.
+## Calibrate and project
 
-## Show the published population density
+Open **Calibrations…** and create a subject calibration from measured skull-frame metadata,
+exactly four matched landmarks (bregma, lambda, left skull, right skull), laterality confirmation,
+the DV reference, declared QC limits/source, and either a rigid or similarity atlas fit. Skull
+landmarks are AP/ML/DV; BrainGlobe atlas landmarks are AP/DV/ML; the form labels both in µm.
 
-The optional **Population density** layer uses the pinned source:
+Inspect residuals and QC messages, then choose **Use for planning** only when the calibration
+permits planning. A failed calibration cannot project a target or create a probe. **Project to
+atlas** creates a provenance-bound projection while preserving the original bregma entry.
 
-- Yongsoo Kim, *Cerebrovascular, pericyte, and neuronal cell type mapping data 2022*;
-- [Mendeley Data v1, DOI 10.17632/stxvn5sv44.1](https://data.mendeley.com/datasets/stxvn5sv44/1),
-  CC BY 4.0; and
-- associated paper: Wu et al., *Quantitative relationship between cerebrovascular network and
-  neuronal cell types in mice*, Cell Reports 2022,
-  [doi:10.1016/j.celrep.2022.110978](https://doi.org/10.1016/j.celrep.2022.110978).
+The Allen CCF has no single official bregma transform. A project calibration is specific to its
+declared measurements and assumptions; it is not supplied by the atlas.
 
-Choose **Download and prepare published reference (~311 MB)**. The service accepts only the
-pinned version-1 archive, verifies its exact byte count and SHA-256, extracts only the reviewed
-density and template members, validates their headers, and binds the prepared result to the exact
-open atlas metadata. Preparation is cached after successful validation.
+## Create and inspect a probe plan
 
-Then enable **Show population reference density** in the Dorsal view. The transparent red-to-
-magenta overlay is a DV maximum projection of a scalar vascular length-density field. Its display
-legend declares the value window and units. Overlay alpha rises with the windowed density value,
-and pixels outside the nonzero Allen annotation footprint remain fully transparent so the layer
-stays over the displayed brain rather than tinting the surrounding canvas.
+Choose a projected target, model, name, axial rotation, and one of exactly four placement modes:
 
-Interpret this layer narrowly:
+- **Entry + target** accepts an editable bregma-relative entry and the selected target, then
+  derives direction and insertion depth from those two points.
+- **Entry + angles + depth** accepts an editable bregma-relative entry plus source-stereotaxic
+  azimuth, elevation, and depth. The complete physical pose crosses the same rigid/similarity
+  calibration as the entry; affine transforms are rejected because they would shear the probe.
+- **Target + angles + depth** accepts the selected target plus atlas-frame azimuth, elevation, and
+  depth, then derives the entry directly in atlas space.
+- **Stereotaxic target** uses the selected calibrated target with manipulator azimuth, elevation,
+  and depth under the explicit stereotaxic contract.
 
-- it summarizes four fixed adult C57BL/6 mouse brains using a 100 µm local window;
-- it is a population reference, not an image of the current animal;
-- it contains no individual vessel centerlines, diameters, or paths;
-- the source ML polarity is not documented, so the reviewed conversion is explicitly
-  symmetrized; and
-- it cannot calculate or prove vessel clearance, safe entry, or collision avoidance.
+Only fields belonging to the selected mode are submitted. Selecting an existing plan restores
+its exact mode and inputs for editing; changing modes cannot silently reuse hidden entry or angle
+values. The catalog contains:
 
-Turning the layer off removes the transparent density composite; it does not change the atlas or
-subject image.
+- Neuropixels 1.0 NP1000 / `PRB_1_4_0480_1`, with all 960 sites transcribed from pinned sources;
+  its status is `source-transcribed-review-pending`; and
+- a synthetic one-shank/16-site software-test model.
 
-## Import and register a subject dorsal image
+Both require the displayed acknowledgement. The NP1 transcription has not completed an
+independent full-table review.
 
-The **Subject dorsal image** layer is separate from the published population density.
+After creating a plan, slice views show only probe geometry that intersects the current slab;
+3D shows the probe envelope with the brain. **Analyze regions** performs exact atlas
+voxel traversal and recording-site assignment. Use **Inspect…**, **Save CSV…**, or **Save JSON…**
+for the versioned result. Export generation is read-only; the project records an `exported` audit
+event only after the native client completes the atomic file write. Cancelling the save panel or a
+failed write does not advance the project revision or claim an export. Both formats carry the
+exact atlas identity/digest, printed coordinate convention, calibration identity/digest, source
+and destination frames, and the full AP/ML/DV transform matrix with residuals.
 
-1. Choose **Import subject image** and select one PNG, JPEG, or TIFF.
-2. Confirm the displayed filename, dimensions, byte count, and SHA-256 provenance.
-3. Choose **Register**.
-4. Enter at least two distinct correspondences between subject-image pixel column/row and atlas
-   dorsal AP/ML physical coordinates in micrometres.
-5. Explicitly confirm laterality, then run the registration.
-6. Review the returned residuals and the composite in the Dorsal view.
+## Vessel features are unavailable
 
-The registration maps the user-supplied pixels onto the atlas dorsal grid. It does not perform or
-validate vessel segmentation. If the source image has an opaque background, that background may
-also cover the atlas; a transparent, independently reviewed vessel mask is preferable when the
-goal is to view subject surface vessels. A registered image still does not establish depth,
-diameter, identity, or clearance for any vessel.
+The repository retains a diameter-≥30 µm derivative of the CC BY 4.0 LAMBADA P60_606 graph,
+DOI `10.5281/zenodo.18876865`, as archived evidence only. It is not displayed in 2D, Dorsal, or
+3D, and it cannot be analyzed against a probe.
 
-In the dorsal composite, the published population density is drawn over the atlas and the
-registered subject image is drawn above the density. These are different evidence layers and must
-not be described as one combined vascular truth.
+Qualification found supporting AP and DV orientation evidence, but the source describes
+hemisphere specimens and the exact graph has no persisted property that binds its ML coordinates
+to biological hemisphere/laterality. This also leaves whole-brain coverage unqualified. The
+application does not infer the sampled side and does not mirror the graph.
 
-## Save and reopen a project
+The backend does not advertise the reference-vessel or radius-aware-analysis capabilities. Any
+request for reference metadata, geometry, or analysis returns `VESSEL_GEOMETRY_UNAVAILABLE`
+without serving points. The canonical rejected report is
+[`docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json`](docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 
-Use **Save As…** to create a `.mouseplan` directory package and **Open…** to reopen one. The
-backend, not the SwiftUI presentation layer, is authoritative for scientific state and dirty
-revision tracking. Saved state can include:
+Do not interpret the absence of a vessel overlay as an absence of vessels. This build produces no
+vessel intersection, margin, conflict, no-conflict, or surgical-clearance result.
 
-- exact atlas identity and metadata digest;
-- the currently selected fixed atlas-view mode;
-- byte-preserved subject image provenance, landmarks, transform, laterality, and residuals;
-- prepared population-density provenance and visibility state; and
-- unprojected bregma-relative implant targets.
+## Save and reopen
 
-Project JSON is checksummed, and replacement is atomic. A previous package may be retained as the
-exact sibling `.mouseplan.bak`; recovery from that backup does not prove scientific correctness.
-Do not edit package JSON without expecting checksum validation to fail.
+Save the project as `.mouseplan`. Persistence includes atlas identity, independent slice depths,
+region selection, implant targets, calibrations, probe plans, current region, and archived backend
+state. Existing legacy vessel-analysis records may remain preserved for audit, but the current
+runtime cannot create, refresh, or interpret them. Project revisions are stored monotonically with
+checksums across save/reopen. The app rejects stale results and source mismatches. Keep the project
+file and exported analyses with their recorded provenance.
 
-Opening another project, reconnecting, or quitting with unsaved changes requires an explicit
-discard decision. Choose **Cancel** to keep working or save first when the changes matter.
-
-Validate a package without opening the UI:
-
-```bash
-uv run --frozen mouse-brain-planner validate-project /absolute/path/Plan.mouseplan
-```
-
-## What not to infer
-
-- 25 µm atlas sampling is not 25 µm targeting accuracy.
-- A population density maximum is not a vessel trajectory or a vessel-free corridor.
-- A user-supplied image is not automatically a vessel mask.
-- Low registration residuals do not prove biological registration accuracy.
-- An AP/ML/DV target stored from bregma is not projected into the atlas without calibration.
-- The absence of a displayed collision, vessel, or structure is not evidence of safety.
-
-Review [Scientific Validation](SCIENTIFIC_VALIDATION.md), [Atlas Data](ATLAS_DATA.md),
-[Coordinate Systems](COORDINATE_SYSTEMS.md), and [Known Limitations](KNOWN_LIMITATIONS.md) before
-using output in an experiment.
+Population density and subject-image registration are preserved only as archived backend paths
+for older work; they are not exposed in the primary UI and are not used as vessel geometry.

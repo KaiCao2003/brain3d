@@ -44,40 +44,56 @@ SwiftUI owns:
 
 - windows, menus, native file panels, keyboard focus, accessibility, and presentation;
 - asynchronous bridge lifecycle and explicit disconnected/loading/error states;
-- rendering bridge-produced atlas PNGs and verified mesh assets;
-- landmark editing controls that send declared pixel and atlas coordinates.
+- rendering bridge-produced atlas PNGs and backend-validated mesh assets;
+- SceneKit camera interaction, ray construction, and display of schema-checked brain/probe
+  geometry payloads; and
+- calibration, target, and probe controls that send declared typed inputs.
 
 Python owns:
 
 - BrainGlobe atlas acquisition, validation, metadata, hierarchy, arrays, and mesh provenance;
 - coordinate systems and transforms;
+- subject calibration, AP/ML/DV target projection, probe geometry, and voxel traversal;
+- digest-bound major-vessel qualification and fail-closed rejection;
 - subject dorsal-image byte preservation, landmark fitting, residuals, and atlas-grid resampling;
 - population reference-density validation and its non-subject-specific limitation;
-- project models, migrations, checksums, atomic save, backup recovery, exports, and future probe
-  calculations.
+- project models, migrations, checksums, atomic save, backup recovery, and exports.
 
 Swift must not duplicate or reinterpret atlas axes, fit scientific transforms, infer laterality,
 or calculate vessel clearance. A UI cannot display a subject image as registered until Python
 returns a registration, residuals, and explicit laterality confirmation. Population vascular
 density can never be presented as individual vessel paths or used for subject clearance.
 
-The current protocol-v1 feature boundary is:
+The implemented protocol-v1 feature boundary, expanded on 2026-07-22 without changing the
+process decision, is:
 
 - exactly `allen_mouse_25um` v1.2; 10 µm is not offered during testing;
-- dorsal, coronal, sagittal, and horizontal verified raster views;
-- no native 3D renderer, represented by an explicit unavailable state;
-- an optional transparent dorsal DV-maximum overlay from the pinned Mendeley Data v1
-  `10.17632/stxvn5sv44.1` four-mouse population vascular length-density field;
-- a separate user-supplied subject dorsal image with byte provenance, landmarks, laterality,
-  residuals, and registration, but no automatic or implied vessel segmentation; and
-- exact storage of `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` implant targets with AP−
-  posterior/back, ML− left, and DV− deep/ventral. Projection and navigation remain locked until
-  explicit calibration.
+- exactly one selected `Dorsal / Coronal / Sagittal / Horizontal / 3D` view, with independent
+  slice depths and click-to-replace region labels;
+- a SceneKit brain/probe scene with camera control and atlas ray picking;
+- signed bregma AP/ML/DV targets, versioned subject calibration, QC-gated projection, and probe
+  planning/region export;
+- an archived LAMBADA P60_606 diameter-≥30 µm derivative that is not shown or served because
+  coordinate and coverage qualification is rejected; and
+- no reference-vessel analysis capability.
 
-The population layer and subject layer are composited over the dorsal brain as distinct evidence
-sources. Neither one can establish a vessel-free path. The population field contains no
-individual vessel paths; the subject image may contain arbitrary opaque pixels unless the user
-supplies an independently reviewed transparent mask.
+Region export uses a two-phase boundary: Python generates and hashes content without mutation,
+the native client performs an atomic file write, and only a matching confirmation records the
+`exported` audit event. Cancelling the save panel or a failed write leaves the project unchanged.
+
+AP and DV orientation evidence passed, but the source describes hemisphere specimens and the
+exact graph has no persisted biological hemisphere/laterality binding. Whole-brain coverage and
+ML polarity are therefore unqualified, and the service must not infer a side or mirror the
+derivative. It omits `auditedReferenceMajorVessels` and
+`radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.get`,
+`vessel.major.reference.geometry`, and `vessel.major.reference.analyze` fail with
+`VESSEL_GEOMETRY_UNAVAILABLE`. The gate is bound to
+[`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
+SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+
+Population density and subject-image registration remain archived compatibility code and
+persisted data. The primary bridge does not register their methods or capabilities, and the
+planning UI does not expose them.
 
 The persistent application warning is:
 
@@ -87,6 +103,9 @@ Creating a project requires an explicit acknowledgement. Disconnects and unsuppo
 remain visible failures; the shell must never substitute demo anatomy or fake successful state.
 
 ## First native qualification gate
+
+This is the retained historical Phase 1 gate. Steps 5–8 document the archived subject-image
+workflow; the current primary bridge does not register that workflow or expose it in the UI.
 
 Before expanding the hybrid shell, a real user journey must pass repeatedly without a terminal:
 
@@ -100,7 +119,7 @@ Before expanding the hybrid shell, a real user journey must pass repeatedly with
 8. save, quit, reopen, and reproduce the matrix and overlay without numeric drift.
 
 All unavailable features must say why they are unavailable. This gate does not claim surgical,
-subject-anatomical, or vascular safety accuracy.
+subject-anatomical, or vascular/procedural accuracy.
 
 ## Consequences
 

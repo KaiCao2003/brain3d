@@ -59,6 +59,8 @@ public struct ImplantListParameters: Codable, Equatable, Sendable {
 
 public struct ImplantAddParameters: Codable, Equatable, Sendable {
     public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
     public let label: String
     public let apMillimetres: Double
     public let mlMillimetres: Double
@@ -66,6 +68,8 @@ public struct ImplantAddParameters: Codable, Equatable, Sendable {
     public let notes: String?
 
     public init(
+        projectId: String,
+        expectedProjectRevision: Int,
         label: String,
         apMillimetres: Double,
         mlMillimetres: Double,
@@ -73,6 +77,8 @@ public struct ImplantAddParameters: Codable, Equatable, Sendable {
         notes: String? = nil
     ) {
         protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
         self.label = label
         self.apMillimetres = apMillimetres
         self.mlMillimetres = mlMillimetres
@@ -83,10 +89,14 @@ public struct ImplantAddParameters: Codable, Equatable, Sendable {
 
 public struct ImplantRemoveParameters: Codable, Equatable, Sendable {
     public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
     public let targetId: String
 
-    public init(targetId: String) {
+    public init(projectId: String, expectedProjectRevision: Int, targetId: String) {
         protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
         self.targetId = targetId
     }
 }
@@ -148,6 +158,8 @@ public struct ImplantListResult: Codable, Equatable, Sendable {
 public struct ImplantMutationResult: Codable, Equatable, Sendable {
     public let protocolVersion: Int
     public let status: String
+    public let projectId: String
+    public let projectRevision: Int
     public let targetCount: Int
     public let coordinateFrame: BregmaCoordinateFrame
     public let projected: Bool
@@ -163,6 +175,9 @@ public enum ImplantTargetValidationError: Error, Equatable, LocalizedError, Send
     case coordinateFrameMismatch
     case projectionWasNotLocked
     case malformedTarget
+    case mutationTargetMismatch
+    case projectMismatch
+    case projectRevisionMismatch
 
     public var errorDescription: String? {
         switch self {
@@ -178,6 +193,12 @@ public enum ImplantTargetValidationError: Error, Equatable, LocalizedError, Send
             "Implant response did not keep atlas projection and navigation locked."
         case .malformedTarget:
             "Implant response contains a malformed unprojected target."
+        case .mutationTargetMismatch:
+            "Implant response does not acknowledge the submitted target and coordinates."
+        case .projectMismatch:
+            "Implant response belongs to a different animal plan."
+        case .projectRevisionMismatch:
+            "Implant response did not publish exactly one project revision."
         }
     }
 }
@@ -205,7 +226,9 @@ public enum ImplantTargetValidator {
 
     public static func validateMutation(
         _ result: ImplantMutationResult,
-        expectedStatus: String
+        expectedStatus: String,
+        projectId: String,
+        projectRevision: Int
     ) throws {
         try validateEnvelope(
             protocolVersion: result.protocolVersion,
@@ -218,7 +241,48 @@ public enum ImplantTargetValidator {
             declaredProjectionStatus: result.projectionStatus,
             returnedTargets: nil
         )
+        guard result.projectId.lowercased() == projectId.lowercased() else {
+            throw ImplantTargetValidationError.projectMismatch
+        }
+        guard result.projectRevision == projectRevision else {
+            throw ImplantTargetValidationError.projectRevisionMismatch
+        }
         try validate(result.target)
+    }
+
+    public static func validateAddedMutation(
+        _ result: ImplantMutationResult,
+        request: ImplantAddParameters
+    ) throws {
+        try validateMutation(
+            result,
+            expectedStatus: "added",
+            projectId: request.projectId,
+            projectRevision: request.expectedProjectRevision + 1
+        )
+        guard result.target.label == request.label,
+              result.target.apMillimetres == request.apMillimetres,
+              result.target.mlMillimetres == request.mlMillimetres,
+              result.target.dvMillimetres == request.dvMillimetres,
+              result.target.notes == (request.notes ?? "")
+        else {
+            throw ImplantTargetValidationError.mutationTargetMismatch
+        }
+    }
+
+    public static func validateRemovedMutation(
+        _ result: ImplantMutationResult,
+        request: ImplantRemoveParameters
+    ) throws {
+        try validateMutation(
+            result,
+            expectedStatus: "removed",
+            projectId: request.projectId,
+            projectRevision: request.expectedProjectRevision + 1
+        )
+        guard result.target.targetId == request.targetId else {
+            throw ImplantTargetValidationError.mutationTargetMismatch
+        }
     }
 
     private static func validateEnvelope(
