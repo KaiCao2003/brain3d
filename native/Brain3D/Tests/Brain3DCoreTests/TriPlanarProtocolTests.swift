@@ -59,6 +59,39 @@ struct TriPlanarProtocolTests {
         #expect(depths == [1, 5, 2])
     }
 
+    @Test("Replacing the selected ontology region cannot alter independent slice depths")
+    func regionSelectionPreservesIndependentDepths() throws {
+        let original = try JSONDecoder().decode(
+            ViewerStateResult.self,
+            from: try ViewerSnapshotFixture.data()
+        ).snapshot
+        let changedData = try ViewerSnapshotFixture.mutated { object in
+            var selection = try nestedObject(object, "selection")
+            selection["region"] = [
+                "structureId": 549,
+                "acronym": "TH",
+                "name": "Thalamus",
+                "parentStructureId": 997,
+                "structureIdPath": [997, 549],
+                "rgb": [255, 112, 128],
+            ]
+            try setNestedObject(&object, selection, "selection")
+        }
+        let changed = try JSONDecoder().decode(
+            ViewerStateResult.self,
+            from: changedData
+        ).snapshot
+
+        #expect(changed.selection?.region?.acronym == "TH")
+        #expect(changed.slices == original.slices)
+        let depths: [Int] = [
+            changed.slices.coronal.index,
+            changed.slices.sagittal.index,
+            changed.slices.horizontal.index,
+        ]
+        #expect(depths == [1, 5, 2])
+    }
+
     @Test("The supported methods encode exact protocol-v1 request fields")
     func exactRequestWireShapes() throws {
         let canonicalProjectId = "abcdefab-cdef-4abc-8def-abcdefabcdef"

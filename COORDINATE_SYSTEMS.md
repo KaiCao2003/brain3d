@@ -315,17 +315,25 @@ base atlas-to-world transform.
 Millimetre values in the UI are formatting conversions from a declared profile or frame. A
 unit conversion alone does not create stereotaxic calibration.
 
-## Dorsal display plane and rejected vessel overlay
+## Dorsal display plane and major-vessel overlay
 
 The current Dorsal view uses the atlas AP-by-ML grid for the atlas surface and selected probe.
-It does not display the archived LAMBADA P60_606 derivative. Coronal, sagittal, horizontal, and
-SceneKit 3D likewise receive no vessel geometry.
+It overlays the digest-checked VesSAP BL6J-no1 diameter-≥30 µm display reference. Coronal,
+sagittal, horizontal, and SceneKit 3D consume that same BrainGlobe physical `[AP,DV,ML]`
+geometry; slices filter it to the current physical slab. The published specimen-to-Allen
+transform, reviewed ML reflection, source hashes, derivative digest, and display reduction are
+recorded in [VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md).
 
-The exact qualification found supporting AP and DV orientation evidence but rejected biological
-ML/laterality and whole-brain coverage because the source is a hemisphere specimen and its graph
-has no persisted hemisphere binding. Numeric points on both sides of the atlas midpoint do not
-establish bilateral anatomy. No mirroring or display-axis guess is permitted; all reference
-geometry and analysis calls return `VESSEL_GEOMETRY_UNAVAILABLE`.
+The archived LAMBADA P60_606 derivative is not displayed. Its exact qualification found
+supporting AP and DV orientation evidence but rejected biological ML/laterality and whole-brain
+coverage because the source is a hemisphere specimen and its graph has no persisted hemisphere
+binding. Numeric points on both sides of the atlas midpoint do not establish bilateral anatomy.
+No mirroring or display-axis guess is permitted.
+
+VesSAP remains one fixed cleared reference, not the current animal. The shared coordinate frame
+permits an overlay but does not supply subject registration, tissue-distortion, or inter-animal
+error bounds. The runtime therefore returns display geometry but rejects clearance analysis with
+`VESSEL_ANALYSIS_UNAVAILABLE`.
 
 Archived population-density and registered subject-image paths also use an AP-by-ML display grid,
 but they are absent from the primary UI and never substituted for a vessel graph. A population

@@ -110,7 +110,14 @@ struct MajorVesselTubeMeshBuilderTests {
         )
         #expect(
             mesh.vertexData.count + mesh.normalData.count + mesh.indexData.count
-                == 18_836_352
+                == pointCount * MajorVesselTubeMeshBuilder.sideCount
+                    * MemoryLayout<Float>.size * 3 * 2
+                    + segmentCount * MajorVesselTubeMeshBuilder.sideCount
+                    * 6 * MemoryLayout<UInt32>.size
+        )
+        #expect(
+            mesh.vertexData.count + mesh.normalData.count + mesh.indexData.count
+                < 48 * 1_024 * 1_024
         )
     }
 

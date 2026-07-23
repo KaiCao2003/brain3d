@@ -6,14 +6,14 @@
 SwiftUI macOS application
   ├─ single selected Dorsal / Coronal / Sagittal / Horizontal / 3D workspace
   ├─ project, calibration, target, probe, and region controls
-  ├─ lossless atlas rasters with clipped probe overlays
-  └─ SceneKit brain mesh, camera, ray picking, and probe envelopes
+  ├─ lossless atlas rasters with clipped probe/reference-vessel overlays
+  └─ SceneKit brain mesh, camera, ray picking, probe envelopes, and vessel tubes
                               ↕ strict typed NDJSON
 Python 3.12 scientific service
   ├─ allowlisted BrainGlobe atlas and named coordinate-frame conversion
   ├─ subject calibration and QC-gated AP/ML/DV projection
   ├─ source-traceable probe catalog, placements, sites, and voxel traversal
-  ├─ digest-bound, fail-closed LAMBADA qualification gate
+  ├─ digest-bound VesSAP display geometry and fail-closed analysis gate
   └─ revisions, provenance, hashes, stale-result rejection, and persistence
 ```
 
@@ -25,9 +25,12 @@ conversion, calibration, geometry derivation, and analysis so they remain testab
 
 The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`; only one view occupies
 the workspace. Coronal, sagittal, and horizontal keep independent persisted depths. Picking a
-region replaces one compact label and never moves a slice. Dorsal is an AP/ML reference projection
-of the atlas surface and selected probe shanks (not a collapsed recording-site cloud); 3D has its
-own camera and ray-pick interaction while consuming the same atlas/probe state.
+region replaces one shared compact label and never moves a slice. Complete ontology browse/search
+uses the existing paged BrainGlobe region service and lazily requests only the selected mesh.
+Dorsal is an AP/ML reference projection
+of the atlas surface, selected probe shanks, and major vessels (not a collapsed recording-site
+cloud); 3D has its own camera and ray-pick interaction while consuming the same atlas/probe/vessel
+state.
 
 There is no crosshair, focus mode, 2×2 panel state, or duplicated cursor that can silently couple
 slice depths.
@@ -51,19 +54,25 @@ subject calibration → projected target → versioned probe placement
                                       ├─→ clipped 2D shank/site overlays
                                       ├─→ exact voxel traversal + export
                                       └─→ SceneKit probe envelope
-LAMBADA P60_606 derivative → rejected coordinate/coverage qualification
-                           └─→ VESSEL_GEOMETRY_UNAVAILABLE (no payload)
+VesSAP BL6J-no1 → pinned transform + true-path 50 µm reduction
+                ├─→ five-view display geometry
+                └─→ VESSEL_ANALYSIS_UNAVAILABLE (no clearance)
+LAMBADA P60_606 → archived rejected evidence (no runtime payload)
 ```
 
-The runtime does not advertise `auditedReferenceMajorVessels` or
-`radiusAwareReferenceVesselAnalysis`. Its `vessel.major.reference.get`,
-`vessel.major.reference.geometry`, and `vessel.major.reference.analyze` methods all fail before
-loading or serving the archived derivative. The UI cannot manufacture vessel geometry or a
-clearance result from archived files or rendered pixels.
+The runtime advertises `auditedReferenceMajorVessels`, verifies the VesSAP manifest/NPZ, and
+serves metadata plus binary display geometry. It does not advertise
+`radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.analyze` fails before project
+access. The UI cannot manufacture a clearance result from displayed geometry or pixels.
 
 ## Evidence boundary
 
-The P60_606 diameter-≥30 µm derivative is archived evidence, not a primary vessel layer. Its AP
+The VesSAP diameter-≥30 µm layer is one cleared C57BL/6J reference. Its transform interpretation,
+laterality, topology, bounds, and asset identity have display evidence, but subject registration,
+clearing/inter-animal variation, and a qualified transformed vessel surface remain unbounded.
+See [the VesSAP derivation record](VESSAP_MAJOR_VESSELS.md).
+
+The P60_606 diameter-≥30 µm derivative remains archived evidence, not a primary vessel layer. Its AP
 and DV orientation evidence passed, but the source is a hemisphere specimen and the exact graph
 has no persisted biological hemisphere/laterality binding. Whole-brain coverage and ML polarity
 are unqualified; no mirroring is permitted. The digest-bound canonical rejection report is
@@ -82,11 +91,13 @@ read-only; an audit mutation occurs only after the native atomic write is confir
 ## Failure boundaries
 
 Atlas identity mismatch, failed calibration QC, unknown coordinate frames, source/asset digest
-mismatch, a missing or changed qualification report, malformed geometry, stale project or plan
-hashes, and missing user acknowledgements fail closed. The app does not substitute another atlas,
-invent bregma, extrude a 2D density field into vessels, infer hemisphere, mirror P60_606, or treat
-the archived graph as a subject measurement.
+mismatch, a missing or changed manifest/qualification report, malformed geometry, stale project
+or plan hashes, and missing user acknowledgements fail closed. The app does not substitute another
+atlas, invent bregma, extrude a 2D density field into vessels, infer hemisphere, mirror P60_606,
+or treat either fixed reference as a subject measurement.
 
 See [ADR-004](ADR-004-swiftui-hybrid-shell.md),
 [ADR-005](ADR-005-independent-slice-viewer.md), and
+[the Pinpoint interoperability decision](PINPOINT_INTEGRATION.md),
+[the VesSAP derivation record](VESSAP_MAJOR_VESSELS.md), and
 [the LAMBADA derivation record](LAMBADA_MAJOR_VESSELS.md).

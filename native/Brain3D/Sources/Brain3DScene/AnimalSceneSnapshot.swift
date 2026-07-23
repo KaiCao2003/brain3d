@@ -5,6 +5,7 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
     public let projectId: String
     public let projectRevision: Int
     public let meshResult: AtlasMeshResult
+    public let highlightedRegionMesh: AtlasMeshResult?
     public let transform: AtlasSceneTransform
     public let selectedProbePlan: ProbePlanDetail?
     public let majorVessels: MajorVesselGeometryResult?
@@ -15,6 +16,7 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
         projectRevision: Int,
         rendererAnchor: AtlasPhysicalPoint,
         meshResult: AtlasMeshResult,
+        highlightedRegionMesh: AtlasMeshResult? = nil,
         selectedProbePlan: ProbePlanDetail?,
         majorVessels: MajorVesselGeometryResult? = nil,
         selectedVesselConflict: MajorVesselConflict? = nil
@@ -28,6 +30,18 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
             )
         }
         let bounds = meshResult.sourceCoordinateFrame.bounds
+        if let highlightedRegionMesh {
+            guard highlightedRegionMesh.target == .region,
+                  highlightedRegionMesh.region != nil,
+                  highlightedRegionMesh.atlas == meshResult.atlas,
+                  highlightedRegionMesh.sourceCoordinateFrame
+                    == meshResult.sourceCoordinateFrame
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "A highlighted region mesh must belong to the current 3D atlas."
+                )
+            }
+        }
         let anchorValues = [
             rendererAnchor.apMicrometres,
             rendererAnchor.dvMicrometres,
@@ -90,6 +104,7 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
         self.projectId = projectId
         self.projectRevision = projectRevision
         self.meshResult = meshResult
+        self.highlightedRegionMesh = highlightedRegionMesh
         transform = try AtlasSceneTransform(anchor: rendererAnchor)
         self.selectedProbePlan = selectedProbePlan
         self.majorVessels = majorVessels
@@ -101,6 +116,7 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
             projectId,
             String(projectRevision),
             meshResult.mesh.sha256,
+            highlightedRegionMesh?.mesh.sha256 ?? "no-highlighted-region",
             selectedProbePlan?.inputSha256 ?? "no-probe",
             majorVessels?.provenance.derivedAssetSha256 ?? "no-vessels",
             selectedVesselConflict.map(Self.conflictIdentity) ?? "no-vessel-conflict",

@@ -18,7 +18,10 @@ struct MajorVesselProtocolTests {
         #expect(result.graph.runOffsets.first == 0)
         #expect(result.graph.runOffsets.last == MajorVesselContract.expectedPointCount)
         #expect(result.provenance.derivedAssetSha256 == MajorVesselContract.derivedAssetSHA256)
-        #expect(result.provenance.registrationTransformId == nil)
+        #expect(
+            result.provenance.registrationTransformId
+                == MajorVesselContract.registrationTransformId
+        )
         #expect(result.provenance.registrationUncertaintyBoundMicrometres == nil)
         #expect(result.provenance.tissueDistortionUncertaintyBoundMicrometres == nil)
         #expect(result.provenance.uncertaintyBoundsReviewed == false)
@@ -142,10 +145,10 @@ struct MajorVesselProtocolTests {
         }
         let radii = [Float](repeating: 15.25, count: pointCount)
         var offsets = [Int64](repeating: 0, count: runCount + 1)
-        let longerRunCount = pointCount - runCount * 6
+        let longerRunCount = pointCount - runCount * 2
         var cursor = 0
         for run in 0 ..< runCount {
-            cursor += run < longerRunCount ? 7 : 6
+            cursor += run < longerRunCount ? 3 : 2
             offsets[run + 1] = Int64(cursor)
         }
         let edges = (0 ..< runCount).map(Int32.init)
@@ -163,7 +166,7 @@ struct MajorVesselProtocolTests {
             "provenance": provenanceObject,
             "limitations": [
                 "Single cleared reference; not subject-specific anatomy.",
-                "Pial and choroidal vessels are excluded.",
+                "Pial and choroidal coverage is not separately classified.",
             ],
             "atlas": atlasObject,
         ]
@@ -194,14 +197,14 @@ struct MajorVesselProtocolTests {
         [
             "sourceId": MajorVesselContract.sourceId,
             "sourceKind": "reference-individual-vessel-graph",
-            "datasetTitle": "Vascular graphs of the developing post-natal mouse brain",
-            "authors": ["Nicolas Renier", "Elisa de Launoit", "Sophie Skriabine"],
+            "datasetTitle": "Machine learning analysis of whole mouse brain vasculature",
+            "authors": ["Mihail I. Todorov", "Johannes C. Paetzold", "Ali Ertürk"],
             "specimenId": MajorVesselContract.specimenId,
             "sourceDoi": MajorVesselContract.sourceDoi,
             "sourceRecordUrl": MajorVesselContract.sourceRecordURL,
             "sourcePaperDoi": MajorVesselContract.sourcePaperDoi,
-            "sourceVersion": "P60_606 / 606_graph_2024-12-03.gt",
-            "sourceLicense": "CC BY 4.0",
+            "sourceVersion": "VesSAP public repository release 2021.10.01",
+            "sourceLicense": "CC BY-NC 4.0",
             "sourceArchiveDigest": MajorVesselContract.sourceArchiveDigest,
             "derivedAssetSha256": MajorVesselContract.derivedAssetSHA256,
             "extractionAlgorithmVersion": MajorVesselContract.extractionAlgorithmVersion,
@@ -213,10 +216,10 @@ struct MajorVesselProtocolTests {
             "atlasScaleApplied": true,
             "geometrySourceAudited": true,
             "subjectSpecific": false,
-            "pialVesselsExcluded": true,
-            "choroidalVesselsExcluded": true,
+            "pialVesselsExcluded": false,
+            "choroidalVesselsExcluded": false,
             "arteryVeinClassificationAvailable": false,
-            "registrationTransformId": NSNull(),
+            "registrationTransformId": MajorVesselContract.registrationTransformId,
             "registrationUncertaintyBoundMicrometres": NSNull(),
             "tissueDistortionUncertaintyBoundMicrometres": NSNull(),
             "uncertaintyBoundsReviewed": false,

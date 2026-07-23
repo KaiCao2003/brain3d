@@ -82,6 +82,60 @@ enum ThreeDimensionalLoadPhase: Equatable {
     }
 }
 
+enum ProjectStatusPresentation {
+    static func text(
+        title: String,
+        subjectId: String?,
+        hasUnsavedChanges: Bool
+    ) -> String {
+        let normalizedSubjectId = subjectId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let subject = normalizedSubjectId.flatMap { $0.isEmpty ? nil : $0 }
+            ?? "unavailable"
+        let saveState = hasUnsavedChanges ? "unsaved changes" : "saved"
+        return "\(title) · Subject ID \(subject) · animal-only · \(saveState)"
+    }
+}
+
+enum ProbePlanningAvailabilityPolicy {
+    static func blockingReason(
+        connectionReady: Bool,
+        hasProject: Bool,
+        hasActiveCalibration: Bool,
+        calibrationPermitsPlanning: Bool,
+        serviceSupportsProbePlanning: Bool,
+        projectOperationInProgress: Bool,
+        calibrationOperationInProgress: Bool,
+        probeOperationInProgress: Bool
+    ) -> String? {
+        guard connectionReady else {
+            return "Connect to the planning service."
+        }
+        guard hasProject else {
+            return "Open or create an animal plan."
+        }
+        guard hasActiveCalibration else {
+            return "Activate a passing subject calibration."
+        }
+        guard calibrationPermitsPlanning else {
+            return "The active subject calibration does not pass planning checks."
+        }
+        guard serviceSupportsProbePlanning else {
+            return "The connected service does not support calibrated probe planning."
+        }
+        if projectOperationInProgress {
+            return "Wait for the project operation to finish."
+        }
+        if calibrationOperationInProgress {
+            return "Wait for the calibration operation to finish."
+        }
+        if probeOperationInProgress {
+            return "Wait for the probe operation to finish."
+        }
+        return nil
+    }
+}
+
 struct VerifiedAtlasSliceFrame: Equatable {
     let orientation: AtlasSliceOrientation
     let index: Int
@@ -221,8 +275,15 @@ final class PlannerViewModel: ObservableObject {
     )
     @Published private(set) var threeDimensionalSnapshot: AnimalSceneSnapshot?
     @Published private(set) var threeDimensionalRegionHit: AtlasRayPickHit?
+    @Published private(set) var highlightedAtlasRegion: AtlasRegionSummary?
+    @Published private(set) var atlasRegionHierarchy: AtlasRegionHierarchy?
+    @Published private(set) var atlasRegionHierarchyError: String?
     @Published private(set) var threeDimensionalPickInProgress = false
     @Published private(set) var threeDimensionalPickError: String?
+    @Published var atlasRegionSearchText = ""
+    @Published private(set) var atlasRegionSearchResults: [AtlasRegionSearchHit] = []
+    @Published private(set) var atlasRegionSearchInProgress = false
+    @Published private(set) var atlasRegionSearchError: String?
     @Published private(set) var majorVesselGeometry: MajorVesselGeometryResult?
     @Published private(set) var majorVesselDorsalProjection: MajorVesselSliceOverlay?
     @Published private(set) var majorVesselLoadInProgress = false
@@ -284,7 +345,10 @@ final class PlannerViewModel: ObservableObject {
     private var threeDimensionalGeneration = 0
     private var threeDimensionalPickGeneration = 0
     private var threeDimensionalPickWorker: Task<Void, Never>?
+    private var highlightedRegionGeneration = 0
+    private var atlasRegionSearchGeneration = 0
     private var cachedRootMesh: AtlasMeshResult?
+    private var cachedHighlightedRegionMesh: AtlasMeshResult?
     private var majorVesselSliceOverlayCache: [String: MajorVesselSliceOverlay] = [:]
     private var majorVesselSliceSpatialIndex: MajorVesselSliceSpatialIndex?
 
@@ -310,8 +374,11 @@ final class PlannerViewModel: ObservableObject {
 
     var projectStatus: String {
         if let project = backendState?.project {
-            let suffix = hasUnsavedChanges ? "unsaved changes" : "saved"
-            return "\(project.title) — acknowledged animal-only · \(suffix)"
+            return ProjectStatusPresentation.text(
+                title: project.title,
+                subjectId: project.subjectId,
+                hasUnsavedChanges: hasUnsavedChanges
+            )
         }
         if atlasLoadPhase == .ready {
             return "Awaiting explicit animal-only acknowledgement"
@@ -475,15 +542,20 @@ final class PlannerViewModel: ObservableObject {
     }
 
     var canManageProbePlanning: Bool {
-        connection.isReady
-            && backendState?.project != nil
-            && activeCalibration?.permitsPlanning == true
-            && helloResult?.capabilities.probeCatalog == true
-            && helloResult?.capabilities.calibratedProbePlanning == true
-            && helloResult?.capabilities.exactProbeRegionTraversal == true
-            && !projectOperationInProgress
-            && !calibrationOperationInProgress
-            && !probeOperationInProgress
+        probePlanningUnavailableReason == nil
+    }
+
+    var probePlanningUnavailableReason: String? {
+        ProbePlanningAvailabilityPolicy.blockingReason(
+            connectionReady: connection.isReady,
+            hasProject: backendState?.project != nil,
+            hasActiveCalibration: activeCalibration != nil,
+            calibrationPermitsPlanning: activeCalibration?.permitsPlanning == true,
+            serviceSupportsProbePlanning: supportsProbePlanning,
+            projectOperationInProgress: projectOperationInProgress,
+            calibrationOperationInProgress: calibrationOperationInProgress,
+            probeOperationInProgress: probeOperationInProgress
+        )
     }
 
     var canAnalyzeSelectedProbeRegions: Bool {
@@ -539,6 +611,7 @@ final class PlannerViewModel: ObservableObject {
             project.projectId,
             String(project.revision),
             atlasProvenance?.metadataSha256 ?? "no-atlas",
+            cachedHighlightedRegionMesh?.mesh.sha256 ?? "no-highlighted-region",
             selectedProbePlan?.inputSha256 ?? "no-probe",
             majorVesselGeometry?.provenance.derivedAssetSha256 ?? "no-vessels",
             selectedMajorVesselConflict.map {
@@ -555,7 +628,8 @@ final class PlannerViewModel: ObservableObject {
     var majorVesselStatus: String {
         if majorVesselLoadInProgress { return "Loading reference major vessels…" }
         if let geometry = majorVesselGeometry {
-            return "P60 reference · \(geometry.segmentCount.formatted()) segments · diameter ≥30 µm"
+            return "VesSAP \(geometry.provenance.specimenId) · "
+                + "\(geometry.segmentCount.formatted()) segments · diameter ≥30 µm"
         }
         if majorVesselLoadError != nil { return "Unavailable" }
         return "Reference major vessels not loaded"
@@ -566,13 +640,14 @@ final class PlannerViewModel: ObservableObject {
             return "Single-specimen reference; no geometry is being displayed."
         }
         let source = geometry.provenance
-        let coverage = source.pialVesselsExcluded
-            ? "Single cleared \(source.specimenId) reference; not subject-specific; pial and choroidal vessels are excluded."
-            : "Single cleared \(source.specimenId) reference; not subject-specific."
+        let coverage =
+            "Single cleared C57BL/6J \(source.specimenId) reference; not subject-specific; "
+                + "capillaries under the 30 µm diameter threshold are omitted."
         guard !source.uncertaintyBoundsReviewed else { return coverage }
         return coverage
-            + " Registration and tissue-distortion uncertainty bounds are not published; "
-            + "absence of conflict cannot be classified."
+            + " Display only: registration and tissue-distortion uncertainty bounds are not "
+            + "published, so clearance, vessel absence, and trajectory suitability cannot "
+            + "be classified."
     }
 
     func projection(for targetId: String) -> CalibratedTargetProjectionResult? {
@@ -628,6 +703,23 @@ final class PlannerViewModel: ObservableObject {
         dorsalSurface = nil
         dorsalSurfacePNG = nil
         clearDorsalRegionPick()
+        threeDimensionalGeneration &+= 1
+        threeDimensionalPickGeneration &+= 1
+        threeDimensionalPickWorker?.cancel()
+        threeDimensionalPickWorker = nil
+        highlightedRegionGeneration &+= 1
+        atlasRegionSearchGeneration &+= 1
+        threeDimensionalSnapshot = nil
+        threeDimensionalRegionHit = nil
+        highlightedAtlasRegion = nil
+        atlasRegionHierarchy = nil
+        atlasRegionHierarchyError = nil
+        cachedRootMesh = nil
+        cachedHighlightedRegionMesh = nil
+        atlasRegionSearchText = ""
+        atlasRegionSearchResults = []
+        atlasRegionSearchInProgress = false
+        atlasRegionSearchError = nil
         majorVesselGeometry = nil
         majorVesselDorsalProjection = nil
         majorVesselSliceSpatialIndex = nil
@@ -1278,13 +1370,22 @@ final class PlannerViewModel: ObservableObject {
                 projectRevision: project.revision,
                 planId: planId
             )
-            let catalogModel = try await fetchProbeCatalogModel(
-                using: bridgeClient,
-                modelId: result.plan.modelId,
-                modelVersion: result.plan.modelVersion,
-                matching: result.plan
-            )
-            selectedProbeModel = catalogModel
+            if probeCatalog.contains(where: {
+                $0.modelId == result.plan.modelId
+                    && $0.modelVersion == result.plan.modelVersion
+            }) {
+                selectedProbeModel = try await fetchProbeCatalogModel(
+                    using: bridgeClient,
+                    modelId: result.plan.modelId,
+                    modelVersion: result.plan.modelVersion,
+                    matching: result.plan
+                )
+            } else {
+                // Archived plans retain their checksum-verified embedded geometry
+                // for read-only display, but never become a selectable production
+                // model or pass the create/update readiness boundary.
+                selectedProbeModel = nil
+            }
             selectedProbePlanId = planId
             selectedProbePlan = result.plan
             selectedProbeRegionAnalysis = result.plan.hasCurrentPlanningGeometry
@@ -1355,16 +1456,29 @@ final class PlannerViewModel: ObservableObject {
                 entryDVMillimetres: numbers.entryDV,
                 azimuthDegrees: numbers.azimuth,
                 elevationDegrees: numbers.elevation,
-                insertionDepthMicrometres: numbers.depth,
+                insertionDepthMicrometres: numbers.depthMicrometres,
                 axialRotationDegrees: numbers.rotation,
                 customGeometryAcknowledged: customGeometryAcknowledged
             )
             try ProbePlanningValidator.validateCreate(request)
+            guard let catalogModel = selectedProbeModel,
+                  catalogModel.modelId == request.modelId,
+                  catalogModel.modelVersion == request.modelVersion,
+                  catalogModel.shanks != nil
+            else {
+                throw ProbePlanningValidationError.invalid(
+                    "Load the exact detailed probe model before creating its animal plan."
+                )
+            }
             let result: ProbePlanMutationResult = try await bridgeClient.request(
                 method: "probe.plan.create",
                 params: request
             )
-            try ProbePlanningValidator.validateCreatedMutation(result, request: request)
+            try ProbePlanningValidator.validateCreatedMutation(
+                result,
+                request: request,
+                catalogModel: catalogModel
+            )
             selectedProbePlanId = result.plan.planId
             selectedProbePlan = result.plan
             selectedProbeRegionAnalysis = nil
@@ -1434,16 +1548,29 @@ final class PlannerViewModel: ObservableObject {
                 entryDVMillimetres: numbers.entryDV,
                 azimuthDegrees: numbers.azimuth,
                 elevationDegrees: numbers.elevation,
-                insertionDepthMicrometres: numbers.depth,
+                insertionDepthMicrometres: numbers.depthMicrometres,
                 axialRotationDegrees: numbers.rotation,
                 customGeometryAcknowledged: customGeometryAcknowledged
             )
             try ProbePlanningValidator.validateUpdate(request)
+            guard let catalogModel = selectedProbeModel,
+                  catalogModel.modelId == request.modelId,
+                  catalogModel.modelVersion == request.modelVersion,
+                  catalogModel.shanks != nil
+            else {
+                throw ProbePlanningValidationError.invalid(
+                    "Load the exact detailed probe model before updating its animal plan."
+                )
+            }
             let result: ProbePlanMutationResult = try await bridgeClient.request(
                 method: "probe.plan.update",
                 params: request
             )
-            try ProbePlanningValidator.validateUpdatedMutation(result, request: request)
+            try ProbePlanningValidator.validateUpdatedMutation(
+                result,
+                request: request,
+                catalogModel: catalogModel
+            )
             selectedProbePlanId = result.plan.planId
             selectedProbePlan = result.plan
             selectedProbeRegionAnalysis = nil
@@ -2063,6 +2190,11 @@ final class PlannerViewModel: ObservableObject {
     }
 
     func prepareThreeDimensionalScene() async {
+        // `.task` is installed while SwiftUI is updating the representable.
+        // Defer every @Published mutation to the next executor turn so scene
+        // preparation never publishes from inside that view update.
+        await Task.yield()
+        guard !Task.isCancelled else { return }
         threeDimensionalGeneration += 1
         let generation = threeDimensionalGeneration
         threeDimensionalPickGeneration += 1
@@ -2113,18 +2245,29 @@ final class PlannerViewModel: ObservableObject {
                   backendState?.project?.revision == project.revision
             else { return }
             try validateThreeDimensionalAtlas(meshResult)
+            cachedRootMesh = meshResult
+            if let highlightedAtlasRegion,
+               cachedHighlightedRegionMesh?.region != highlightedAtlasRegion
+            {
+                await selectAtlasRegionForDisplay(
+                    highlightedAtlasRegion,
+                    clearRayHit: false
+                )
+                try Task.checkCancellation()
+                guard generation == threeDimensionalGeneration else { return }
+            }
             let snapshot = try AnimalSceneSnapshot(
                 projectId: project.projectId,
                 projectRevision: project.revision,
                 rendererAnchor: rendererAnchor,
                 meshResult: meshResult,
+                highlightedRegionMesh: cachedHighlightedRegionMesh,
                 selectedProbePlan: selectedProbePlan.flatMap {
                     $0.hasCurrentPlanningGeometry ? $0 : nil
                 },
                 majorVessels: majorVesselGeometry,
                 selectedVesselConflict: selectedMajorVesselConflict
             )
-            cachedRootMesh = meshResult
             threeDimensionalSnapshot = snapshot
             threeDimensionalPhase = .loadingGeometry
         } catch is CancellationError {
@@ -2183,6 +2326,10 @@ final class PlannerViewModel: ObservableObject {
                 else { return }
                 self.threeDimensionalRegionHit = result.hit
                 self.threeDimensionalPickError = nil
+                await self.selectAtlasRegionForDisplay(
+                    result.hit?.region,
+                    clearRayHit: false
+                )
             } catch is CancellationError {
                 return
             } catch {
@@ -2193,13 +2340,233 @@ final class PlannerViewModel: ObservableObject {
         }
     }
 
-    func clearThreeDimensionalRegionSelection() {
+    func clearAtlasRegionSelection() {
         threeDimensionalPickGeneration += 1
         threeDimensionalPickWorker?.cancel()
         threeDimensionalPickWorker = nil
         threeDimensionalPickInProgress = false
         threeDimensionalPickError = nil
         threeDimensionalRegionHit = nil
+        viewerRegionSelection = nil
+        clearDorsalRegionPick()
+        clearHighlightedAtlasRegion()
+    }
+
+    func clearThreeDimensionalRegionSelection() {
+        clearAtlasRegionSelection()
+    }
+
+    func searchAtlasRegions(query: String) async {
+        atlasRegionSearchGeneration &+= 1
+        let generation = atlasRegionSearchGeneration
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            atlasRegionSearchResults = []
+            atlasRegionSearchInProgress = false
+            atlasRegionSearchError = nil
+            return
+        }
+        guard helloResult?.capabilities.atlasRegionSearch == true,
+              let bridgeClient,
+              let atlasProvenance
+        else {
+            atlasRegionSearchResults = []
+            atlasRegionSearchInProgress = false
+            atlasRegionSearchError =
+                "The connected service does not expose the complete Allen region search."
+            return
+        }
+
+        do {
+            try await Task.sleep(for: .milliseconds(160))
+            try Task.checkCancellation()
+            guard generation == atlasRegionSearchGeneration,
+                  normalized
+                    == atlasRegionSearchText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return }
+            atlasRegionSearchInProgress = true
+            atlasRegionSearchError = nil
+            let result: AtlasRegionSearchResult = try await bridgeClient.request(
+                method: "atlas.search",
+                params: try AtlasRegionSearchParameters(query: normalized)
+            )
+            try Task.checkCancellation()
+            guard generation == atlasRegionSearchGeneration,
+                  normalized
+                    == atlasRegionSearchText
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+            else { return }
+            guard result.query == normalized,
+                  result.atlas.identifier == atlasProvenance.identifier,
+                  result.atlas.version == atlasProvenance.version,
+                  result.atlas.metadataSha256 == atlasProvenance.metadataSha256
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "Atlas region search does not match the opened reviewed atlas."
+                )
+            }
+            guard let atlasRegionHierarchy,
+                  result.results.allSatisfy({
+                      atlasRegionHierarchy.region(structureId: $0.region.structureId)
+                          == $0.region
+                  })
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "Atlas region search returned an identity outside the complete ontology."
+                )
+            }
+            atlasRegionSearchResults = result.results
+            atlasRegionSearchInProgress = false
+            atlasRegionSearchError = nil
+        } catch is CancellationError {
+            if generation == atlasRegionSearchGeneration {
+                atlasRegionSearchInProgress = false
+            }
+        } catch {
+            guard generation == atlasRegionSearchGeneration else { return }
+            atlasRegionSearchResults = []
+            atlasRegionSearchInProgress = false
+            atlasRegionSearchError = error.localizedDescription
+        }
+    }
+
+    func selectAtlasRegion(_ region: AtlasRegionSummary) async {
+        atlasRegionSearchGeneration &+= 1
+        atlasRegionSearchText = ""
+        atlasRegionSearchResults = []
+        atlasRegionSearchInProgress = false
+        atlasRegionSearchError = nil
+        threeDimensionalRegionHit = nil
+        await selectAtlasRegionForDisplay(region, clearRayHit: true)
+    }
+
+    private func selectAtlasRegionForDisplay(
+        _ region: AtlasRegionSummary?,
+        clearRayHit: Bool
+    ) async {
+        highlightedRegionGeneration &+= 1
+        let generation = highlightedRegionGeneration
+        if clearRayHit {
+            threeDimensionalPickGeneration &+= 1
+            threeDimensionalPickWorker?.cancel()
+            threeDimensionalPickWorker = nil
+            threeDimensionalPickInProgress = false
+            threeDimensionalRegionHit = nil
+        }
+        guard let region else {
+            clearHighlightedAtlasRegion()
+            return
+        }
+        guard atlasRegionHierarchy?.region(structureId: region.structureId) == region else {
+            threeDimensionalPickError =
+                "The selected region is not part of the verified complete Allen ontology."
+            return
+        }
+        highlightedAtlasRegion = region
+
+        if let cachedHighlightedRegionMesh,
+           cachedHighlightedRegionMesh.region == region,
+           cachedHighlightedRegionMesh.atlas.metadataSha256
+            == atlasProvenance?.metadataSha256
+        {
+            do {
+                try rebuildThreeDimensionalSnapshot()
+                threeDimensionalPickError = nil
+            } catch {
+                threeDimensionalPickError = error.localizedDescription
+            }
+            return
+        }
+
+        guard helloResult?.capabilities.atlasMeshDescriptor == true,
+              let bridgeClient,
+              let rootMesh = cachedRootMesh ?? threeDimensionalSnapshot?.meshResult
+        else {
+            // The region identity still remains useful in 2D. Its 3D mesh will
+            // load when the full scene is prepared.
+            return
+        }
+        do {
+            let meshResult: AtlasMeshResult = try await bridgeClient.request(
+                method: "atlas.mesh",
+                params: try AtlasMeshParameters(
+                    target: .region,
+                    structureId: region.structureId
+                )
+            )
+            try Task.checkCancellation()
+            guard generation == highlightedRegionGeneration,
+                  highlightedAtlasRegion == region
+            else { return }
+            try validateHighlightedRegionMesh(
+                meshResult,
+                expectedRegion: region,
+                rootMesh: rootMesh
+            )
+            cachedHighlightedRegionMesh = meshResult
+            try rebuildThreeDimensionalSnapshot()
+            threeDimensionalPickError = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == highlightedRegionGeneration else { return }
+            cachedHighlightedRegionMesh = nil
+            threeDimensionalPickError = error.localizedDescription
+            do {
+                try rebuildThreeDimensionalSnapshot()
+            } catch {
+                threeDimensionalPickError = error.localizedDescription
+            }
+        }
+    }
+
+    private func clearHighlightedAtlasRegion() {
+        highlightedRegionGeneration &+= 1
+        highlightedAtlasRegion = nil
+        cachedHighlightedRegionMesh = nil
+        do {
+            try rebuildThreeDimensionalSnapshot()
+        } catch {
+            threeDimensionalPickError = error.localizedDescription
+        }
+    }
+
+    private func rebuildThreeDimensionalSnapshot() throws {
+        guard let project = backendState?.project,
+              let rendererAnchor = project.rendererAnchor,
+              let meshResult = cachedRootMesh ?? threeDimensionalSnapshot?.meshResult
+        else { return }
+        try validateThreeDimensionalAtlas(meshResult)
+        threeDimensionalSnapshot = try AnimalSceneSnapshot(
+            projectId: project.projectId,
+            projectRevision: project.revision,
+            rendererAnchor: rendererAnchor,
+            meshResult: meshResult,
+            highlightedRegionMesh: cachedHighlightedRegionMesh,
+            selectedProbePlan: selectedProbePlan.flatMap {
+                $0.hasCurrentPlanningGeometry ? $0 : nil
+            },
+            majorVessels: majorVesselGeometry,
+            selectedVesselConflict: selectedMajorVesselConflict
+        )
+        threeDimensionalPhase = .loadingGeometry
+    }
+
+    private func validateHighlightedRegionMesh(
+        _ meshResult: AtlasMeshResult,
+        expectedRegion: AtlasRegionSummary,
+        rootMesh: AtlasMeshResult
+    ) throws {
+        guard meshResult.target == .region,
+              meshResult.region == expectedRegion,
+              meshResult.atlas == rootMesh.atlas,
+              meshResult.sourceCoordinateFrame == rootMesh.sourceCoordinateFrame
+        else {
+            throw AtlasSceneContractError.invalid(
+                "The selected Allen region mesh does not match the current whole-brain atlas."
+            )
+        }
     }
 
     func pickDorsalRegion(column: Int, row: Int) {
@@ -2243,6 +2610,12 @@ final class PlannerViewModel: ObservableObject {
                 else { return }
                 self.dorsalRegionPick = result
                 self.dorsalPickError = nil
+                Task { @MainActor [weak self] in
+                    await self?.selectAtlasRegionForDisplay(
+                        result.region,
+                        clearRayHit: true
+                    )
+                }
             } catch is CancellationError {
                 return
             } catch {
@@ -2292,7 +2665,7 @@ final class PlannerViewModel: ObservableObject {
         entryDV: Double?,
         azimuth: Double?,
         elevation: Double?,
-        depth: Double?,
+        depthMicrometres: Double?,
         rotation: Double
     ) {
         let entry = placementMode.requiresEntryCoordinates
@@ -2306,7 +2679,12 @@ final class PlannerViewModel: ObservableObject {
             ? (
                 try CalibrationNumberInput.parse(azimuthText, field: "Azimuth"),
                 try CalibrationNumberInput.parse(elevationText, field: "Elevation"),
-                try CalibrationNumberInput.parse(insertionDepthText, field: "Insertion depth")
+                ProbeInputUnits.micrometres(
+                    fromMillimetres: try CalibrationNumberInput.parse(
+                        insertionDepthText,
+                        field: "Insertion depth (mm)"
+                    )
+                )
             )
             : nil
         return (
@@ -2460,6 +2838,13 @@ final class PlannerViewModel: ObservableObject {
                     )
                     guard isLatest else { continue }
                     viewerSnapshot = result.snapshot
+                    let selectedRegion = result.snapshot.selection?.region
+                    Task { @MainActor [weak self] in
+                        await self?.selectAtlasRegionForDisplay(
+                            selectedRegion,
+                            clearRayHit: true
+                        )
+                    }
                 }
                 pendingViewerSlice = nil
                 viewerPhase = .ready
@@ -2717,8 +3102,8 @@ final class PlannerViewModel: ObservableObject {
             majorVesselSliceSpatialIndex = nil
             majorVesselSliceOverlayCache = [:]
             majorVesselLoadError = (
-                "Reference vessels are disabled because the bundled graph's ML laterality "
-                    + "and whole-brain coverage are not qualified."
+                "The connected planning service does not provide the audited VesSAP "
+                    + "major-vessel display capability."
             )
             return
         }
@@ -3095,12 +3480,21 @@ final class PlannerViewModel: ObservableObject {
             projectRevision: project.revision,
             planId: chosenId
         )
-        selectedProbeModel = try await fetchProbeCatalogModel(
-            using: bridgeClient,
-            modelId: detail.plan.modelId,
-            modelVersion: detail.plan.modelVersion,
-            matching: detail.plan
-        )
+        if probeCatalog.contains(where: {
+            $0.modelId == detail.plan.modelId
+                && $0.modelVersion == detail.plan.modelVersion
+        }) {
+            selectedProbeModel = try await fetchProbeCatalogModel(
+                using: bridgeClient,
+                modelId: detail.plan.modelId,
+                modelVersion: detail.plan.modelVersion,
+                matching: detail.plan
+            )
+        } else {
+            // Opening an archived project may display its persisted exact plan,
+            // but archived hardware never enters the supported catalog picker.
+            selectedProbeModel = nil
+        }
         selectedProbePlanId = chosenId
         selectedProbePlan = detail.plan
         selectedProbeRegionAnalysis = detail.plan.hasCurrentPlanningGeometry
@@ -3229,6 +3623,8 @@ final class PlannerViewModel: ObservableObject {
     private func openAtlasAndLoadSlice(allowDownload: Bool) async {
         guard let bridgeClient, connection.isReady else { return }
         atlasLoadPhase = .opening
+        atlasRegionHierarchy = nil
+        atlasRegionHierarchyError = nil
         do {
             let opened: AtlasOpenResult = try await bridgeClient.request(
                 method: "atlas.open",
@@ -3236,6 +3632,10 @@ final class PlannerViewModel: ObservableObject {
             )
             try validate(atlas: opened.atlas)
             atlasProvenance = opened.atlas
+            try await loadCompleteAtlasRegionHierarchy(
+                using: bridgeClient,
+                atlas: opened.atlas
+            )
             await refreshState()
             guard connection.isReady else {
                 throw StateValidationFailure.animalOnlyContractMissing
@@ -3247,14 +3647,74 @@ final class PlannerViewModel: ObservableObject {
             if case let .remote(remote) = error, remote.code == "ATLAS_NOT_CACHED" {
                 atlasLoadPhase = .needsDownload
                 dorsalLoadPhase = .unavailable("The reviewed atlas is not cached")
+                atlasRegionHierarchy = nil
+                atlasRegionHierarchyError = nil
                 await refreshState()
                 return
             }
+            atlasRegionHierarchy = nil
+            atlasRegionHierarchyError = error.localizedDescription
             atlasLoadPhase = .failed(error.localizedDescription)
             dorsalLoadPhase = .unavailable("Atlas validation did not complete")
         } catch {
+            atlasRegionHierarchy = nil
+            atlasRegionHierarchyError = error.localizedDescription
             atlasLoadPhase = .failed(error.localizedDescription)
             dorsalLoadPhase = .unavailable("Atlas validation did not complete")
+        }
+    }
+
+    private func loadCompleteAtlasRegionHierarchy(
+        using bridgeClient: BridgeClient,
+        atlas: AtlasProvenance
+    ) async throws {
+        guard helloResult?.capabilities.atlasRegionRecords == true else {
+            throw AtlasSceneContractError.invalid(
+                "The connected service does not expose the complete Allen ontology."
+            )
+        }
+
+        var accumulator = AtlasRegionPageAccumulator()
+        while true {
+            try Task.checkCancellation()
+            let page: AtlasRegionsResult = try await bridgeClient.request(
+                method: "atlas.regions",
+                params: try AtlasRegionsParameters(offset: accumulator.nextOffset)
+            )
+            try validateAtlasRegionIdentity(page.atlas, against: atlas)
+            try accumulator.append(page)
+            if !page.hasMore { break }
+        }
+        atlasRegionHierarchy = try accumulator.finish()
+        atlasRegionHierarchyError = nil
+    }
+
+    private func validateAtlasRegionIdentity(
+        _ identity: ViewerAtlasIdentity,
+        against atlas: AtlasProvenance
+    ) throws {
+        guard identity.identifier == atlas.identifier,
+              identity.version == atlas.version,
+              identity.metadataSha256 == atlas.metadataSha256,
+              [
+                  identity.resolutionMicrometres.apMicrometres,
+                  identity.resolutionMicrometres.dvMicrometres,
+                  identity.resolutionMicrometres.mlMicrometres,
+              ] == atlas.resolutionMicrometres,
+              [
+                  identity.shapeVoxels.apVoxels,
+                  identity.shapeVoxels.dvVoxels,
+                  identity.shapeVoxels.mlVoxels,
+              ] == atlas.shapeVoxels,
+              identity.orientation == atlas.orientation,
+              identity.frameworkName == atlas.frameworkName,
+              identity.sourceAnnotation == atlas.sourceAnnotation,
+              identity.citation == atlas.citation,
+              identity.brainGlobeAtlasApiVersion == atlas.brainGlobeAtlasApiVersion
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas ontology pages do not match the opened reviewed atlas."
+            )
         }
     }
 

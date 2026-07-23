@@ -20,36 +20,196 @@ from mouse_brain_planner.probes.catalog import (
     NEUROPIXELS_1_0_PROBETABLE_SHA256,
     NEUROPIXELS_1_0_SPIKEGLX_GEOMETRY_SHA256,
     NEUROPIXELS_1_0_SPIKEGLX_METADATA_SHA256,
+    NEUROPIXELS_2_0_ELECTRODE_MAPPING_SHA256,
+    NEUROPIXELS_2_0_MODEL_VERSION,
+    NEUROPIXELS_2_0_QB_SPEC_SHA256,
+    NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
+    NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+    NEUROPIXELS_2_0_SPEC_SHA256,
+    NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
+    NEUROPIXELS_2_0_USER_MANUAL_ZIP_SHA256,
     PROBE_CATALOG_VERSION,
     get_probe_model,
+    get_supported_probe_model,
     list_probe_models,
 )
 
 
-def test_catalog_places_real_np1000_first_and_retains_generic_fixture() -> None:
+def test_public_catalog_contains_only_the_two_supported_np2_choices() -> None:
     models = list_probe_models()
 
-    assert PROBE_CATALOG_VERSION == "brain3d-probe-catalog-v2"
+    assert PROBE_CATALOG_VERSION == "brain3d-probe-catalog-v5"
     assert len(models) == 2
 
-    neuropixels, generic = models
-    assert neuropixels.model_id == NEUROPIXELS_1_0_MODEL_ID
-    assert neuropixels.model_version == NEUROPIXELS_1_0_MODEL_VERSION
-    assert (
-        neuropixels.verification.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING
-    )
-    assert neuropixels.manufacturer == "imec"
-    assert neuropixels.product_code == "PRB_1_4_0480_1"
-    assert not neuropixels.permits_verified_device_label
+    np2_single, np2_standard = models
+    assert np2_single.model_id == NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID
+    assert np2_single.product_code == "NP2003 / NP2004"
+    assert np2_standard.model_id == NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID
+    assert np2_standard.product_code == "NP2013 / NP2014"
+    assert "384 simultaneously configurable" in np2_standard.geometry_notes
+    assert {
+        NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
+        NEUROPIXELS_1_0_MODEL_ID,
+        GENERIC_TEST_MODEL_ID,
+    }.isdisjoint(model.model_id for model in models)
 
-    assert generic.model_id == GENERIC_TEST_MODEL_ID
-    assert generic.model_version == GENERIC_TEST_MODEL_VERSION
+
+def test_archived_models_remain_exactly_readable_but_are_not_listed() -> None:
+    np2_quad_base = get_probe_model(
+        NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
+        NEUROPIXELS_2_0_MODEL_VERSION,
+    )
+    assert np2_quad_base.product_code == "NP2020 / NP2021"
+    assert "1536 simultaneously configurable" in np2_quad_base.geometry_notes
+
+    np1 = get_probe_model(NEUROPIXELS_1_0_MODEL_ID, NEUROPIXELS_1_0_MODEL_VERSION)
+    assert np1.verification.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING
+    assert np1.product_code == "PRB_1_4_0480_1"
+
+    generic = get_probe_model(GENERIC_TEST_MODEL_ID, GENERIC_TEST_MODEL_VERSION)
     assert generic.verification.status is ProbeVerificationStatus.USER_DEFINED_UNVERIFIED
-    assert generic.manufacturer is None
     assert generic.product_code is None
-    assert generic.declared_shank_count == 1
     assert len(generic.shanks[0].sites) == 16
-    assert "not a Neuropixels" in generic.verification.review_notes
+
+
+@pytest.mark.parametrize(
+    ("model_id", "model_version"),
+    (
+        (
+            NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
+            NEUROPIXELS_2_0_MODEL_VERSION,
+        ),
+        (NEUROPIXELS_1_0_MODEL_ID, NEUROPIXELS_1_0_MODEL_VERSION),
+        (GENERIC_TEST_MODEL_ID, GENERIC_TEST_MODEL_VERSION),
+    ),
+)
+def test_archived_models_are_rejected_by_the_production_resolver(
+    model_id: str,
+    model_version: str,
+) -> None:
+    assert get_probe_model(model_id, model_version).model_id == model_id
+    with pytest.raises(KeyError, match="unsupported production probe model"):
+        get_supported_probe_model(model_id, model_version)
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    (
+        NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
+    ),
+)
+def test_supported_np2_models_resolve_through_the_production_boundary(
+    model_id: str,
+) -> None:
+    assert get_supported_probe_model(model_id, NEUROPIXELS_2_0_MODEL_VERSION).model_id == model_id
+
+
+@pytest.mark.parametrize(
+    ("model_id", "source_hashes"),
+    (
+        (
+            NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+            (
+                NEUROPIXELS_2_0_SPEC_SHA256,
+                NEUROPIXELS_2_0_USER_MANUAL_ZIP_SHA256,
+                NEUROPIXELS_2_0_ELECTRODE_MAPPING_SHA256,
+                NEUROPIXELS_1_0_PROBETABLE_SHA256,
+                NEUROPIXELS_1_0_SPIKEGLX_GEOMETRY_SHA256,
+            ),
+        ),
+        (
+            NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
+            (
+                NEUROPIXELS_2_0_SPEC_SHA256,
+                NEUROPIXELS_2_0_USER_MANUAL_ZIP_SHA256,
+                NEUROPIXELS_2_0_ELECTRODE_MAPPING_SHA256,
+                NEUROPIXELS_1_0_PROBETABLE_SHA256,
+                NEUROPIXELS_1_0_SPIKEGLX_GEOMETRY_SHA256,
+            ),
+        ),
+        (
+            NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
+            (
+                NEUROPIXELS_2_0_SPEC_SHA256,
+                NEUROPIXELS_2_0_USER_MANUAL_ZIP_SHA256,
+                NEUROPIXELS_2_0_ELECTRODE_MAPPING_SHA256,
+                NEUROPIXELS_1_0_PROBETABLE_SHA256,
+                NEUROPIXELS_1_0_SPIKEGLX_GEOMETRY_SHA256,
+                NEUROPIXELS_2_0_QB_SPEC_SHA256,
+            ),
+        ),
+    ),
+)
+def test_np2_provenance_is_pinned_and_review_status_is_honest(
+    model_id: str,
+    source_hashes: tuple[str, ...],
+) -> None:
+    model = get_probe_model(model_id, NEUROPIXELS_2_0_MODEL_VERSION)
+    verification = model.verification
+
+    assert verification.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING
+    assert verification.complete_geometry_transcribed
+    assert not verification.independent_transcription_review_completed
+    assert verification.transcribed_by == "Brain3D automated source transcription"
+    assert verification.independently_reviewed_by is None
+    assert "no independent human reviewer" in verification.review_notes
+    assert "explicit acknowledgement" in verification.review_notes
+    assert tuple(source.sha256 for source in verification.primary_sources) == source_hashes
+    assert all(
+        source.retrieved_on.isoformat() == "2026-07-23" for source in verification.primary_sources
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "shank_count"),
+    (
+        (NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID, 1),
+        (NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID, 4),
+        (NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID, 4),
+    ),
+)
+def test_np2_encodes_all_physical_site_centers_and_shank_offsets(
+    model_id: str,
+    shank_count: int,
+) -> None:
+    model = get_probe_model(model_id, NEUROPIXELS_2_0_MODEL_VERSION)
+
+    assert model.declared_shank_count == shank_count
+    assert model.expected_site_count == 1280 * shank_count
+    assert len(model.shanks) == shank_count
+    for shank_index, shank in enumerate(model.shanks):
+        assert shank.shank_id == f"shank-{shank_index}"
+        assert shank.length_um == 10_000
+        assert shank.width_um == 70
+        assert shank.thickness_um == 24
+        assert shank.tip_geometry is ProbeTipGeometry.CHISEL
+        assert shank.tip_length_um == 175
+        assert "206 micrometres" in shank.tip_geometry_notes
+        assert shank.center_lateral_um == 250 * shank_index
+        assert shank.center_normal_um == 0
+        assert len(shank.sites) == 1280
+
+        for electrode_id, site in enumerate(shank.sites):
+            row, column = divmod(electrode_id, 2)
+            assert site.site_id == (f"shank-{shank_index}-electrode-{electrode_id:04d}")
+            assert site.local.axial_from_tip_um == 206 + 15 * row
+            assert site.local.lateral_um == -8 + 32 * column
+            assert site.local.normal_um == 0
+            assert site.role is ProbeSiteRole.RECORDING
+            assert site.bank == f"virtual-bank-{electrode_id // 384}"
+
+        assert Counter(site.bank for site in shank.sites) == {
+            "virtual-bank-0": 384,
+            "virtual-bank-1": 384,
+            "virtual-bank-2": 384,
+            "virtual-bank-3": 128,
+        }
+        assert shank.sites[0].local.axial_from_tip_um == 206
+        assert shank.sites[0].local.lateral_um == -8
+        assert shank.sites[1].local.lateral_um == 24
+        assert shank.sites[-1].local.axial_from_tip_um == 9_791
+        assert shank.sites[-1].local.lateral_um == 24
 
 
 def test_np1000_provenance_is_immutable_and_review_status_is_honest() -> None:
@@ -133,6 +293,15 @@ def test_np1000_encodes_all_960_source_coordinates_and_reference_sites() -> None
 @pytest.mark.parametrize(
     ("model_id", "model_version"),
     (
+        (NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID, NEUROPIXELS_2_0_MODEL_VERSION),
+        (
+            NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
+            NEUROPIXELS_2_0_MODEL_VERSION,
+        ),
+        (
+            NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
+            NEUROPIXELS_2_0_MODEL_VERSION,
+        ),
         (NEUROPIXELS_1_0_MODEL_ID, NEUROPIXELS_1_0_MODEL_VERSION),
         (GENERIC_TEST_MODEL_ID, GENERIC_TEST_MODEL_VERSION),
     ),

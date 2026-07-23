@@ -189,14 +189,30 @@ least 30 µm). Those deterministic extraction facts do not qualify it as a displ
 
 AP and DV orientation evidence passed, but the source describes hemisphere specimens and the
 exact graph has no persisted biological hemisphere/laterality binding. Whole-brain coverage and
-ML polarity are unqualified, and the application does not mirror the source. Runtime reference
-metadata, geometry, and analysis requests return `VESSEL_GEOMETRY_UNAVAILABLE`; nothing is
-overlaid in slices, Dorsal, or 3D.
+ML polarity are unqualified, and the application does not mirror the source. The production
+reference endpoints never load this derivative. Nothing from it is overlaid in slices, Dorsal,
+or 3D.
 
 The source also omits pial and choroidal vessels, and the derivative omits smaller vessels. Full
 identity, extraction, coordinate qualification, checks, counts, and limitations are in
 [LAMBADA Major Vessels](docs/LAMBADA_MAJOR_VESSELS.md) and
 [Third-Party Software and Data](THIRD_PARTY.md).
+
+## VesSAP display-only major-vessel reference
+
+The current visible reference is a bundled derivative of the public VesSAP `BL6J-no1` 3 µm
+whole-brain skeleton/radius volumes. It retains nominal diameter ≥30 µm source centerlines,
+preserves true source adjacency, applies the authors' Euler plus B-spline Allen transform with
+the reviewed ML reflection, and reduces the paths on a 50 µm display grid.
+
+The adjacent manifest binds the exact source files, transform, atlas identity, extraction
+statistics, NPZ digest, and mandatory limitations. The backend serves metadata and geometry only
+after all checks pass; the same geometry is overlaid in all five modes. It is one fixed cleared
+C57BL/6J specimen, omits smaller vessels, and has no subject-registration or tissue-distortion
+error bound. `vessel.major.reference.analyze` therefore fails with
+`VESSEL_ANALYSIS_UNAVAILABLE` before accessing a project or geometry.
+
+See [VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md) for the exact data and transform record.
 
 ## No official CCF bregma
 

@@ -30,30 +30,124 @@ final class LoadedAtlasMesh: @unchecked Sendable {
 }
 
 public final class AtlasMeshLoader: @unchecked Sendable {
+    private struct CacheKey: Hashable {
+        let canonicalPath: String
+        let atlasRootCanonicalPath: String
+        let pathUnderAtlasRoot: String
+        let sha256: String
+        let byteSize: Int
+
+        init(_ descriptor: AtlasMeshDescriptor) {
+            canonicalPath = descriptor.canonicalPath
+            atlasRootCanonicalPath = descriptor.atlasRootCanonicalPath
+            pathUnderAtlasRoot = descriptor.pathUnderAtlasRoot
+            sha256 = descriptor.sha256
+            byteSize = descriptor.byteSize
+        }
+    }
+
+    private struct CacheEntry {
+        let mesh: LoadedAtlasMesh
+        let sourceByteSize: Int
+    }
+
+    // Model I/O can expand OBJ data substantially in memory. Bound both the
+    // retained source footprint and entry count; a mesh above the source-byte
+    // budget is still returned to the caller but is not retained for browsing.
+    private static let defaultMaximumCachedMeshCount = 8
+    private static let defaultMaximumCachedSourceBytes = 64 * 1024 * 1024
+
     private let queue = DispatchQueue(
         label: "org.openai.brain3d.atlas-mesh-loader",
         qos: .userInitiated
     )
-    private var cache: [String: LoadedAtlasMesh] = [:]
+    private let maximumCachedMeshCount: Int
+    private let maximumCachedSourceBytes: Int
+    private var cache: [CacheKey: CacheEntry] = [:]
+    private var leastToMostRecentlyUsed: [CacheKey] = []
+    private var cachedSourceBytes = 0
 
-    public init() {}
+    public convenience init() {
+        self.init(
+            maximumCachedMeshCount: Self.defaultMaximumCachedMeshCount,
+            maximumCachedSourceBytes: Self.defaultMaximumCachedSourceBytes
+        )
+    }
+
+    init(
+        maximumCachedMeshCount: Int,
+        maximumCachedSourceBytes: Int
+    ) {
+        precondition(maximumCachedMeshCount >= 0)
+        precondition(maximumCachedSourceBytes >= 0)
+        self.maximumCachedMeshCount = maximumCachedMeshCount
+        self.maximumCachedSourceBytes = maximumCachedSourceBytes
+    }
 
     func load(_ descriptor: AtlasMeshDescriptor) async throws -> LoadedAtlasMesh {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [self] in
                 do {
-                    if let cached = cache[descriptor.sha256] {
-                        continuation.resume(returning: cached)
+                    let key = CacheKey(descriptor)
+                    if let cached = cache[key] {
+                        markMostRecentlyUsed(key)
+                        continuation.resume(returning: cached.mesh)
                         return
                     }
                     let loaded = try loadSynchronously(descriptor)
-                    cache[descriptor.sha256] = loaded
+                    insertIntoCache(
+                        loaded,
+                        key: key,
+                        sourceByteSize: descriptor.byteSize
+                    )
                     continuation.resume(returning: loaded)
                 } catch {
                     continuation.resume(throwing: error)
                 }
             }
         }
+    }
+
+    private func insertIntoCache(
+        _ mesh: LoadedAtlasMesh,
+        key: CacheKey,
+        sourceByteSize: Int
+    ) {
+        guard maximumCachedMeshCount > 0,
+              sourceByteSize <= maximumCachedSourceBytes
+        else { return }
+
+        while cache.count >= maximumCachedMeshCount
+            || cachedSourceBytes + sourceByteSize
+                > maximumCachedSourceBytes
+        {
+            guard let leastRecentlyUsed = leastToMostRecentlyUsed.first,
+                  let removed = cache.removeValue(forKey: leastRecentlyUsed)
+            else {
+                cache.removeAll(keepingCapacity: true)
+                leastToMostRecentlyUsed.removeAll(keepingCapacity: true)
+                cachedSourceBytes = 0
+                break
+            }
+            leastToMostRecentlyUsed.removeFirst()
+            cachedSourceBytes -= removed.sourceByteSize
+        }
+
+        cache[key] = CacheEntry(
+            mesh: mesh,
+            sourceByteSize: sourceByteSize
+        )
+        leastToMostRecentlyUsed.append(key)
+        cachedSourceBytes += sourceByteSize
+    }
+
+    private func markMostRecentlyUsed(_ key: CacheKey) {
+        guard let index = leastToMostRecentlyUsed.firstIndex(of: key) else {
+            assertionFailure("Atlas mesh cache recency metadata is inconsistent.")
+            return
+        }
+        leastToMostRecentlyUsed.remove(at: index)
+        leastToMostRecentlyUsed.append(key)
     }
 
     private func loadSynchronously(_ descriptor: AtlasMeshDescriptor) throws -> LoadedAtlasMesh {

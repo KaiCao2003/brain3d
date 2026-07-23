@@ -6,6 +6,26 @@ import Testing
 struct AtlasSceneProtocolTests {
     @Test("Mesh and ray requests use only the reviewed protocol fields")
     func requestShapes() throws {
+        let regionsData = try JSONEncoder().encode(
+            try AtlasRegionsParameters(offset: 500, limit: 340)
+        )
+        let regions = try #require(
+            JSONSerialization.jsonObject(with: regionsData) as? [String: Any]
+        )
+        #expect(Set(regions.keys) == Set(["protocolVersion", "offset", "limit"]))
+        #expect(regions["offset"] as? Int == 500)
+        #expect(regions["limit"] as? Int == 340)
+
+        let searchData = try JSONEncoder().encode(
+            try AtlasRegionSearchParameters(query: "thalamus", limit: 25)
+        )
+        let search = try #require(
+            JSONSerialization.jsonObject(with: searchData) as? [String: Any]
+        )
+        #expect(Set(search.keys) == Set(["protocolVersion", "query", "limit"]))
+        #expect(search["query"] as? String == "thalamus")
+        #expect(search["limit"] as? Int == 25)
+
         let meshData = try JSONEncoder().encode(try AtlasMeshParameters())
         let mesh = try #require(JSONSerialization.jsonObject(with: meshData) as? [String: Any])
         #expect(Set(mesh.keys) == Set(["protocolVersion", "target"]))
@@ -31,6 +51,148 @@ struct AtlasSceneProtocolTests {
             "endApMicrometres", "endDvMicrometres", "endMlMicrometres",
         ]))
         #expect(ray["frameId"] as? String == AtlasSceneContract.physicalFrameId)
+    }
+
+    @Test("Two strict pages load all 840 structures and close the complete tree")
+    func completePagedOntology() throws {
+        let records = ontologyRegions()
+        #expect(records.count == 840)
+
+        let first = try decode(
+            AtlasRegionsResult.self,
+            object: regionsPage(
+                records: Array(records.prefix(500)),
+                offset: 0,
+                totalCount: records.count
+            )
+        )
+        let second = try decode(
+            AtlasRegionsResult.self,
+            object: regionsPage(
+                records: Array(records.dropFirst(500)),
+                offset: 500,
+                totalCount: records.count
+            )
+        )
+
+        var accumulator = AtlasRegionPageAccumulator()
+        try accumulator.append(first)
+        #expect(accumulator.nextOffset == 500)
+        #expect(throws: AtlasSceneContractError.self) {
+            try accumulator.finish()
+        }
+        try accumulator.append(second)
+
+        let hierarchy = try accumulator.finish()
+        #expect(hierarchy.regions.count == 840)
+        #expect(hierarchy.roots.count == 1)
+        #expect(hierarchy.roots[0].region.structureId == 997)
+        #expect(hierarchy.roots[0].children.count == 839)
+        #expect(hierarchy.children(of: 997).count == 839)
+        #expect(hierarchy.region(structureId: 1_000_838)?.acronym == "R838")
+        #expect(
+            hierarchy.region(structureId: 1_000_838)?.structureIdPath
+                == [997, 1_000_838]
+        )
+    }
+
+    @Test("Paging rejects changed identity, duplicates, and an unclosed parent path")
+    func invalidPagedOntology() throws {
+        let root = ontologyRegions()[0]
+        let child = ontologyRegions()[1]
+        let first = try decode(
+            AtlasRegionsResult.self,
+            object: regionsPage(records: [root], offset: 0, totalCount: 2)
+        )
+
+        var changedAtlasPage = regionsPage(
+            records: [child],
+            offset: 1,
+            totalCount: 2
+        )
+        var changedAtlas = try #require(changedAtlasPage["atlas"] as? [String: Any])
+        changedAtlas["citation"] = "Different atlas citation"
+        changedAtlasPage["atlas"] = changedAtlas
+        let changedIdentity = try decode(
+            AtlasRegionsResult.self,
+            object: changedAtlasPage
+        )
+        var changedIdentityAccumulator = AtlasRegionPageAccumulator()
+        try changedIdentityAccumulator.append(first)
+        #expect(throws: AtlasSceneContractError.self) {
+            try changedIdentityAccumulator.append(changedIdentity)
+        }
+
+        let duplicate = try decode(
+            AtlasRegionsResult.self,
+            object: regionsPage(records: [root], offset: 1, totalCount: 2)
+        )
+        var duplicateAccumulator = AtlasRegionPageAccumulator()
+        try duplicateAccumulator.append(first)
+        #expect(throws: AtlasSceneContractError.self) {
+            try duplicateAccumulator.append(duplicate)
+        }
+
+        let orphan: [String: Any] = [
+            "structureId": 2_000_000,
+            "acronym": "ORPHAN",
+            "name": "Orphan structure",
+            "parentStructureId": 1_999_999,
+            "structureIdPath": [1_999_999, 2_000_000],
+            "rgb": [12, 34, 56],
+        ]
+        let orphanPage = try decode(
+            AtlasRegionsResult.self,
+            object: regionsPage(records: [root, orphan], offset: 0, totalCount: 2)
+        )
+        var orphanAccumulator = AtlasRegionPageAccumulator()
+        try orphanAccumulator.append(orphanPage)
+        #expect(throws: AtlasSceneContractError.self) {
+            try orphanAccumulator.finish()
+        }
+    }
+
+    @Test("Search decodes non-cortical Allen structures without a curated allow-list")
+    func wholeOntologySearchDecoding() throws {
+        let result = try decode(
+            AtlasRegionSearchResult.self,
+            object: [
+                "protocolVersion": 1,
+                "query": "thalamus",
+                "matchingRule": AtlasSceneContract.regionSearchMatchingRule,
+                "returnedCount": 1,
+                "totalMatchCount": 1,
+                "results": [
+                    [
+                        "matchKind": "nameExact",
+                        "region": thalamusRegion(),
+                    ],
+                ],
+                "atlas": atlas(),
+            ]
+        )
+
+        #expect(result.results.count == 1)
+        #expect(result.results[0].region.structureId == 549)
+        #expect(result.results[0].region.acronym == "TH")
+        #expect(result.results[0].matchKind == .nameExact)
+    }
+
+    @Test("Region mesh descriptor carries its exact full-ontology identity")
+    func regionMeshDecoding() throws {
+        var payload = meshPayload()
+        payload["target"] = "region"
+        payload["region"] = thalamusRegion()
+        var descriptor = try #require(payload["mesh"] as? [String: Any])
+        descriptor["canonicalPath"] = "/tmp/allen-atlas/meshes/549.obj"
+        descriptor["pathUnderAtlasRoot"] = "meshes/549.obj"
+        payload["mesh"] = descriptor
+
+        let result = try decode(AtlasMeshResult.self, object: payload)
+
+        #expect(result.target == .region)
+        #expect(result.region?.acronym == "TH")
+        #expect(result.mesh.pathUnderAtlasRoot == "meshes/549.obj")
     }
 
     @Test("Verified root mesh descriptor and provenance decode together")
@@ -170,6 +332,45 @@ struct AtlasSceneProtocolTests {
         ]
     }
 
+    private func regionsPage(
+        records: [[String: Any]],
+        offset: Int,
+        totalCount: Int
+    ) -> [String: Any] {
+        [
+            "protocolVersion": 1,
+            "offset": offset,
+            "limit": 500,
+            "returnedCount": records.count,
+            "totalCount": totalCount,
+            "hasMore": offset + records.count < totalCount,
+            "regions": records,
+            "atlas": atlas(),
+        ]
+    }
+
+    private func ontologyRegions() -> [[String: Any]] {
+        let root: [String: Any] = [
+            "structureId": 997,
+            "acronym": "root",
+            "name": "root",
+            "parentStructureId": NSNull(),
+            "structureIdPath": [997],
+            "rgb": [255, 255, 255],
+        ]
+        return [root] + (0 ..< 839).map { index in
+            let structureId = 1_000_000 + index
+            return [
+                "structureId": structureId,
+                "acronym": "R\(index)",
+                "name": "Region \(index)",
+                "parentStructureId": 997,
+                "structureIdPath": [997, structureId],
+                "rgb": [index % 256, (index * 3) % 256, (index * 7) % 256],
+            ]
+        }
+    }
+
     private func atlas() -> [String: Any] {
         [
             "identifier": "allen_mouse_25um",
@@ -240,6 +441,17 @@ struct AtlasSceneProtocolTests {
             "parentStructureId": 315,
             "structureIdPath": [997, 8, 567, 688, 695, 315, 385],
             "rgb": [8, 133, 140],
+        ]
+    }
+
+    private func thalamusRegion() -> [String: Any] {
+        [
+            "structureId": 549,
+            "acronym": "TH",
+            "name": "Thalamus",
+            "parentStructureId": 997,
+            "structureIdPath": [997, 549],
+            "rgb": [255, 112, 128],
         ]
     }
 }

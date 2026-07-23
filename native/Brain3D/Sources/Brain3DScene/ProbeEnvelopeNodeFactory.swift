@@ -77,14 +77,17 @@ enum ProbeEnvelopeNodeFactory {
     private static func material(usableForNavigation: Bool) -> SCNMaterial {
         let material = SCNMaterial()
         material.name = "probe-conservative-envelope"
-        material.diffuse.contents = usableForNavigation
-            ? NSColor.systemYellow
-            : NSColor.systemOrange
-        material.emission.contents = NSColor.systemOrange.withAlphaComponent(0.14)
-        material.lightingModel = .physicallyBased
-        material.roughness.contents = 0.42
-        material.metalness.contents = 0.08
+        let color = usableForNavigation ? NSColor.systemYellow : NSColor.systemOrange
+        material.diffuse.contents = color
+        material.emission.contents = color
+        material.lightingModel = .constant
         material.isDoubleSided = true
+        // The probe is planning geometry, not an anatomical surface. Render it
+        // as an x-ray overlay so an atlas shell cannot hide an intracranial
+        // trajectory on SceneKit/Metal implementations that flatten imported
+        // OBJ transparency.
+        material.readsFromDepthBuffer = false
+        material.writesToDepthBuffer = false
         return material
     }
 }
@@ -94,4 +97,5 @@ enum SceneCategory: Int {
     case probe = 2
     case majorVessel = 4
     case selectedVesselConflict = 8
+    case highlightedRegion = 16
 }

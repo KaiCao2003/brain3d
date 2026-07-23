@@ -162,10 +162,10 @@ def test_project_round_trip_has_no_numeric_or_identity_drift(tmp_path: Path) -> 
     assert (saved / CHECKSUMS_FILENAME).is_file()
 
 
-def test_schema_six_round_trip_preserves_state_above_retracted_model_limits(
+def test_current_schema_round_trip_preserves_state_above_retracted_model_limits(
     tmp_path: Path,
 ) -> None:
-    """Do not narrow schema 6 while bounded package members can hold the state."""
+    """Do not narrow the current schema while package members can hold the state."""
 
     metadata = make_allen_metadata_test_double(25)
     anchor = BrainGlobePhysicalPoint(
@@ -182,12 +182,12 @@ def test_schema_six_round_trip_preserves_state_above_retracted_model_limits(
         region_display=[RegionDisplayState(structure_id=index + 1) for index in range(4_097)],
     )
 
-    saved = save_project(project, tmp_path / "schema-six-large-state.mouseplan")
+    saved = save_project(project, tmp_path / "current-schema-large-state.mouseplan")
     loaded = load_project(saved, recover_backup=False)
 
     assert (saved / PROJECT_FILENAME).stat().st_size < MAX_PROJECT_JSON_BYTES
     assert (saved / REGIONS_FILENAME).stat().st_size < PROJECT_MEMBER_MAX_BYTES[REGIONS_FILENAME]
-    assert loaded.schema_version == 6
+    assert loaded.schema_version == 7
     assert loaded.user_notes == project.user_notes
     assert loaded.region_display == project.region_display
 
@@ -517,7 +517,7 @@ def test_schema_one_package_load_migrates_midline_and_renderer_anchor(tmp_path: 
 
     migrated = load_project(path)
 
-    assert migrated.schema_version == 6
+    assert migrated.schema_version == 7
     assert migrated.atlas is not None
     assert migrated.atlas.midline_ml_um == 5700.0
     assert migrated.renderer_anchor == anchor
@@ -546,7 +546,7 @@ def test_schema_two_package_without_vasculature_member_migrates_to_empty_state(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 6
+    assert migrated.schema_version == 7
     assert migrated.subject_vascular_images == []
     assert migrated.dorsal_vascular_registrations == []
     assert migrated.subject_vascular_overlays == []
@@ -598,7 +598,7 @@ def test_schema_three_package_migration_preserves_vascular_target_and_viewer_sta
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 6
+    assert migrated.schema_version == 7
     assert migrated.viewer_slice_depths == project.viewer_slice_depths
     assert migrated.unprojected_bregma_targets == project.unprojected_bregma_targets
     assert migrated.subject_vascular_images == project.subject_vascular_images
@@ -644,7 +644,7 @@ def test_schema_four_and_five_packages_preserve_split_vascular_state_and_assets(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 6
+    assert migrated.schema_version == 7
     assert migrated.subject_vascular_images == project.subject_vascular_images
     assert migrated.dorsal_vascular_registrations == project.dorsal_vascular_registrations
     assert migrated.subject_vascular_overlays == project.subject_vascular_overlays

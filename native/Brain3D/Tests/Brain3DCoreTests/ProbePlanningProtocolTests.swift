@@ -5,6 +5,55 @@ import Testing
 
 @Suite("Probe catalog, plan, and exact region bridge")
 struct ProbePlanningProtocolTests {
+    private struct TestVector3 {
+        let ap: Double
+        let ml: Double
+        let dv: Double
+
+        var magnitude: Double {
+            sqrt(ap * ap + ml * ml + dv * dv)
+        }
+
+        func adding(_ other: TestVector3) -> TestVector3 {
+            TestVector3(ap: ap + other.ap, ml: ml + other.ml, dv: dv + other.dv)
+        }
+
+        func subtracting(_ other: TestVector3) -> TestVector3 {
+            TestVector3(ap: ap - other.ap, ml: ml - other.ml, dv: dv - other.dv)
+        }
+
+        func scaled(by factor: Double) -> TestVector3 {
+            TestVector3(ap: ap * factor, ml: ml * factor, dv: dv * factor)
+        }
+
+        func dot(_ other: TestVector3) -> Double {
+            ap * other.ap + ml * other.ml + dv * other.dv
+        }
+
+        func cross(_ other: TestVector3) -> TestVector3 {
+            TestVector3(
+                ap: ml * other.dv - dv * other.ml,
+                ml: dv * other.ap - ap * other.dv,
+                dv: ap * other.ml - ml * other.ap
+            )
+        }
+
+        func normalized() -> TestVector3 {
+            scaled(by: 1 / magnitude)
+        }
+
+        func rotated(around axis: TestVector3, degrees: Double) -> TestVector3 {
+            let radians = degrees * .pi / 180
+            return scaled(by: cos(radians))
+                .adding(axis.cross(self).scaled(by: sin(radians)))
+                .adding(
+                    axis.scaled(
+                        by: axis.dot(self) * (1 - cos(radians))
+                    )
+                )
+        }
+    }
+
     private let projectId = "11111111-1111-4111-8111-111111111111"
     private let targetId = "22222222-2222-4222-8222-222222222222"
     private let calibrationId = "33333333-3333-4333-8333-333333333333"
@@ -98,6 +147,9 @@ struct ProbePlanningProtocolTests {
 
     @Test("Mutation responses must acknowledge the submitted plan and placement")
     func mutationResponseBindsRequest() throws {
+        let catalogModel = try decodedCatalogModel(
+            genericCatalogModel(detailed: true)
+        )
         let create = ProbePlanCreateParameters(
             projectId: projectId,
             expectedProjectRevision: 7,
@@ -115,7 +167,11 @@ struct ProbePlanningProtocolTests {
             ProbePlanMutationResult.self,
             mutationPayload(status: "created", revision: 8, plan: planDetail())
         )
-        try ProbePlanningValidator.validateCreatedMutation(created, request: create)
+        try ProbePlanningValidator.validateCreatedMutation(
+            created,
+            request: create,
+            catalogModel: catalogModel
+        )
 
         let differentPlacement = ProbePlanCreateParameters(
             projectId: projectId,
@@ -133,7 +189,8 @@ struct ProbePlanningProtocolTests {
         #expect(throws: ProbePlanningValidationError.self) {
             try ProbePlanningValidator.validateCreatedMutation(
                 created,
-                request: differentPlacement
+                request: differentPlacement,
+                catalogModel: catalogModel
             )
         }
 
@@ -164,8 +221,317 @@ struct ProbePlanningProtocolTests {
             )
         )
         #expect(throws: ProbePlanningValidationError.self) {
-            try ProbePlanningValidator.validateUpdatedMutation(wrongUpdate, request: update)
+            try ProbePlanningValidator.validateUpdatedMutation(
+                wrongUpdate,
+                request: update,
+                catalogModel: catalogModel
+            )
         }
+    }
+
+    @Test("Created plans contain the complete detailed geometry for every catalog model")
+    func createdMutationBindsCompleteCatalogGeometry() throws {
+        let catalogPayloads: [[String: Any]] = [
+            neuropixels2CatalogModel(
+                fourShank: false,
+                detailed: true
+            ),
+            neuropixels2CatalogModel(
+                fourShank: true,
+                detailed: true
+            ),
+            neuropixels2CatalogModel(
+                fourShank: true,
+                quadBase: true,
+                detailed: true
+            ),
+            neuropixelsCatalogModel(detailed: true),
+            genericCatalogModel(detailed: true),
+        ]
+
+        for catalogPayload in catalogPayloads {
+            let catalogModel = try decodedCatalogModel(catalogPayload)
+            let request = matchingCreateRequest(for: catalogModel)
+            let plan = try planDetail(matchingCatalog: catalogPayload)
+            let created = try decode(
+                ProbePlanMutationResult.self,
+                mutationPayload(status: "created", revision: 8, plan: plan)
+            )
+
+            try ProbePlanningValidator.validateCreatedMutation(
+                created,
+                request: request,
+                catalogModel: catalogModel
+            )
+            #expect(created.plan.shanks.count == catalogModel.shankCount)
+            #expect(created.plan.recordingSites.count == catalogModel.siteCount)
+        }
+    }
+
+    @Test("Mutation validation rejects incomplete or substituted catalog geometry")
+    func mutationRejectsCatalogGeometryTampering() throws {
+        let singlePayload = neuropixels2CatalogModel(
+            fourShank: false,
+            detailed: true
+        )
+        let singleModel = try decodedCatalogModel(singlePayload)
+        let singleRequest = matchingCreateRequest(for: singleModel)
+
+        var masqueradingPlan = planDetail()
+        masqueradingPlan["modelId"] = singleModel.modelId
+        masqueradingPlan["modelVersion"] = singleModel.modelVersion
+        masqueradingPlan["modelDisplayName"] = singleModel.displayName
+        masqueradingPlan["verificationStatus"] = singleModel.verificationStatus
+        let masqueradingResult = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(status: "created", revision: 8, plan: masqueradingPlan)
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreatedMutation(
+                masqueradingResult,
+                request: singleRequest,
+                catalogModel: singleModel
+            )
+        }
+
+        let completeSinglePlan = try planDetail(matchingCatalog: singlePayload)
+        let completeSingleSites = try #require(
+            completeSinglePlan["recordingSites"] as? [[String: Any]]
+        )
+
+        var missingSitePlan = completeSinglePlan
+        missingSitePlan["recordingSites"] = Array(completeSingleSites.dropLast())
+        let missingSiteResult = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(status: "created", revision: 8, plan: missingSitePlan)
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreatedMutation(
+                missingSiteResult,
+                request: singleRequest,
+                catalogModel: singleModel
+            )
+        }
+
+        for (field, value) in [
+            ("siteId", "forged-site"),
+            ("role", "reference"),
+            ("bank", "forged-bank"),
+        ] {
+            var substitutedPlan = completeSinglePlan
+            var substitutedSites = completeSingleSites
+            substitutedSites[substitutedSites.count - 1][field] = value
+            substitutedPlan["recordingSites"] = substitutedSites
+            let substitutedResult = try decode(
+                ProbePlanMutationResult.self,
+                mutationPayload(
+                    status: "created",
+                    revision: 8,
+                    plan: substitutedPlan
+                )
+            )
+            #expect(throws: ProbePlanningValidationError.self) {
+                try ProbePlanningValidator.validateCreatedMutation(
+                    substitutedResult,
+                    request: singleRequest,
+                    catalogModel: singleModel
+                )
+            }
+        }
+
+        var wrongBankPlan = completeSinglePlan
+        var wrongBankSites = completeSingleSites
+        wrongBankSites[0]["bank"] = "forged-bank"
+        wrongBankPlan["recordingSites"] = wrongBankSites
+        let wrongBankUpdate = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(
+                status: "updated",
+                revision: 8,
+                plan: wrongBankPlan,
+                priorAnalysisCleared: true
+            )
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateUpdatedMutation(
+                wrongBankUpdate,
+                request: matchingUpdateRequest(for: singleModel),
+                catalogModel: singleModel
+            )
+        }
+
+        let fourPayload = neuropixels2CatalogModel(
+            fourShank: true,
+            detailed: true
+        )
+        let fourModel = try decodedCatalogModel(fourPayload)
+        let fourRequest = matchingCreateRequest(for: fourModel)
+        let completeFourPlan = try planDetail(matchingCatalog: fourPayload)
+        let completeFourShanks = try #require(
+            completeFourPlan["shanks"] as? [[String: Any]]
+        )
+        let completeFourSites = try #require(
+            completeFourPlan["recordingSites"] as? [[String: Any]]
+        )
+
+        var missingShankPlan = completeFourPlan
+        missingShankPlan["shanks"] = Array(completeFourShanks.dropLast())
+        missingShankPlan["recordingSites"] = completeFourSites.filter {
+            ($0["shankId"] as? String) != "shank-3"
+        }
+        let missingShankResult = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(status: "created", revision: 8, plan: missingShankPlan)
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreatedMutation(
+                missingShankResult,
+                request: fourRequest,
+                catalogModel: fourModel
+            )
+        }
+
+        var reassignedPlan = completeFourPlan
+        var reassignedSites = completeFourSites
+        reassignedSites[0]["shankId"] = "shank-1"
+        reassignedPlan["recordingSites"] = reassignedSites
+        let reassignedResult = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(status: "created", revision: 8, plan: reassignedPlan)
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreatedMutation(
+                reassignedResult,
+                request: fourRequest,
+                catalogModel: fourModel
+            )
+        }
+    }
+
+    @Test("Spatial validation rejects collapsed, offset, scaled, and invalid-basis geometry")
+    func mutationRejectsSpatialGeometryTampering() throws {
+        let catalogPayload = neuropixels2CatalogModel(
+            fourShank: false,
+            detailed: true
+        )
+        let catalogModel = try decodedCatalogModel(catalogPayload)
+        let request = matchingCreateRequest(for: catalogModel)
+        let completePlan = try planDetail(matchingCatalog: catalogPayload)
+        let completeSites = try #require(
+            completePlan["recordingSites"] as? [[String: Any]]
+        )
+
+        var collapsedPlan = completePlan
+        var collapsedSites = completeSites
+        let collapsedPoint = try #require(
+            collapsedSites[0]["point"] as? [String: Any]
+        )
+        for index in collapsedSites.indices {
+            collapsedSites[index]["point"] = collapsedPoint
+        }
+        collapsedPlan["recordingSites"] = collapsedSites
+        try expectInvalidCreatedGeometry(
+            collapsedPlan,
+            request: request,
+            catalogModel: catalogModel
+        )
+
+        var offsetPlan = completePlan
+        var offsetSites = completeSites
+        var offsetPoint = try #require(
+            offsetSites[100]["point"] as? [String: Any]
+        )
+        offsetPoint["apMicrometres"] =
+            try #require(offsetPoint["apMicrometres"] as? Double) + 0.01
+        offsetSites[100]["point"] = offsetPoint
+        offsetPlan["recordingSites"] = offsetSites
+        try expectInvalidCreatedGeometry(
+            offsetPlan,
+            request: request,
+            catalogModel: catalogModel
+        )
+
+        var dimensionPlan = completePlan
+        var dimensionShanks = try #require(
+            dimensionPlan["shanks"] as? [[String: Any]]
+        )
+        dimensionShanks[0]["widthMicrometres"] =
+            try #require(dimensionShanks[0]["widthMicrometres"] as? Double) + 1
+        dimensionPlan["shanks"] = dimensionShanks
+        try expectInvalidCreatedGeometry(
+            dimensionPlan,
+            request: request,
+            catalogModel: catalogModel
+        )
+
+        var scalePlan = completePlan
+        var scalePlacement = try #require(
+            scalePlan["placement"] as? [String: Any]
+        )
+        scalePlacement["modelToPlacementUniformScale"] = 1.01
+        scalePlan["placement"] = scalePlacement
+        try expectInvalidCreatedGeometry(
+            scalePlan,
+            request: request,
+            catalogModel: catalogModel
+        )
+
+        var basisPlan = completePlan
+        var basisPlacement = try #require(
+            basisPlan["placement"] as? [String: Any]
+        )
+        var normal = try #require(
+            basisPlacement["localNormalDirection"] as? [String: Any]
+        )
+        for component in ["ap", "ml", "dv"] {
+            normal[component] = -(try #require(normal[component] as? Double))
+        }
+        basisPlacement["localNormalDirection"] = normal
+        basisPlan["placement"] = basisPlacement
+        try expectInvalidCreatedGeometry(
+            basisPlan,
+            request: request,
+            catalogModel: catalogModel
+        )
+
+        var inwardPlan = completePlan
+        var inwardPlacement = try #require(
+            inwardPlan["placement"] as? [String: Any]
+        )
+        var inward = try #require(
+            inwardPlacement["inwardDirection"] as? [String: Any]
+        )
+        for component in ["ap", "ml", "dv"] {
+            inward[component] = -(try #require(inward[component] as? Double))
+        }
+        inwardPlacement["inwardDirection"] = inward
+        inwardPlan["placement"] = inwardPlacement
+        try expectInvalidCreatedGeometry(
+            inwardPlan,
+            request: request,
+            catalogModel: catalogModel
+        )
+
+        var atlasConversionPlan = completePlan
+        var atlasPlacement = try #require(
+            atlasConversionPlan["placement"] as? [String: Any]
+        )
+        var atlasFrame = try #require(
+            atlasPlacement["atlasFrame"] as? [String: Any]
+        )
+        var atlasTarget = try #require(
+            atlasFrame["target"] as? [String: Any]
+        )
+        atlasTarget["mlMicrometres"] =
+            try #require(atlasTarget["mlMicrometres"] as? Double) + 0.01
+        atlasFrame["target"] = atlasTarget
+        atlasPlacement["atlasFrame"] = atlasFrame
+        atlasConversionPlan["placement"] = atlasPlacement
+        try expectInvalidCreatedGeometry(
+            atlasConversionPlan,
+            request: request,
+            catalogModel: catalogModel
+        )
     }
 
     @Test("Placement modes encode only their exact input fields")
@@ -315,7 +681,7 @@ struct ProbePlanningProtocolTests {
         }
     }
 
-    @Test("Catalog keeps NP1 first, test fixture second, and selects by exact identity")
+    @Test("Catalog exposes only NP2 single and standard four-shank in order")
     func catalogOrderAndSelection() throws {
         let list = try decode(
             ProbeCatalogListResult.self,
@@ -325,26 +691,285 @@ struct ProbePlanningProtocolTests {
                 "catalogVersion": ProbePlanningContract.catalogVersion,
                 "modelCount": 2,
                 "models": [
-                    neuropixelsCatalogModel(detailed: false),
-                    genericCatalogModel(detailed: false),
+                    neuropixels2CatalogModel(fourShank: false, detailed: false),
+                    neuropixels2CatalogModel(fourShank: true, detailed: false),
                 ],
             ]
         )
         try ProbePlanningValidator.validateCatalogList(list)
-        #expect(list.models[0].modelId == ProbePlanningContract.neuropixelsModelId)
-        #expect(list.models[1].modelId == ProbePlanningContract.genericModelId)
+        #expect(
+            list.models.map(\.modelId) == [
+                ProbePlanningContract.neuropixels2SingleShankModelId,
+                ProbePlanningContract.neuropixels2StandardFourShankModelId,
+            ]
+        )
 
         let reverseOrder = Array(list.models.reversed())
         let defaultModel = ProbePlanningContract.preferredCatalogModel(
             in: reverseOrder,
             preservingIdentity: nil
         )
-        #expect(defaultModel?.modelId == ProbePlanningContract.neuropixelsModelId)
-        let preservedTestFixture = ProbePlanningContract.preferredCatalogModel(
+        #expect(
+            defaultModel?.modelId
+                == ProbePlanningContract.neuropixels2SingleShankModelId
+        )
+        let preservedFourShank = ProbePlanningContract.preferredCatalogModel(
             in: reverseOrder,
             preservingIdentity: list.models[1].id
         )
-        #expect(preservedTestFixture?.modelId == ProbePlanningContract.genericModelId)
+        #expect(
+            preservedFourShank?.modelId
+                == ProbePlanningContract.neuropixels2StandardFourShankModelId
+        )
+
+        var reorderedPayload: [String: Any] = [
+            "protocolVersion": 1,
+            "status": "listed",
+            "catalogVersion": ProbePlanningContract.catalogVersion,
+            "modelCount": 2,
+            "models": [
+                neuropixels2CatalogModel(fourShank: true, detailed: false),
+                neuropixels2CatalogModel(fourShank: false, detailed: false),
+            ],
+        ]
+        let reordered = try decode(ProbeCatalogListResult.self, reorderedPayload)
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCatalogList(reordered)
+        }
+        reorderedPayload["catalogVersion"] = "brain3d-probe-catalog-tampered"
+        let wrongVersion = try decode(ProbeCatalogListResult.self, reorderedPayload)
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCatalogList(wrongVersion)
+        }
+    }
+
+    @Test("NP2 hardware identities preserve every site and acknowledgement gate")
+    func neuropixels2CatalogAndCreateGate() throws {
+        let configurations = [
+            (
+                fourShank: false,
+                quadBase: false,
+                modelId: ProbePlanningContract.neuropixels2SingleShankModelId,
+                displayName: ProbePlanningContract.neuropixels2SingleShankDisplayName,
+                shankCount: 1,
+                siteCount: 1_280,
+                sourceCount: 5,
+                simultaneousChannelCount: 384
+            ),
+            (
+                fourShank: true,
+                quadBase: false,
+                modelId: ProbePlanningContract.neuropixels2StandardFourShankModelId,
+                displayName: ProbePlanningContract.neuropixels2StandardFourShankDisplayName,
+                shankCount: 4,
+                siteCount: 5_120,
+                sourceCount: 5,
+                simultaneousChannelCount: 384
+            ),
+            (
+                fourShank: true,
+                quadBase: true,
+                modelId: ProbePlanningContract.neuropixels2QuadBaseFourShankModelId,
+                displayName: ProbePlanningContract.neuropixels2QuadBaseFourShankDisplayName,
+                shankCount: 4,
+                siteCount: 5_120,
+                sourceCount: 6,
+                simultaneousChannelCount: 1_536
+            ),
+        ]
+
+        for configuration in configurations {
+            let modelPayload = neuropixels2CatalogModel(
+                fourShank: configuration.fourShank,
+                quadBase: configuration.quadBase,
+                detailed: true
+            )
+            let detail = try decode(
+                ProbeCatalogGetResult.self,
+                [
+                    "protocolVersion": 1,
+                    "status": "found",
+                    "catalogVersion": ProbePlanningContract.catalogVersion,
+                    "model": modelPayload,
+                ]
+            )
+            try ProbePlanningValidator.validateCatalogGet(
+                detail,
+                modelId: configuration.modelId,
+                modelVersion: ProbePlanningContract.neuropixels2ModelVersion
+            )
+            #expect(detail.model.displayName == configuration.displayName)
+            #expect(
+                detail.model.verificationStatus
+                    == ProbePlanningContract.sourceTranscribedReviewPendingStatus
+            )
+            #expect(detail.model.completeGeometryTranscribed == true)
+            #expect(detail.model.independentTranscriptionReviewCompleted == false)
+            #expect(detail.model.independentlyReviewedBy == nil)
+            #expect(detail.model.shankCount == configuration.shankCount)
+            #expect(detail.model.siteCount == configuration.siteCount)
+            #expect(detail.model.primarySources?.count == configuration.sourceCount)
+            #expect(detail.model.geometryNotes?.contains(
+                "\(configuration.simultaneousChannelCount) simultaneously configurable"
+            ) == true)
+
+            let shanks = try #require(detail.model.shanks)
+            #expect(shanks.count == configuration.shankCount)
+            for (shankIndex, shank) in shanks.enumerated() {
+                #expect(shank.shankId == "shank-\(shankIndex)")
+                #expect(shank.centerLateralMicrometres == Double(shankIndex * 250))
+                #expect(shank.sites.count == 1_280)
+                #expect(shank.sites[0].siteId == "shank-\(shankIndex)-electrode-0000")
+                #expect(shank.sites[0].axialFromTipMicrometres == 206)
+                #expect(shank.sites[0].lateralMicrometres == -8)
+                #expect(shank.sites[0].bank == "virtual-bank-0")
+                #expect(shank.sites[1].lateralMicrometres == 24)
+                #expect(
+                    shank.sites[1_279].siteId
+                        == "shank-\(shankIndex)-electrode-1279"
+                )
+                #expect(shank.sites[1_279].axialFromTipMicrometres == 9_791)
+                #expect(shank.sites[1_279].bank == "virtual-bank-3")
+            }
+
+            let unacknowledged = probeCreate(
+                modelId: configuration.modelId,
+                modelVersion: ProbePlanningContract.neuropixels2ModelVersion,
+                acknowledged: false
+            )
+            #expect(throws: ProbePlanningValidationError.self) {
+                try ProbePlanningValidator.validateCreate(unacknowledged)
+            }
+            try ProbePlanningValidator.validateCreate(probeCreate(
+                modelId: configuration.modelId,
+                modelVersion: ProbePlanningContract.neuropixels2ModelVersion,
+                acknowledged: true
+            ))
+
+            var planPayload = planGetPayload(regionAnalysis: nil)
+            planPayload["plan"] = try planDetail(matchingCatalog: modelPayload)
+            let planResult = try decode(ProbePlanGetResult.self, planPayload)
+            try ProbePlanningValidator.validatePlanGet(
+                planResult,
+                projectId: projectId,
+                projectRevision: 7,
+                planId: planId
+            )
+            try ProbePlanningValidator.validateCatalogModel(
+                detail.model,
+                matches: planResult.plan
+            )
+        }
+    }
+
+    @Test("NP2 rejects any provenance or geometry tampering")
+    func neuropixels2RejectsTampering() throws {
+        let sourceFieldTampering = [
+            "title": "Wrong source title",
+            "sourceUrl": "https://example.com/wrong-source.pdf",
+            "documentRevision": "wrong revision",
+            "retrievedOn": "2026-07-22",
+            "sha256": hex("f"),
+            "citation": "Wrong citation",
+        ]
+        for (field, value) in sourceFieldTampering {
+            var model = neuropixels2CatalogModel(fourShank: false, detailed: true)
+            var sources = model["primarySources"] as! [[String: Any]]
+            sources[0][field] = value
+            model["primarySources"] = sources
+            let result = try decode(
+                ProbeCatalogGetResult.self,
+                [
+                    "protocolVersion": 1,
+                    "status": "found",
+                    "catalogVersion": ProbePlanningContract.catalogVersion,
+                    "model": model,
+                ]
+            )
+            #expect(throws: ProbePlanningValidationError.self) {
+                try ProbePlanningValidator.validateCatalogGet(
+                    result,
+                    modelId: ProbePlanningContract.neuropixels2SingleShankModelId,
+                    modelVersion: ProbePlanningContract.neuropixels2ModelVersion
+                )
+            }
+        }
+
+        for sourceIndex in 0 ..< 6 {
+            var model = neuropixels2CatalogModel(
+                fourShank: true,
+                quadBase: true,
+                detailed: true
+            )
+            var sources = model["primarySources"] as! [[String: Any]]
+            sources[sourceIndex]["sha256"] = hex(
+                Character(String((sourceIndex + 1) % 10))
+            )
+            model["primarySources"] = sources
+            let result = try decode(
+                ProbeCatalogGetResult.self,
+                [
+                    "protocolVersion": 1,
+                    "status": "found",
+                    "catalogVersion": ProbePlanningContract.catalogVersion,
+                    "model": model,
+                ]
+            )
+            #expect(throws: ProbePlanningValidationError.self) {
+                try ProbePlanningValidator.validateCatalogGet(
+                    result,
+                    modelId: ProbePlanningContract.neuropixels2QuadBaseFourShankModelId,
+                    modelVersion: ProbePlanningContract.neuropixels2ModelVersion
+                )
+            }
+        }
+
+        var reorderedSources = neuropixels2CatalogModel(fourShank: false, detailed: true)
+        var sources = reorderedSources["primarySources"] as! [[String: Any]]
+        sources.swapAt(0, 1)
+        reorderedSources["primarySources"] = sources
+        try expectInvalidNeuropixels2Detail(reorderedSources, fourShank: false)
+
+        var wrongOffset = neuropixels2CatalogModel(fourShank: true, detailed: true)
+        var offsetShanks = wrongOffset["shanks"] as! [[String: Any]]
+        offsetShanks[2]["centerLateralMicrometres"] = 501.0
+        wrongOffset["shanks"] = offsetShanks
+        try expectInvalidNeuropixels2Detail(
+            wrongOffset,
+            fourShank: true,
+            quadBase: false
+        )
+
+        var wrongSite = neuropixels2CatalogModel(fourShank: false, detailed: true)
+        var siteShanks = wrongSite["shanks"] as! [[String: Any]]
+        var sites = siteShanks[0]["sites"] as! [[String: Any]]
+        sites[1_279]["bank"] = "virtual-bank-2"
+        siteShanks[0]["sites"] = sites
+        wrongSite["shanks"] = siteShanks
+        try expectInvalidNeuropixels2Detail(wrongSite, fourShank: false)
+
+        var wrongChannelIdentity = neuropixels2CatalogModel(
+            fourShank: true,
+            quadBase: true,
+            detailed: true
+        )
+        wrongChannelIdentity["geometryNotes"] =
+            "NP2 Quad Base four-shank exact implantable geometry; "
+                + "384 simultaneously configurable channels"
+        try expectInvalidNeuropixels2Detail(
+            wrongChannelIdentity,
+            fourShank: true,
+            quadBase: true
+        )
+
+        let wrongVersion = probeCreate(
+            modelId: ProbePlanningContract.neuropixels2SingleShankModelId,
+            modelVersion: "source-snapshot-tampered",
+            acknowledged: true
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreate(wrongVersion)
+        }
     }
 
     @Test("NP1 preserves 960 sourced sites and cannot claim unfinished review as verified")
@@ -613,7 +1238,7 @@ struct ProbePlanningProtocolTests {
         targetPlan["placementInput"] = [
             "mode": ProbePlacementMode.targetAnglesDepth.rawValue,
             "entry": NSNull(),
-            "angleFrameId": "SUBJECT_SKULL_AP_ML_DV_UM",
+            "angleFrameId": "ATLAS_CANONICAL_AP_ML_DV_UM:test",
             "azimuthDegrees": -12.5,
             "elevationDegrees": -80.0,
             "insertionDepthMicrometres": 3_200.0,
@@ -1042,10 +1667,66 @@ struct ProbePlanningProtocolTests {
         ]
     }
 
+    private func expectInvalidCreatedGeometry(
+        _ plan: [String: Any],
+        request: ProbePlanCreateParameters,
+        catalogModel: ProbeCatalogModel
+    ) throws {
+        let result = try decode(
+            ProbePlanMutationResult.self,
+            mutationPayload(status: "created", revision: 8, plan: plan)
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreatedMutation(
+                result,
+                request: request,
+                catalogModel: catalogModel
+            )
+        }
+    }
+
     private func planDetail() -> [String: Any] {
-        let entry = physical(ap: 25, dv: 25, ml: 25, voxel: [1, 1, 1])
-        let target = physical(ap: 50, dv: 100, ml: 75, voxel: [2, 4, 3])
-        let tip = physical(ap: 75, dv: 200, ml: 125, voxel: [3, 8, 5])
+        try! planDetail(matchingCatalog: genericCatalogModel(detailed: true))
+    }
+
+    private func basePlanDetail() -> [String: Any] {
+        let frameId = "ATLAS_CANONICAL_AP_ML_DV_UM:test"
+        let azimuthDegrees = -12.5
+        let elevationDegrees = -80.0
+        let insertionDepthMicrometres = 3_200.0
+        let axialRotationDegrees = 5.0
+        let azimuth = azimuthDegrees * .pi / 180
+        let elevation = elevationDegrees * .pi / 180
+        let horizontal = cos(elevation)
+        let inward = TestVector3(
+            ap: horizontal * cos(azimuth),
+            ml: horizontal * sin(azimuth),
+            dv: sin(elevation)
+        )
+        let canonicalEntry = TestVector3(ap: -1_000, ml: -2_000, dv: -100)
+        let canonicalTarget = canonicalEntry.adding(inward.scaled(by: 2_400))
+        let canonicalTip = canonicalEntry.adding(
+            inward.scaled(by: insertionDepthMicrometres)
+        )
+        let reference = TestVector3(ap: 0, ml: 1, dv: 0)
+        let unrotatedLateral = reference
+            .subtracting(inward.scaled(by: reference.dot(inward)))
+            .normalized()
+        let unrotatedNormal = inward
+            .scaled(by: -1)
+            .cross(unrotatedLateral)
+            .normalized()
+        let lateral = unrotatedLateral.rotated(
+            around: inward,
+            degrees: axialRotationDegrees
+        )
+        let normal = unrotatedNormal.rotated(
+            around: inward,
+            degrees: axialRotationDegrees
+        )
+        let entry = physical(canonical: canonicalEntry, voxel: [40, 4, 80])
+        let target = physical(canonical: canonicalTarget, voxel: [23, 98, 84])
+        let tip = physical(canonical: canonicalTip, voxel: [18, 130, 85])
         return [
             "planId": planId,
             "planVersion": 1,
@@ -1072,40 +1753,50 @@ struct ProbePlanningProtocolTests {
             ],
             "manipulatorInput": [
                 "frameId": "SUBJECT_STEREOTAXIC_AP_ML_DV_UM",
-                "azimuthDegrees": -12.5,
-                "elevationDegrees": -80.0,
-                "insertionDepthMicrometres": 3_200.0,
-                "axialRotationDegrees": 5.0,
+                "azimuthDegrees": azimuthDegrees,
+                "elevationDegrees": elevationDegrees,
+                "insertionDepthMicrometres": insertionDepthMicrometres,
+                "axialRotationDegrees": axialRotationDegrees,
                 "angleConvention": ProbePlanningContract.angleConvention,
             ],
             "placementInput": [
                 "mode": ProbePlacementMode.stereotaxicTargetManipulator.rawValue,
                 "entry": NSNull(),
                 "angleFrameId": "SUBJECT_STEREOTAXIC_AP_ML_DV_UM",
-                "azimuthDegrees": -12.5,
-                "elevationDegrees": -80.0,
-                "insertionDepthMicrometres": 3_200.0,
-                "axialRotationDegrees": 5.0,
+                "azimuthDegrees": azimuthDegrees,
+                "elevationDegrees": elevationDegrees,
+                "insertionDepthMicrometres": insertionDepthMicrometres,
+                "axialRotationDegrees": axialRotationDegrees,
                 "angleConvention": ProbePlanningContract.angleConvention,
             ],
             "placement": [
                 "placementId": "55555555-5555-4555-8555-555555555555",
                 "method": "stereotaxic-target-plus-manipulator-angles",
-                "azimuthDegrees": -12.5,
-                "elevationDegrees": -80.0,
-                "insertionDepthMicrometres": 3_200.0,
-                "axialRotationDegrees": 5.0,
+                "azimuthDegrees": azimuthDegrees,
+                "elevationDegrees": elevationDegrees,
+                "insertionDepthMicrometres": insertionDepthMicrometres,
+                "axialRotationDegrees": axialRotationDegrees,
                 "angleConvention": ProbePlanningContract.angleConvention,
+                "inwardDirection": direction(frameId: frameId, vector: inward),
+                "localLateralDirection": direction(
+                    frameId: frameId,
+                    vector: lateral
+                ),
+                "localNormalDirection": direction(
+                    frameId: frameId,
+                    vector: normal
+                ),
+                "modelToPlacementUniformScale": 1.0,
                 "canonicalFrame": [
-                    "frameId": "SUBJECT_SKULL_AP_ML_DV_UM",
+                    "frameId": frameId,
                     "componentOrder": ["AP", "ML", "DV"],
                     "units": "micrometre",
                     "apPositiveDirection": "anterior",
                     "mlPositiveDirection": "right",
                     "dvPositiveDirection": "dorsal/up",
-                    "entry": canonical(ap: 0, ml: 0, dv: 0),
-                    "target": canonical(ap: -2_500, ml: -1_200, dv: -800),
-                    "tip": canonical(ap: -2_600, ml: -1_250, dv: -3_100),
+                    "entry": canonical(canonicalEntry),
+                    "target": canonical(canonicalTarget),
+                    "tip": canonical(canonicalTip),
                 ],
                 "atlasFrame": [
                     "frameId": ProbePlanningContract.atlasFrameId,
@@ -1117,22 +1808,8 @@ struct ProbePlanningProtocolTests {
                     "tip": tip,
                 ],
             ],
-            "shanks": [[
-                "shankId": "shank-1",
-                "entry": entry,
-                "tip": tip,
-                "widthMicrometres": 70.0,
-                "thicknessMicrometres": 20.0,
-                "conservativeEnvelopeRadiusMicrometres": 36.4,
-                "envelopeDefinition": "half diagonal of rectangular shank cross-section",
-            ]],
-            "recordingSites": [[
-                "shankId": "shank-1",
-                "siteId": "test-site-01",
-                "role": "recording",
-                "bank": NSNull(),
-                "point": target,
-            ]],
+            "shanks": [],
+            "recordingSites": [],
             "provenance": [
                 "calibrationId": calibrationId,
                 "calibrationVersion": 1,
@@ -1146,6 +1823,152 @@ struct ProbePlanningProtocolTests {
             "warning": "Animal research planning only — independently verify geometry",
             "usableForNavigation": false,
         ]
+    }
+
+    private func planDetail(
+        matchingCatalog model: [String: Any]
+    ) throws -> [String: Any] {
+        var plan = basePlanDetail()
+        let modelId = try #require(model["modelId"] as? String)
+        let modelVersion = try #require(model["modelVersion"] as? String)
+        let displayName = try #require(model["displayName"] as? String)
+        let verificationStatus = try #require(model["verificationStatus"] as? String)
+        let catalogShanks = try #require(model["shanks"] as? [[String: Any]])
+        let placement = try #require(plan["placement"] as? [String: Any])
+        let canonicalFrame = try #require(
+            placement["canonicalFrame"] as? [String: Any]
+        )
+        let canonicalEntry = try testVector(
+            canonicalFrame["entry"],
+            label: "canonical entry"
+        )
+        let canonicalTip = try testVector(
+            canonicalFrame["tip"],
+            label: "canonical tip"
+        )
+        let inward = try testVector(
+            placement["inwardDirection"],
+            label: "inward direction"
+        )
+        let axialTowardBase = inward.scaled(by: -1)
+        let lateral = try testVector(
+            placement["localLateralDirection"],
+            label: "local lateral direction"
+        )
+        let normal = try testVector(
+            placement["localNormalDirection"],
+            label: "local normal direction"
+        )
+        let scale = try #require(
+            placement["modelToPlacementUniformScale"] as? Double
+        )
+
+        plan["modelId"] = modelId
+        plan["modelVersion"] = modelVersion
+        plan["modelDisplayName"] = displayName
+        plan["verificationStatus"] = verificationStatus
+
+        var placedShanks: [[String: Any]] = []
+        var placedSites: [[String: Any]] = []
+        for catalogShank in catalogShanks {
+            let shankId = try #require(catalogShank["shankId"] as? String)
+            let width = try #require(catalogShank["widthMicrometres"] as? Double)
+            let thickness = try #require(
+                catalogShank["thicknessMicrometres"] as? Double
+            )
+            let centerLateral = try #require(
+                catalogShank["centerLateralMicrometres"] as? Double
+            )
+            let centerNormal = try #require(
+                catalogShank["centerNormalMicrometres"] as? Double
+            )
+            let shankOffset = lateral
+                .scaled(by: centerLateral * scale)
+                .adding(normal.scaled(by: centerNormal * scale))
+            let placedEntry = physical(
+                canonical: canonicalEntry.adding(shankOffset),
+                voxel: [1, 1, 1]
+            )
+            let placedTip = physical(
+                canonical: canonicalTip.adding(shankOffset),
+                voxel: [1, 1, 1]
+            )
+            let scaledWidth = width * scale
+            let scaledThickness = thickness * scale
+            placedShanks.append([
+                "shankId": shankId,
+                "entry": placedEntry,
+                "tip": placedTip,
+                "widthMicrometres": scaledWidth,
+                "thicknessMicrometres": scaledThickness,
+                "conservativeEnvelopeRadiusMicrometres":
+                    hypot(scaledWidth / 2, scaledThickness / 2),
+                "envelopeDefinition":
+                    "circumscribed-radius-of-rectangular-cross-section",
+            ])
+
+            let catalogSites = try #require(
+                catalogShank["sites"] as? [[String: Any]]
+            )
+            for catalogSite in catalogSites {
+                let axial = try #require(
+                    catalogSite["axialFromTipMicrometres"] as? Double
+                )
+                let siteLateral = try #require(
+                    catalogSite["lateralMicrometres"] as? Double
+                )
+                let siteNormal = try #require(
+                    catalogSite["normalMicrometres"] as? Double
+                )
+                let placedPoint = canonicalTip
+                    .adding(axialTowardBase.scaled(by: axial * scale))
+                    .adding(
+                        lateral.scaled(
+                            by: (centerLateral + siteLateral) * scale
+                        )
+                    )
+                    .adding(
+                        normal.scaled(
+                            by: (centerNormal + siteNormal) * scale
+                        )
+                    )
+                placedSites.append([
+                    "shankId": shankId,
+                    "siteId": try #require(catalogSite["siteId"] as? String),
+                    "role": try #require(catalogSite["role"] as? String),
+                    "bank": catalogSite["bank"] ?? NSNull(),
+                    "point": physical(
+                        canonical: placedPoint,
+                        voxel: [1, 1, 1]
+                    ),
+                ])
+            }
+        }
+        plan["shanks"] = placedShanks
+        plan["recordingSites"] = placedSites
+        return plan
+    }
+
+    private func decodedCatalogModel(
+        _ model: [String: Any]
+    ) throws -> ProbeCatalogModel {
+        let modelId = try #require(model["modelId"] as? String)
+        let modelVersion = try #require(model["modelVersion"] as? String)
+        let result = try decode(
+            ProbeCatalogGetResult.self,
+            [
+                "protocolVersion": 1,
+                "status": "found",
+                "catalogVersion": ProbePlanningContract.catalogVersion,
+                "model": model,
+            ]
+        )
+        try ProbePlanningValidator.validateCatalogGet(
+            result,
+            modelId: modelId,
+            modelVersion: modelVersion
+        )
+        return result.model
     }
 
     private func regionBundle() -> [String: Any] {
@@ -1162,7 +1985,7 @@ struct ProbePlanningProtocolTests {
             "usableForNavigation": false,
             "shanks": [[
                 "analysisId": "77777777-7777-4777-8777-777777777777",
-                "shankId": "shank-1",
+                "shankId": "test-shank-1",
                 "totalPathLengthMicrometres": 100.0,
                 "clippedPathLengthMicrometres": 100.0,
                 "outsideAtlasPathLengthMicrometres": 0.0,
@@ -1204,6 +2027,218 @@ struct ProbePlanningProtocolTests {
                 ],
             ]],
         ]
+    }
+
+    private func neuropixels2CatalogModel(
+        fourShank: Bool,
+        quadBase: Bool = false,
+        detailed: Bool
+    ) -> [String: Any] {
+        precondition(fourShank || !quadBase)
+        let shankCount = fourShank ? 4 : 1
+        var model: [String: Any] = [
+            "modelId": quadBase
+                ? ProbePlanningContract.neuropixels2QuadBaseFourShankModelId
+                : fourShank
+                    ? ProbePlanningContract.neuropixels2StandardFourShankModelId
+                    : ProbePlanningContract.neuropixels2SingleShankModelId,
+            "modelVersion": ProbePlanningContract.neuropixels2ModelVersion,
+            "displayName": quadBase
+                ? ProbePlanningContract.neuropixels2QuadBaseFourShankDisplayName
+                : fourShank
+                    ? ProbePlanningContract.neuropixels2StandardFourShankDisplayName
+                    : ProbePlanningContract.neuropixels2SingleShankDisplayName,
+            "manufacturer": "imec",
+            "productCode": quadBase
+                ? ProbePlanningContract.neuropixels2QuadBaseFourShankProductCode
+                : fourShank
+                    ? ProbePlanningContract.neuropixels2StandardFourShankProductCode
+                    : ProbePlanningContract.neuropixels2SingleShankProductCode,
+            "hardwareRevision": NSNull(),
+            "verificationStatus": ProbePlanningContract.sourceTranscribedReviewPendingStatus,
+            "verifiedDeviceLabelPermitted": false,
+            "shankCount": shankCount,
+            "siteCount": shankCount * 1_280,
+            "units": "micrometre",
+            "warning": ProbePlanningContract.sourceTranscribedReviewPendingWarning,
+        ]
+        guard detailed else { return model }
+
+        model["geometryNotes"] = quadBase
+            ? "NP2 Quad Base four-shank exact implantable geometry; "
+                + "1536 simultaneously configurable channels"
+            : fourShank
+                ? "NP2 standard four-shank exact implantable geometry; "
+                    + "384 simultaneously configurable channels"
+                : "NP2 single-shank exact implantable geometry; "
+                    + "384 simultaneously configurable channels"
+        model["reviewNotes"] =
+            "Independent human transcription review remains pending"
+        model["completeGeometryTranscribed"] = true
+        model["independentTranscriptionReviewCompleted"] = false
+        model["transcribedBy"] = "Brain3D automated source transcription"
+        model["independentlyReviewedBy"] = NSNull()
+        model["coordinateOrigin"] = ProbePlanningContract.coordinateOrigin
+        model["localAxisDefinition"] = ProbePlanningContract.localAxisDefinition
+        model["insertionAxisDefinition"] = ProbePlanningContract.insertionAxisDefinition
+        model["primarySources"] = neuropixels2Sources(includeQuadBase: quadBase)
+        model["shanks"] = (0 ..< shankCount).map(neuropixels2Shank)
+        return model
+    }
+
+    private func neuropixels2Shank(_ shankIndex: Int) -> [String: Any] {
+        let sites: [[String: Any]] = (0 ..< 1_280).map { siteIndex in
+            let siteId = String(
+                format: "shank-%d-electrode-%04d",
+                shankIndex,
+                siteIndex
+            )
+            let axial = Double(206 + 15 * (siteIndex / 2))
+            let lateral = Double(-8 + 32 * (siteIndex % 2))
+            return [
+                "siteId": siteId,
+                "role": "recording",
+                "bank": "virtual-bank-\(siteIndex / 384)",
+                "axialFromTipMicrometres": axial,
+                "lateralMicrometres": lateral,
+                "normalMicrometres": 0.0,
+            ]
+        }
+        let shank: [String: Any] = [
+            "shankId": "shank-\(shankIndex)",
+            "lengthMicrometres": 10_000.0,
+            "widthMicrometres": 70.0,
+            "thicknessMicrometres": 24.0,
+            "tipGeometry": "chisel",
+            "tipLengthMicrometres": 175.0,
+            "tipGeometryNotes":
+                "The official imec specifications report a 175 micrometre physical "
+                + "chisel tip at approximately 20 degrees. ProbeTable and SpikeGLX "
+                + "separately report 206 micrometres from the physical tip to the "
+                + "center of the lowest electrode row.",
+            "centerLateralMicrometres": Double(shankIndex * 250),
+            "centerNormalMicrometres": 0.0,
+            "siteCount": 1_280,
+            "sites": sites,
+        ]
+        return shank
+    }
+
+    private func neuropixels2Sources(
+        includeQuadBase: Bool
+    ) -> [[String: Any]] {
+        var sources: [[String: Any]] = [
+            [
+                "title": "Neuropixels 2.0 small-animal probe data sheet",
+                "sourceUrl": "https://www.neuropixels.org/_files/ugd/"
+                    + "328966_2b39661f072d405b8d284c3c73588bc6.pdf",
+                "documentRevision": "No printed revision identifier; PDF metadata "
+                    + "modification date 2024-09-18",
+                "retrievedOn": "2026-07-23",
+                "sha256": ProbePlanningContract.neuropixels2SpecSHA256,
+                "citation": "imec, Neuropixels 2.0 data sheet, pp. 1-3: one or four "
+                    + "10 mm by 70 micrometre by 24 micrometre shanks; 1280 sites "
+                    + "per shank; 15 micrometre axial and 32 micrometre lateral "
+                    + "pitches; 175 micrometre chisel tip; and "
+                    + "NP2003/NP2004/NP2013/NP2014 order codes.",
+            ],
+            [
+                "title": "Neuropixels 2.0 User Manual V1.0.6 archive",
+                "sourceUrl": "https://www.neuropixels.org/_files/archives/"
+                    + "328966_021470f37e3a4a4a88a256ab11639765.zip"
+                    + "?dn=Neuropixels_2-0_User_Manual_V1-0-6.zip",
+                "documentRevision": "Neuropixels 2.0 User Manual V1.0.6",
+                "retrievedOn": "2026-07-23",
+                "sha256": ProbePlanningContract.neuropixels2UserManualZipSHA256,
+                "citation": "imec, Neuropixels 2.0 User Manual V1.0.6, pp. 14 and "
+                    + "41-43: physical dimensions, two-column site layout, 1280 "
+                    + "electrode identities per shank, virtual banks, and "
+                    + "left-to-right shank numbering at 250 micrometre pitch.",
+            ],
+            [
+                "title": "Neuropixels 2.0 Electrode-Channel Mapping workbook",
+                "sourceUrl": "https://www.neuropixels.org/_files/ugd/"
+                    + "328966_43eea6555fa94a5bb1ddb51f00696fc3.xlsx"
+                    + "?dn=Neuropix_2_0_Electrode-Channel-mapping.xlsx",
+                "documentRevision": "Official workbook retrieved 2026-07-23; sheets "
+                    + "for single shank and multi-shank shanks 0-3",
+                "retrievedOn": "2026-07-23",
+                "sha256": ProbePlanningContract.neuropixels2ElectrodeMappingSHA256,
+                "citation": "imec, Neuropixels 2.0 Electrode-Channel Mapping: "
+                    + "electrode identities 0-1279 and bank/channel connectivity "
+                    + "for the single- and four-shank products.",
+            ],
+            [
+                "title": "ProbeTable 1.8 probe_features.json",
+                "sourceUrl": "https://raw.githubusercontent.com/billkarsh/ProbeTable/"
+                    + "207f7bf424b0fa26f271700b970e27a58a9a1111/Tables/"
+                    + "probe_features.json",
+                "documentRevision": "table_version 1.8; git commit "
+                    + "207f7bf424b0fa26f271700b970e27a58a9a1111",
+                "retrievedOn": "2026-07-23",
+                "sha256": ProbePlanningContract.probeTableSHA256,
+                "citation": "Bill Karsh, ProbeTable entries NP2003, NP2004, NP2013, "
+                    + "NP2014, NP2020, and NP2021: shank/site counts, 206 "
+                    + "micrometre tip-to-lowest-row-center distance, pitches, "
+                    + "left-edge site offset, and 250 micrometre shank pitch.",
+            ],
+            [
+                "title": "SpikeGLX Neuropixels geometry implementation",
+                "sourceUrl": "https://raw.githubusercontent.com/billkarsh/SpikeGLX/"
+                    + "d67bee45fa2635873456eb5d3f5e5a051690e64f/Src-imro/IMROTbl.cpp",
+                "documentRevision": "git commit "
+                    + "d67bee45fa2635873456eb5d3f5e5a051690e64f",
+                "retrievedOn": "2026-07-23",
+                "sha256": ProbePlanningContract.spikeGLXGeometrySHA256,
+                "citation": "SpikeGLX IMROTbl.cpp cases NP2003/NP2004, "
+                    + "NP2013/NP2014, and NP2020/NP2021: 206 micrometre tip "
+                    + "offset, x0=27, lateral pitch=32, axial pitch=15, shank "
+                    + "width=70, and shank pitch=250.",
+            ],
+        ]
+        if includeQuadBase {
+            sources.append([
+                "title": "Neuropixels 2.0 Quad Base multishank data sheet",
+                "sourceUrl": "https://www.neuropixels.org/_files/ugd/"
+                    + "328966_4e39ab2e46424dc9b3efa446d286ab0f.pdf",
+                "documentRevision": "No printed revision identifier; PDF metadata "
+                    + "modification date 2025-06-16",
+                "retrievedOn": "2026-07-23",
+                "sha256": ProbePlanningContract.neuropixels2QuadBaseSpecSHA256,
+                "citation": "imec, Neuropixels 2.0 Quad Base data sheet, pp. 1-3: "
+                    + "four 10 mm shanks at 250 micrometre pitch, 5120 sites, "
+                    + "70 by 24 micrometre cross-section, 175 micrometre chisel "
+                    + "tip, and NP2020/NP2021 order codes.",
+            ])
+        }
+        return sources
+    }
+
+    private func expectInvalidNeuropixels2Detail(
+        _ model: [String: Any],
+        fourShank: Bool,
+        quadBase: Bool = false
+    ) throws {
+        let result = try decode(
+            ProbeCatalogGetResult.self,
+            [
+                "protocolVersion": 1,
+                "status": "found",
+                "catalogVersion": ProbePlanningContract.catalogVersion,
+                "model": model,
+            ]
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCatalogGet(
+                result,
+                modelId: quadBase
+                    ? ProbePlanningContract.neuropixels2QuadBaseFourShankModelId
+                    : fourShank
+                        ? ProbePlanningContract.neuropixels2StandardFourShankModelId
+                        : ProbePlanningContract.neuropixels2SingleShankModelId,
+                modelVersion: ProbePlanningContract.neuropixels2ModelVersion
+            )
+        }
     }
 
     private func neuropixelsCatalogModel(detailed: Bool) -> [String: Any] {
@@ -1382,6 +2417,44 @@ struct ProbePlanningProtocolTests {
         )
     }
 
+    private func matchingCreateRequest(
+        for model: ProbeCatalogModel
+    ) -> ProbePlanCreateParameters {
+        ProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            targetId: targetId,
+            modelId: model.modelId,
+            modelVersion: model.modelVersion,
+            name: "Left VISp",
+            azimuthDegrees: -12.5,
+            elevationDegrees: -80,
+            insertionDepthMicrometres: 3_200,
+            axialRotationDegrees: 5,
+            customGeometryAcknowledged: true
+        )
+    }
+
+    private func matchingUpdateRequest(
+        for model: ProbeCatalogModel
+    ) -> ProbePlanUpdateParameters {
+        ProbePlanUpdateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            planId: planId,
+            expectedPlanInputSha256: hex("a"),
+            targetId: targetId,
+            modelId: model.modelId,
+            modelVersion: model.modelVersion,
+            name: "Left VISp",
+            azimuthDegrees: -12.5,
+            elevationDegrees: -80,
+            insertionDepthMicrometres: 3_200,
+            axialRotationDegrees: 5,
+            customGeometryAcknowledged: true
+        )
+    }
+
     private func physical(ap: Double, dv: Double, ml: Double, voxel: [Int]) -> [String: Any] {
         [
             "apMicrometres": ap,
@@ -1392,8 +2465,51 @@ struct ProbePlanningProtocolTests {
         ]
     }
 
+    private func physical(
+        canonical point: TestVector3,
+        voxel: [Int]
+    ) -> [String: Any] {
+        physical(ap: -point.ap, dv: -point.dv, ml: -point.ml, voxel: voxel)
+    }
+
     private func canonical(ap: Double, ml: Double, dv: Double) -> [String: Any] {
         ["apMicrometres": ap, "mlMicrometres": ml, "dvMicrometres": dv]
+    }
+
+    private func canonical(_ point: TestVector3) -> [String: Any] {
+        canonical(ap: point.ap, ml: point.ml, dv: point.dv)
+    }
+
+    private func direction(
+        frameId: String,
+        vector: TestVector3
+    ) -> [String: Any] {
+        [
+            "frameId": frameId,
+            "componentOrder": ["AP", "ML", "DV"],
+            "units": "dimensionless",
+            "ap": vector.ap,
+            "ml": vector.ml,
+            "dv": vector.dv,
+        ]
+    }
+
+    private func testVector(
+        _ raw: Any?,
+        label: String
+    ) throws -> TestVector3 {
+        let payload = try #require(raw as? [String: Any], "\(label) is not an object")
+        return TestVector3(
+            ap: try #require(
+                (payload["ap"] ?? payload["apMicrometres"]) as? Double
+            ),
+            ml: try #require(
+                (payload["ml"] ?? payload["mlMicrometres"]) as? Double
+            ),
+            dv: try #require(
+                (payload["dv"] ?? payload["dvMicrometres"]) as? Double
+            )
+        )
     }
 
     private func regionPoint(ap: Double, ml: Double, dv: Double) -> [String: Any] {

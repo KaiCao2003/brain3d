@@ -1,6 +1,6 @@
 # Scientific Validation Record
 
-Reviewed: 2026-07-22
+Reviewed: 2026-07-23
 
 This file distinguishes implemented and tested software behavior from scientific or procedural
 validation. Brain3D is restricted to non-human mouse research. No clinical, veterinary-device,
@@ -15,10 +15,12 @@ claimed.
 | Allen atlas | Strict `allen_mouse_25um` v1.2 identity, metadata/array checks, real-cache smoke paths | Subject anatomy and 25 µm targeting accuracy |
 | Calibration | Typed CRUD, matched-landmark fits, residual/QC gates, transform round trips, hash/revision binding | Accuracy of user measurements and biological registration |
 | Target/probe | AP/ML/DV sign tests, projection provenance, versioned placement, overlays, exact voxel traversal/export | Insertion deformation and histological endpoint |
+| NP2 geometry | The supported 1,280-site single-shank and 5,120-site standard four-shank choices are derived from pinned source constants; shank/site count, pitch, offset, transform, and plan-creation tests | Independent full-table review and physical-probe conformance |
 | NP1 geometry | All 960 sites derived from pinned source snapshots; schema/count/pattern tests | Independent full-table review and physical-probe conformance |
+| VesSAP display geometry | Pinned source/asset/transform digests; true-path extraction; axis/laterality/bounds/label checks; Python→Swift binary protocol; slice/3D render tests | Subject registration, live anatomy, clearing/inter-animal error, and qualified vessel surfaces |
 | LAMBADA evidence | Reproducible extraction, source/asset hashes, schema/bounds/radius/run checks, and digest-bound rejected qualification | Biological laterality, whole-brain coverage, and subject-specific vasculature |
-| Vessel V3 | Legacy synthetic AABB-candidate and tapered-surface tests; production capability is absent | A qualified vessel source, empirical uncertainty, and biological decision thresholds |
-| SceneKit | Coordinate-transform, brain/probe mesh, picking, and off-screen render tests; archived tube tests are not product reachability | Anatomical truth beyond supplied geometry |
+| Vessel V3 | Legacy synthetic AABB-candidate and tapered-surface tests; production capability is absent | Subject-specific geometry, empirical uncertainty, and biological decision thresholds |
+| SceneKit | Coordinate-transform, brain/probe/vessel mesh, picking, and off-screen render tests | Anatomical truth beyond supplied geometry |
 | Persistence | Project revisions, checksums, migrations, backup recovery, source/input digests | Long-term regulated record requirements |
 
 The macOS application is built and ad-hoc signed as a development bundle and exercised as a real
@@ -57,6 +59,23 @@ reference, a rigid/similarity fit, and user-sourced QC limits. The result carrie
 atlas hashes. The Allen CCF supplies no unique official bregma transform; passing QC means only
 that the declared numeric rules passed.
 
+## Neuropixels 2.0 evidence
+
+The supported NP2 catalog entries cover `NP2003`/`NP2004` (single shank) and standard
+`NP2013`/`NP2014` (four shanks); both expose 384 simultaneous channels. The transcription uses
+pinned imec data-sheet, User Manual V1.0.6, electrode-channel mapping, ProbeTable 1.8, and
+SpikeGLX snapshots. Quad Base remains archived compatibility evidence and is not selectable.
+
+Each 10 mm × 70 µm × 24 µm shank contains 1,280 point sites in 640 two-site rows. Coordinates
+use the source-backed 206 µm tip-to-lowest-row-center distance, 15 µm axial pitch, and −8/+24 µm
+lateral centers. Four-shank centers are 0/+250/+500/+750 µm from primary leftmost `shank-0`.
+The manufacturer 175 µm chisel-tip length remains a distinct physical dimension.
+
+The two supported choices and archived Quad Base definition are
+**`source-transcribed-review-pending`**. Exact software reconstruction and end-to-end creation
+tests do not establish manufacturing tolerance, independent transcription review,
+physical-device conformance, implantation accuracy, or tissue response.
+
 ## Neuropixels 1.0 evidence
 
 The NP1 NP1000 / `PRB_1_4_0480_1` entry transcribes all 960 sites from four pinned sources:
@@ -74,6 +93,34 @@ shank, 70 µm width, 24 µm thickness, row/site pattern, references, and banks.
 The verification status is **`source-transcribed-review-pending`**. The transcription has not
 received an independent full-table human review, so it cannot be described as independently
 verified manufacturer geometry. See [Probe Models](PROBE_MODELS.md).
+
+## VesSAP display-reference evidence
+
+Source: VesSAP `BL6J-no1`, Todorov et al., *Machine learning analysis of whole mouse brain
+vasculature*, [DOI `10.1038/s41592-020-0792-1`](https://doi.org/10.1038/s41592-020-0792-1),
+public repository release 2021.10.01, CC BY-NC 4.0.
+
+The derivative begins with the official same-grid 3 µm skeleton and radius volumes. Radius ≥5
+source voxels retains 1,262,706 centerline voxels (nominal radius ≥15 µm / diameter ≥30 µm).
+Only mapped edges induced by true 26-neighbour source adjacency are retained; graph endpoint
+chords are never substituted. Paths are coalesced on a 50 µm display grid, yielding 196,377
+points, 76,622 runs, and 119,755 segments in a 1,853,131-byte NPZ with SHA-256
+`9300dacf25ca57a5d23377ca0dc885e34ff0d18e8d21ef7590c6dcd156cf5db7`.
+
+The authors' Euler + B-spline transform is interpreted as
+`AP_um = 30*T_y`, `DV_um = 30*T_z`, `ML_um = 11390 - 30*T_x`. The ML reflection is mandatory:
+VesSAP moving-x increases left-to-right while BrainGlobe ASR ML increases right-to-left.
+Deterministic validation used 20,000 graph nodes. It found 99.705% in atlas bounds, 99.4618%
+grouped-region agreement at 10 µm excluding background, 99.9787% agreement between the official
+registered signed-label NIfTI and supplied processed groups, and 99.9794% laterality agreement at
+the canonical midpoint. Four laterality discrepancies were all within 5.38 µm of midline.
+
+These checks qualify the coordinate interpretation for a display reference. They do not qualify
+clearance. This is one ex-vivo cleared specimen; no target-registration-error, bregma/skull
+registration, clearing-distortion, or inter-animal bound is published. Sampled nonlinear-transform
+singular values span 0.672–1.560, so a scalar source radius is not a qualified circular
+atlas-space surface. The runtime therefore exposes geometry but rejects clearance analysis.
+See [the full evidence record](docs/VESSAP_MAJOR_VESSELS.md).
 
 ## LAMBADA major-vessel evidence
 
@@ -104,9 +151,9 @@ has no persisted biological hemisphere/laterality binding. Whole-brain coverage 
 are unqualified; numeric points on both sides of the array midpoint do not resolve either issue,
 and no mirroring is permitted.
 
-The runtime omits both reference-vessel capabilities and returns
-`VESSEL_GEOMETRY_UNAVAILABLE` from all reference metadata, geometry, and analysis methods. The
-canonical rejection report is
+No LAMBADA handler or capability is registered in the current runtime, and the production
+reference endpoints never load this asset; those endpoints now belong exclusively to the
+separately qualified VesSAP display reference. The canonical LAMBADA rejection report is
 [`docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json`](docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
 SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 The source also excludes pial and choroidal vessels; the derivative filters smaller vessels; and
@@ -122,10 +169,10 @@ interpolated radius, probe envelope, required margin,
 registration uncertainty, adjusted clearance, closest points, insertion depth, conflict class,
 source identity, algorithm version, and input hashes.
 
-This algorithm is not a production capability for P60_606. The gate runs before project, atlas,
-asset, or analysis access, so the application produces neither positive conflicts nor absence
-results from this derivative. User-supplied margins or uncertainty cannot override failed source
-qualification.
+This algorithm is not a production capability for VesSAP or P60_606. The display-only gate runs
+before project, asset, or analysis access, so the application produces neither positive conflicts
+nor absence results. User-supplied margins or uncertainty cannot manufacture missing source
+uncertainty bounds.
 
 ### Reproducible performance evidence
 
@@ -159,7 +206,7 @@ guarantee, or scientific/surgical validation.
 
 The Kim 2022 population vascular-length-density field and user subject-image registration remain
 in the Python backend for reproducibility of older work. They are absent from the primary UI and
-do not bypass the LAMBADA rejection gate. A scalar density projection contains no
+do not bypass the VesSAP display-only or LAMBADA rejection gates. A scalar density projection contains no
 individual vessel path/radius; a registered image is not automatically a vessel segmentation.
 
 ## Required evidence before qualification
@@ -167,10 +214,9 @@ individual vessel path/radius; a registered image is not automatically a vessel 
 1. Independent review of every NP1 source-derived dimension and site coordinate.
 2. Repeated-observer subject calibration studies with declared ground truth.
 3. Phantom and histology studies for planned versus achieved probe paths and sites.
-4. A trustworthy whole-brain vessel source with independently verified Allen orientation,
-   biological laterality, and bregma/subject-registration evidence.
-5. Subject-specific vascular ground truth, reference-graph failure-mode studies, and prospectively
-   defined margin/uncertainty criteria.
+4. Subject-specific vascular ground truth with measured bregma/skull registration error,
+   clearing/live-tissue distortion, inter-animal variation, and false-negative coverage.
+5. Reference-graph failure-mode studies and prospectively defined margin/uncertainty criteria.
 6. Formal animal-workflow usability, accessibility, interruption, and recovery studies.
 7. Deterministic runtime packaging, SBOM, signing/notarization, and clean-Mac qualification.
 

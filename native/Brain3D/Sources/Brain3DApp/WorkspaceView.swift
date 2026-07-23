@@ -24,6 +24,10 @@ struct WorkspaceView: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 12)
 
+            AtlasRegionBrowserBar(model: model)
+                .padding(.horizontal, 18)
+                .padding(.bottom, 10)
+
             selectedWorkspace
                 .padding([.horizontal, .bottom], 18)
         }
@@ -56,6 +60,214 @@ struct SafetyNotice: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .accessibilityLabel("Safety restriction")
             .accessibilityValue(SafetyPolicy.planningOnlyNotice)
+    }
+}
+
+private struct AtlasRegionBrowserBar: View {
+    @ObservedObject var model: PlannerViewModel
+    @State private var isBrowserPresented = false
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Button {
+                isBrowserPresented.toggle()
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "list.bullet.indent")
+                    Text("Allen regions")
+                    if let hierarchy = model.atlasRegionHierarchy {
+                        Text(hierarchy.regions.count.formatted())
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    } else if model.atlasRegionHierarchyError == nil {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                    Image(systemName: "chevron.down")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .popover(isPresented: $isBrowserPresented, arrowEdge: .bottom) {
+                browser
+            }
+            .accessibilityLabel("Browse complete Allen atlas ontology")
+
+            if let region = model.highlightedAtlasRegion {
+                selectedRegionChip(region)
+            } else if let error = model.atlasRegionHierarchyError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .lineLimit(1)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var browser: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Allen atlas ontology")
+                    .font(.headline)
+                Spacer()
+                if let count = model.atlasRegionHierarchy?.regions.count {
+                    Text("\(count.formatted()) structures")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            HStack(spacing: 7) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField(
+                    "Search acronym, name, or structure ID",
+                    text: $model.atlasRegionSearchText
+                )
+                .textFieldStyle(.plain)
+                if model.atlasRegionSearchInProgress {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if !model.atlasRegionSearchText.isEmpty {
+                    Button {
+                        model.atlasRegionSearchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("Clear Allen region search")
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+            .task(id: model.atlasRegionSearchText) {
+                await model.searchAtlasRegions(query: model.atlasRegionSearchText)
+            }
+
+            Divider()
+
+            browserContents
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .padding(14)
+        .frame(width: 420, height: 520)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Complete Allen atlas region browser")
+    }
+
+    @ViewBuilder
+    private var browserContents: some View {
+        if let hierarchy = model.atlasRegionHierarchy {
+            if model.atlasRegionSearchText
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .isEmpty
+            {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        OutlineGroup(
+                            hierarchy.roots,
+                            children: \.outlineChildren
+                        ) { node in
+                            regionButton(node.region)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if model.atlasRegionSearchInProgress {
+                ProgressView("Searching complete ontology…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if !model.atlasRegionSearchResults.isEmpty {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        ForEach(model.atlasRegionSearchResults) { result in
+                            regionButton(result.region)
+                        }
+                    }
+                }
+            } else if let error = model.atlasRegionSearchError {
+                ContentUnavailableView(
+                    "Region search unavailable",
+                    systemImage: "exclamationmark.triangle",
+                    description: Text(error)
+                )
+            } else {
+                ContentUnavailableView.search(
+                    text: model.atlasRegionSearchText
+                )
+            }
+        } else if let error = model.atlasRegionHierarchyError {
+            ContentUnavailableView(
+                "Atlas ontology unavailable",
+                systemImage: "exclamationmark.triangle",
+                description: Text(error)
+            )
+        } else {
+            ProgressView("Loading complete atlas ontology…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func regionButton(_ region: AtlasRegionSummary) -> some View {
+        Button {
+            isBrowserPresented = false
+            Task {
+                await model.selectAtlasRegion(region)
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(atlasRegionColor(region.rgb))
+                    .frame(width: 9, height: 9)
+                Text(region.acronym)
+                    .font(.caption.weight(.semibold))
+                    .frame(minWidth: 72, alignment: .leading)
+                Text(region.name)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 7)
+            .padding(.vertical, 5)
+        }
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityLabel("\(region.acronym), \(region.name)")
+    }
+
+    private func selectedRegionChip(_ region: AtlasRegionSummary) -> some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(atlasRegionColor(region.rgb))
+                .frame(width: 9, height: 9)
+            Text(region.acronym)
+                .font(.caption.weight(.semibold))
+            Text(region.name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Button {
+                model.clearAtlasRegionSelection()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .accessibilityLabel("Clear selected Allen region")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.quaternary, in: Capsule())
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Selected Allen atlas region")
     }
 }
 
@@ -274,7 +486,7 @@ private struct DorsalAtlasWorkspace: View {
                 Text(
                     model.majorVesselGeometry == nil
                         ? "Vessels unavailable"
-                        : "≥30 µm · full-depth · excludes pial/choroidal"
+                        : "≥30 µm · display only"
                 )
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(
@@ -440,9 +652,6 @@ private struct ThreeDimensionalWorkspace: View {
         .task(id: model.threeDimensionalPreparationIdentity) {
             await model.prepareThreeDimensionalScene()
         }
-        .onDisappear {
-            model.clearThreeDimensionalRegionSelection()
-        }
         .accessibilityValue(model.threeDimensionalPhase.message)
     }
 
@@ -466,7 +675,22 @@ private struct ThreeDimensionalWorkspace: View {
     private var controlsOverlay: some View {
         VStack(spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
-                regionHUD
+                if model.threeDimensionalPickInProgress {
+                    ProgressView("Resolving atlas region…")
+                        .controlSize(.small)
+                        .font(.caption)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                } else if let error = model.threeDimensionalPickError {
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                        .lineLimit(2)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
                 Spacer(minLength: 24)
                 Button {
                     resetGeneration &+= 1
@@ -481,7 +705,10 @@ private struct ThreeDimensionalWorkspace: View {
             }
             Spacer()
             if model.majorVesselGeometry != nil {
-                Label("Reference vessels · diameter ≥30 µm", systemImage: "point.3.connected.trianglepath.dotted")
+                Label(
+                    "Reference vessels · diameter ≥30 µm · display only",
+                    systemImage: "point.3.connected.trianglepath.dotted"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 11)
@@ -494,68 +721,15 @@ private struct ThreeDimensionalWorkspace: View {
         }
         .padding(14)
     }
+}
 
-    @ViewBuilder
-    private var regionHUD: some View {
-        if let hit = model.threeDimensionalRegionHit {
-            HStack(spacing: 9) {
-                Circle()
-                    .fill(regionColor(hit.region.rgb))
-                    .frame(width: 10, height: 10)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(hit.region.acronym)
-                        .font(.caption.weight(.semibold))
-                    Text(hit.region.name)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                Text(hit.hemisphere.rawValue.capitalized)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel("Selected mouse atlas region")
-        } else if let error = model.threeDimensionalPickError {
-            Label(error, systemImage: "exclamationmark.triangle")
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .lineLimit(2)
-                .padding(.horizontal, 11)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        } else {
-            HStack(spacing: 8) {
-                if model.threeDimensionalPickInProgress {
-                    ProgressView().controlSize(.small)
-                } else {
-                    Image(systemName: "cursorarrow.click")
-                }
-                Text(
-                    model.threeDimensionalPickInProgress
-                        ? "Resolving atlas region…"
-                        : "Click the brain to inspect a region"
-                )
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 11)
-            .padding(.vertical, 8)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-        }
-    }
-
-    private func regionColor(_ rgb: [Int]) -> Color {
-        guard rgb.count == 3 else { return .secondary }
-        return Color(
-            red: Double(rgb[0]) / 255,
-            green: Double(rgb[1]) / 255,
-            blue: Double(rgb[2]) / 255
-        )
-    }
+private func atlasRegionColor(_ rgb: [Int]) -> Color {
+    guard rgb.count == 3 else { return .secondary }
+    return Color(
+        red: Double(rgb[0]) / 255,
+        green: Double(rgb[1]) / 255,
+        blue: Double(rgb[2]) / 255
+    )
 }
 
 private extension AtlasSliceOrientation {

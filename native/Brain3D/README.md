@@ -2,7 +2,8 @@
 
 This Swift package is the native half of the Brain3D animal-research planner. SwiftUI owns the
 single-view workspace and controls; SceneKit renders backend-validated 3D brain and probe geometry
-payloads; a typed NDJSON subprocess boundary delegates scientific state and analysis to Python.
+plus display-only major-vessel payloads; a typed NDJSON subprocess boundary delegates scientific
+state and analysis to Python.
 
 > **Animal research only — non-human and non-clinical.** This development app is not an
 > installable production release or a qualified navigation device.
@@ -12,21 +13,26 @@ payloads; a typed NDJSON subprocess boundary delegates scientific state and anal
 - Exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, one selected mode at a time.
 - Independent retained slice depths, with slider/buttons/wheel, pan, zoom, and compact
   click-to-replace region labels. A region click never changes depth.
+- Complete paged Allen ontology browsing/search with one selection shared across all five modes;
+  only the selected structure mesh is loaded for 3D highlighting.
 - No focus mode, crosshair, 2×2 layout, or capillary display.
 - QC-gated subject calibration and AP/ML/DV target projection from bregma; negative values mean
   posterior, left, and deep/ventral.
 - Probe placement, 2D/3D overlays, region traversal, inspection, and CSV/JSON export.
-- No vessel layer in slices, Dorsal, or 3D. The packaged P60_606 derivative is archived evidence
-  whose hemisphere/laterality and whole-brain qualification is rejected; it is not mirrored.
-- No vessel-analysis capability. Reference metadata, geometry, and analysis requests fail with
-  `VESSEL_GEOMETRY_UNAVAILABLE` without serving points.
+- VesSAP `BL6J-no1` nominal diameter-≥30 µm paths overlaid in all five views. The layer is one
+  cleared C57BL/6J reference, reduced at 50 µm for display, not subject-specific.
+- No vessel-analysis capability. Geometry is display-only and analysis fails with
+  `VESSEL_ANALYSIS_UNAVAILABLE`.
 
-The NP1 NP1000 / `PRB_1_4_0480_1` catalog model is a complete source transcription whose
-independent review is still pending; the UI requires acknowledgement. The archived vessel source
-is a hemisphere specimen and its exact graph lacks a persisted biological laterality binding;
-AP/DV evidence alone cannot qualify it for display or analysis. The canonical rejection report
-is [retained with repository evidence](../../docs/evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
-SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+The production catalog contains exactly NP2 single shank (`NP2003`/`NP2004`) and standard
+four shank (`NP2013`/`NP2014`). Both source transcriptions remain independent-review pending and
+require acknowledgement. Quad Base, NP1, and the synthetic fixture remain archived definitions,
+not new-plan choices.
+
+The older P60_606 vessel source remains archived because its hemisphere/laterality and whole-brain
+coverage are unqualified; it is not mirrored or mixed into VesSAP. The visible VesSAP layer also
+cannot establish subject-specific clearance, absence, suitability, or safety; see
+[its evidence record](../../docs/VESSAP_MAJOR_VESSELS.md).
 Population density and subject-image registration remain archived in Python and absent from the
 primary UI. Only `allen_mouse_25um` v1.2 is accepted in this 25 µm testing phase.
 

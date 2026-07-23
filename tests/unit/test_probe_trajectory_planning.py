@@ -40,6 +40,7 @@ from mouse_brain_planner.surgery.trajectory import (
     direction_from_angles,
     placed_recording_sites,
     placed_shank_centerlines,
+    placement_cross_section_axes,
     placement_from_bregma_relative_mm,
     placement_from_entry_angles_depth,
     placement_from_entry_target,
@@ -412,6 +413,35 @@ def test_angle_round_trip_and_serialized_geometry_tamper_are_fail_closed() -> No
     payload["insertion_depth_um"] = 2100
     with pytest.raises(ValidationError, match="does not match entry-tip"):
         NormalizedProbePlacement.model_validate(payload)
+
+
+def test_legacy_missing_local_axes_resolve_to_the_exact_effective_geometry_basis() -> None:
+    model = _custom_model()
+    current = placement_from_entry_angles_depth(
+        context=AnimalSurgeryContext(),
+        model=model,
+        name="basis",
+        entry=_point("F", 10, -20, 30),
+        azimuth_deg=23,
+        elevation_deg=-61,
+        insertion_depth_um=2000,
+        axial_rotation_deg=37,
+    )
+    current_lateral, current_normal = placement_cross_section_axes(current)
+    payload = current.model_dump(mode="python")
+    payload.pop("local_lateral_direction")
+    payload.pop("local_normal_direction")
+    payload.pop("model_to_placement_uniform_scale")
+    legacy = NormalizedProbePlacement.model_validate(payload)
+
+    assert legacy.local_lateral_direction is None
+    assert legacy.local_normal_direction is None
+    assert legacy.model_to_placement_uniform_scale == pytest.approx(1)
+    legacy_lateral, legacy_normal = placement_cross_section_axes(legacy)
+    assert legacy_lateral == pytest.approx(current_lateral)
+    assert legacy_normal == pytest.approx(current_normal)
+    assert placed_shank_centerlines(model, legacy) == placed_shank_centerlines(model, current)
+    assert placed_recording_sites(model, legacy) == placed_recording_sites(model, current)
 
 
 def test_recording_sites_map_from_tip_toward_base_and_custom_export_is_acknowledged() -> None:

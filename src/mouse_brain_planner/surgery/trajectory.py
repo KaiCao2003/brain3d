@@ -310,7 +310,7 @@ def transform_probe_placement_uniform(
     if placement.entry.frame_id != transform.source_frame.frame_id:
         raise ProbePlacementError("probe placement frame does not match calibration transform")
 
-    source_lateral, source_normal = _placement_cross_section_axes(placement)
+    source_lateral, source_normal = placement_cross_section_axes(placement)
     source_basis = (
         np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64),
         source_lateral,
@@ -442,7 +442,7 @@ def placed_recording_sites(
 
     inward = np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64)
     axial_toward_base = -inward
-    lateral, normal = _placement_cross_section_axes(placement)
+    lateral, normal = placement_cross_section_axes(placement)
     geometry_scale = placement.model_to_placement_uniform_scale
     tip = _array(placement.tip)
     selected = set(placement.selected_site_ids)
@@ -480,7 +480,7 @@ def placed_shank_centerlines(
     """Map every source-defined shank offset into the anatomical frame."""
 
     _validate_model_placement_pair(model, placement)
-    lateral, normal = _placement_cross_section_axes(placement)
+    lateral, normal = placement_cross_section_axes(placement)
     geometry_scale = placement.model_to_placement_uniform_scale
     entry = _array(placement.entry)
     tip = _array(placement.tip)
@@ -593,9 +593,16 @@ def _placement(
     )
 
 
-def _placement_cross_section_axes(
+def placement_cross_section_axes(
     placement: NormalizedProbePlacement,
 ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Return the effective local lateral/normal axes used for placed geometry.
+
+    Current placements persist these axes explicitly. Historical placements
+    may omit them, in which case the deterministic legacy angle convention is
+    resolved here so every geometry consumer uses the same effective basis.
+    """
+
     if (
         placement.local_lateral_direction is not None
         and placement.local_normal_direction is not None

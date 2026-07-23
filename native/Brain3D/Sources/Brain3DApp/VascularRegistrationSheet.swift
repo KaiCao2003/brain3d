@@ -36,8 +36,8 @@ private struct LandmarkDraft: Identifiable {
     var kind: LandmarkKind
     var imageColumnPixels = ""
     var imageRowPixels = ""
-    var atlasApMicrometres = ""
-    var atlasMlMicrometres = ""
+    var atlasApMillimetres = ""
+    var atlasMlMillimetres = ""
     var enabled = true
 
     static func initial(_ kind: LandmarkKind) -> LandmarkDraft {
@@ -72,8 +72,8 @@ struct VascularRegistrationSheet: View {
         let imageHeight = Double(model.subjectImageHeight)
         let shape = model.atlasProvenance?.shapeVoxels ?? []
         guard imageWidth > 0, imageHeight > 0, shape.count == 3 else { return nil }
-        let atlasApMaximum = Double(shape[0]) * 25
-        let atlasMlMaximum = Double(shape[2]) * 25
+        let atlasApMaximumMillimetres = Double(shape[0]) * 25 / 1_000
+        let atlasMlMaximumMillimetres = Double(shape[2]) * 25 / 1_000
 
         var parsed: [VascularLandmarkParameters] = []
         for draft in landmarks {
@@ -83,12 +83,16 @@ struct VascularRegistrationSheet: View {
                 draft.label.count <= 200,
                 let column = Double(draft.imageColumnPixels), column.isFinite,
                 let row = Double(draft.imageRowPixels), row.isFinite,
-                let atlasAP = Double(draft.atlasApMicrometres), atlasAP.isFinite,
-                let atlasML = Double(draft.atlasMlMicrometres), atlasML.isFinite,
+                let atlasAPMillimetres = Double(draft.atlasApMillimetres),
+                atlasAPMillimetres.isFinite,
+                let atlasMLMillimetres = Double(draft.atlasMlMillimetres),
+                atlasMLMillimetres.isFinite,
                 column >= 0, column < imageWidth,
                 row >= 0, row < imageHeight,
-                atlasAP >= 0, atlasAP < atlasApMaximum,
-                atlasML >= 0, atlasML < atlasMlMaximum
+                atlasAPMillimetres >= 0,
+                atlasAPMillimetres < atlasApMaximumMillimetres,
+                atlasMLMillimetres >= 0,
+                atlasMLMillimetres < atlasMlMaximumMillimetres
             else {
                 return nil
             }
@@ -98,8 +102,12 @@ struct VascularRegistrationSheet: View {
                     kind: draft.kind.rawValue,
                     imageColumnPixels: column,
                     imageRowPixels: row,
-                    atlasApMicrometres: atlasAP,
-                    atlasMlMicrometres: atlasML,
+                    atlasApMicrometres: ProbeInputUnits.micrometres(
+                        fromMillimetres: atlasAPMillimetres
+                    ),
+                    atlasMlMicrometres: ProbeInputUnits.micrometres(
+                        fromMillimetres: atlasMLMillimetres
+                    ),
                     enabled: true
                 )
             )
@@ -240,7 +248,7 @@ struct VascularRegistrationSheet: View {
     private var coordinateWarning: some View {
         Label {
             Text(
-                "Atlas AP/ML values are absolute physical micrometres in the BrainGlobe ASR atlas dorsal plane. "
+                "Atlas AP/ML values are absolute physical millimetres in the BrainGlobe ASR atlas dorsal plane. "
                     + "They are not official bregma-relative stereotaxic coordinates. Enter the matched "
                     + "subject pixel column/row and atlas AP/ML physical values in each row below."
             )
@@ -392,16 +400,16 @@ private struct LandmarkRow: View {
                 GridRow {
                     Text("Image column (px)")
                     Text("Image row (px)")
-                    Text("Atlas AP (physical µm)")
-                    Text("Atlas ML (physical µm)")
+                    Text("Atlas AP (mm)")
+                    Text("Atlas ML (mm)")
                 }
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
                 GridRow {
                     numericField("0…\(max(0, imageWidth - 1))", text: $landmark.imageColumnPixels)
                     numericField("0…\(max(0, imageHeight - 1))", text: $landmark.imageRowPixels)
-                    numericField("Physical µm", text: $landmark.atlasApMicrometres)
-                    numericField("Physical µm", text: $landmark.atlasMlMicrometres)
+                    numericField("Physical mm", text: $landmark.atlasApMillimetres)
+                    numericField("Physical mm", text: $landmark.atlasMlMillimetres)
                 }
             }
         }

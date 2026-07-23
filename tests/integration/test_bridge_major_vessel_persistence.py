@@ -17,13 +17,12 @@ from tests.unit.test_bridge_major_vessels import (
 )
 
 from mouse_brain_planner.bridge.major_vessels import (
-    COORDINATE_QUALIFICATION_BLOCKING_REASONS,
-    COORDINATE_QUALIFICATION_REPORT_SHA256,
     MajorVesselReferenceBridge,
     register_major_vessel_handlers,
 )
 from mouse_brain_planner.bridge.planning import PlanningBridgeSession, register_planning_handlers
 from mouse_brain_planner.bridge.server import BridgeDispatcher, BridgeError
+from mouse_brain_planner.vasculature.vessap_major_vessels import REGISTRATION_TRANSFORM_ID
 
 
 def _call(dispatcher: BridgeDispatcher, method: str, **params: object) -> dict[str, object]:
@@ -46,7 +45,7 @@ def test_analysis_save_open_round_trip_and_plan_mutations_invalidate(
 ) -> None:
     monkeypatch.setattr(
         MajorVesselReferenceBridge,
-        "_reject_unqualified_reference",
+        "_reject_clearance_analysis",
         lambda _bridge: None,
     )
     project, initial_revision = _project_with_probe_plan()
@@ -83,13 +82,14 @@ def test_analysis_save_open_round_trip_and_plan_mutations_invalidate(
     assert audit_details["riskProfile"] == {
         "confirmedByUser": True,
         "minimumVesselDiameterMicrometres": 30.0,
-        "profileId": "lambada-p60-606-major-30um-v1",
+        "profileId": "vessap-bl6j-no1-major-30um-v1",
         "referenceOnlyCoverageAcknowledged": True,
         "registrationUncertaintyMicrometres": 20.0,
         "requiredMarginMicrometres": 10.0,
         "sourceOrLabPolicy": (
-            "Analyze only the bundled pointwise diameter >= 30 micrometre reference runs. "
-            "Required margin and registration uncertainty are explicit user-reviewed inputs."
+            "Display the bundled diameter >= 30 micrometre VesSAP reference only. "
+            "Clearance classification is unavailable without published subject-registration "
+            "and tissue-distortion uncertainty bounds."
         ),
     }
     persisted_before_save = state.project.probe_vessel_analyses[0].model_dump(mode="json")
@@ -98,7 +98,7 @@ def test_analysis_save_open_round_trip_and_plan_mutations_invalidate(
     assert bundle.analysis.risk_profile.registration_uncertainty_um == 20
     assert bundle.analysis.risk_profile.confirmed_by_user is True
     assert bundle.analysis.risk_profile.reference_only_coverage_acknowledged is True
-    assert bundle.analysis.provenance.registration_transform_id is None
+    assert bundle.analysis.provenance.registration_transform_id == REGISTRATION_TRANSFORM_ID
     assert bundle.analysis.provenance.registration_uncertainty_bound_um is None
     assert bundle.analysis.provenance.tissue_distortion_uncertainty_bound_um is None
     assert bundle.analysis.provenance.uncertainty_bounds_reviewed is False
@@ -207,19 +207,19 @@ def test_analysis_save_open_round_trip_and_plan_mutations_invalidate(
     assert remove_session.project.probe_vessel_analyses == []
 
 
-def test_unqualified_analysis_cannot_read_or_mutate_project_state() -> None:
+def test_display_only_analysis_cannot_read_or_mutate_project_state() -> None:
     project, revision = _project_with_probe_plan()
     assert project.atlas is not None
     original_project = project.model_dump_json()
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
     register_major_vessel_handlers(
         dispatcher,
-        get_project=lambda: pytest.fail("unqualified analysis must not read the project"),
-        get_revision=lambda: pytest.fail("unqualified analysis must not read the revision"),
+        get_project=lambda: pytest.fail("display-only analysis must not read the project"),
+        get_revision=lambda: pytest.fail("display-only analysis must not read the revision"),
         replace_project=lambda _project: pytest.fail(
-            "unqualified analysis must not replace the project"
+            "display-only analysis must not replace the project"
         ),
-        graph_loader=lambda: pytest.fail("unqualified analysis must not load vessel geometry"),
+        graph_loader=lambda: pytest.fail("display-only analysis must not load vessel geometry"),
     )
 
     with pytest.raises(BridgeError) as rejected:
@@ -234,11 +234,10 @@ def test_unqualified_analysis_cannot_read_or_mutate_project_state() -> None:
             ),
         )
 
-    assert rejected.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
+    assert rejected.value.code == "VESSEL_ANALYSIS_UNAVAILABLE"
     assert rejected.value.details == {
-        "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
-        "qualificationReportVerified": True,
-        "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
+        "displayOnly": True,
+        "subjectSpecific": False,
     }
     assert project.model_dump_json() == original_project
     assert project.project_revision == revision

@@ -44,11 +44,13 @@ final class AnimalSceneController {
     private let loader: AtlasMeshLoader
     private let scene = SCNScene()
     private let brainLayer = SCNNode()
+    private let highlightedRegionLayer = SCNNode()
     private let probeLayer = SCNNode()
     private let majorVesselLayer = SCNNode()
     private let selectedVesselConflictLayer = SCNNode()
     private let cameraNode = SCNNode()
     private var currentMeshSHA256: String?
+    private var currentHighlightedRegionMeshSHA256: String?
     private var currentMajorVesselDigest: String?
     private var currentSnapshotIdentity: String?
     private var currentTransform: AtlasSceneTransform?
@@ -91,6 +93,9 @@ final class AnimalSceneController {
             } else {
                 brainLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
             }
+            try await replaceHighlightedRegion(for: snapshot, generation: generation)
+            try Task.checkCancellation()
+            guard generation == loadGeneration else { return }
             try replaceProbe(for: snapshot)
             selectedVesselConflictLayer.childNodes.forEach { $0.removeFromParentNode() }
             try await replaceMajorVessels(for: snapshot, generation: generation)
@@ -138,15 +143,18 @@ final class AnimalSceneController {
 
     private func configureScene() {
         brainLayer.name = "allen-mouse-root-mesh"
+        highlightedRegionLayer.name = "selected-allen-region-layer"
         probeLayer.name = "selected-probe-layer"
         majorVesselLayer.name = "reviewed-major-vessel-layer"
         selectedVesselConflictLayer.name = "selected-vessel-conflict-layer"
         brainLayer.categoryBitMask = SceneCategory.brain.rawValue
+        highlightedRegionLayer.categoryBitMask = SceneCategory.highlightedRegion.rawValue
         probeLayer.categoryBitMask = SceneCategory.probe.rawValue
         majorVesselLayer.categoryBitMask = SceneCategory.majorVessel.rawValue
         selectedVesselConflictLayer.categoryBitMask =
             SceneCategory.selectedVesselConflict.rawValue
         scene.rootNode.addChildNode(brainLayer)
+        scene.rootNode.addChildNode(highlightedRegionLayer)
         scene.rootNode.addChildNode(probeLayer)
         scene.rootNode.addChildNode(majorVesselLayer)
         scene.rootNode.addChildNode(selectedVesselConflictLayer)
@@ -237,6 +245,67 @@ final class AnimalSceneController {
             node.renderingOrder = -10_000
         }
         node.childNodes.forEach(applyBrainAppearance)
+    }
+
+    private func replaceHighlightedRegion(
+        for snapshot: AnimalSceneSnapshot,
+        generation: Int
+    ) async throws {
+        guard let regionMesh = snapshot.highlightedRegionMesh,
+              let region = regionMesh.region
+        else {
+            highlightedRegionLayer.childNodes.forEach { $0.removeFromParentNode() }
+            currentHighlightedRegionMeshSHA256 = nil
+            return
+        }
+        if currentHighlightedRegionMeshSHA256 == regionMesh.mesh.sha256,
+           !highlightedRegionLayer.childNodes.isEmpty
+        {
+            highlightedRegionLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
+            return
+        }
+
+        highlightedRegionLayer.childNodes.forEach { $0.removeFromParentNode() }
+        currentHighlightedRegionMeshSHA256 = nil
+        let loaded = try await loader.load(regionMesh.mesh)
+        try Task.checkCancellation()
+        guard generation == loadGeneration else { return }
+        let importedRoot = loaded.makeRootNode()
+        importedRoot.name = "allen-region-\(region.structureId)"
+        applyHighlightedRegionAppearance(to: importedRoot, rgb: region.rgb)
+        highlightedRegionLayer.addChildNode(importedRoot)
+        highlightedRegionLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
+        currentHighlightedRegionMeshSHA256 = regionMesh.mesh.sha256
+    }
+
+    private func applyHighlightedRegionAppearance(to node: SCNNode, rgb: [Int]) {
+        node.categoryBitMask = SceneCategory.highlightedRegion.rawValue
+        if let geometry = node.geometry {
+            let color = NSColor(
+                srgbRed: CGFloat(rgb[0]) / 255,
+                green: CGFloat(rgb[1]) / 255,
+                blue: CGFloat(rgb[2]) / 255,
+                alpha: 1
+            )
+            let material = SCNMaterial()
+            material.name = "selected-allen-region"
+            material.diffuse.contents = color
+            material.emission.contents = color.withAlphaComponent(0.18)
+            material.lightingModel = .constant
+            material.transparency = 0.82
+            material.transparencyMode = .singleLayer
+            material.blendMode = .alpha
+            material.isDoubleSided = true
+            material.readsFromDepthBuffer = true
+            material.writesToDepthBuffer = true
+            geometry.materials = [material]
+            node.opacity = 0.88
+            node.castsShadow = false
+            node.renderingOrder = -5_000
+        }
+        node.childNodes.forEach {
+            applyHighlightedRegionAppearance(to: $0, rgb: rgb)
+        }
     }
 
     private func replaceProbe(for snapshot: AnimalSceneSnapshot) throws {

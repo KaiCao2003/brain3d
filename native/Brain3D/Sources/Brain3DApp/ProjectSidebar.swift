@@ -4,6 +4,147 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+enum ProbePlacementGuidance {
+    static func text(for mode: ProbePlacementMode) -> String {
+        switch mode {
+        case .entryAndTarget:
+            "Bregma frame: entry and selected target define the trajectory; angles and depth are derived."
+        case .entryAnglesDepth:
+            "Angle frame: calibrated subject stereotaxic AP/ML/DV. Entry is bregma-relative."
+        case .targetAnglesDepth:
+            "Angle frame: atlas AP/ML/DV after the active calibration transform, "
+                + "not manipulator angles. The selected target is bregma-relative."
+        case .stereotaxicTargetManipulator:
+            "Angle frame: calibrated subject stereotaxic AP/ML/DV. The selected target is bregma-relative."
+        }
+    }
+}
+
+enum ProbeCatalogPresentation {
+    static func containsNeuropixels2(_ models: [ProbeCatalogModel]) -> Bool {
+        models.contains { model in
+            isNeuropixels2(modelId: model.modelId)
+        }
+    }
+
+    static func isNeuropixels2(modelId: String) -> Bool {
+        modelId == ProbePlanningContract.neuropixels2SingleShankModelId
+            || modelId == ProbePlanningContract.neuropixels2StandardFourShankModelId
+    }
+
+    static func simultaneousChannelCount(modelId: String) -> Int? {
+        switch modelId {
+        case ProbePlanningContract.neuropixels2SingleShankModelId:
+            ProbePlanningContract.neuropixels2SingleShankSimultaneousChannelCount
+        case ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            ProbePlanningContract.neuropixels2StandardFourShankSimultaneousChannelCount
+        default:
+            nil
+        }
+    }
+}
+
+enum ProbeOverlayPresentation {
+    private static let sliceOverlayText =
+        "Overlay active in Dorsal, Coronal, Sagittal, and Horizontal."
+
+    static func text(
+        threeDimensionalPhase: ThreeDimensionalLoadPhase,
+        sceneContainsCurrentPlan: Bool
+    ) -> String {
+        if threeDimensionalPhase == .ready, sceneContainsCurrentPlan {
+            return "Overlay active in Dorsal, Coronal, Sagittal, Horizontal, and 3D."
+        }
+        switch threeDimensionalPhase {
+        case .unavailable, .failed:
+            return "\(sliceOverlayText) 3D overlay unavailable."
+        case .loadingDescriptor, .loadingGeometry:
+            return "\(sliceOverlayText) 3D overlay pending."
+        case .ready:
+            return "\(sliceOverlayText) 3D overlay pending scene refresh."
+        }
+    }
+}
+
+enum ProbeDraftReadinessPolicy {
+    static func blockingReason(
+        planningUnavailableReason: String?,
+        hasSelectedModel: Bool,
+        availableTargetIds: [String],
+        selectedTargetId: String,
+        name: String,
+        mode: ProbePlacementMode,
+        entryAP: String,
+        entryML: String,
+        entryDV: String,
+        azimuth: String,
+        elevation: String,
+        depth: String,
+        axialRotation: String,
+        requiresAcknowledgement: Bool,
+        acknowledgementGiven: Bool
+    ) -> String? {
+        if let planningUnavailableReason {
+            return planningUnavailableReason
+        }
+        guard hasSelectedModel else {
+            return "Select a probe model from the connected catalog."
+        }
+        guard availableTargetIds.contains(selectedTargetId) else {
+            return "Select a stored implant target."
+        }
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return "Enter a probe plan name."
+        }
+        if mode.requiresEntryCoordinates {
+            guard validNumber(entryAP), validNumber(entryML), validNumber(entryDV) else {
+                return "Enter valid entry AP, ML, and DV values in millimetres."
+            }
+        }
+        if mode.requiresAnglesAndDepth {
+            guard validNumber(azimuth, range: -180 ... 180) else {
+                return "Enter azimuth from −180° through 180°."
+            }
+            guard validNumber(elevation, range: -90 ... 90) else {
+                return "Enter elevation from −90° through 90°."
+            }
+            guard validNumber(depth, strictlyPositive: true) else {
+                return "Enter a positive insertion depth in millimetres."
+            }
+        }
+        guard validNumber(axialRotation, range: -180 ... 180) else {
+            return "Enter axial rotation from −180° through 180°."
+        }
+        guard !requiresAcknowledgement || acknowledgementGiven else {
+            return "Acknowledge the selected probe geometry before continuing."
+        }
+        return nil
+    }
+
+    private static func validNumber(
+        _ text: String,
+        range: ClosedRange<Double>? = nil,
+        strictlyPositive: Bool = false
+    ) -> Bool {
+        guard let value = try? CalibrationNumberInput.parse(text, field: "Probe value")
+        else { return false }
+        if let range, !range.contains(value) { return false }
+        return !strictlyPositive || value > 0
+    }
+}
+
+enum ProbeInputUnits {
+    static let micrometresPerMillimetre = 1_000.0
+
+    static func micrometres(fromMillimetres value: Double) -> Double {
+        value * micrometresPerMillimetre
+    }
+
+    static func millimetres(fromMicrometres value: Double) -> Double {
+        value / micrometresPerMillimetre
+    }
+}
+
 struct ProjectSidebar: View {
     @ObservedObject var model: PlannerViewModel
     let saveProject: () -> Void
@@ -23,12 +164,10 @@ struct ProjectSidebar: View {
     @State private var probeAzimuth = ""
     @State private var probeElevation = ""
     @State private var probeDepth = ""
-    @State private var probeAxialRotation = ""
+    @State private var probeAxialRotation = "0"
     @State private var probeGeometryAcknowledged = false
     @State private var showingProbeRegionInspector = false
-    @State private var showingMajorVesselConflictInspector = false
     @State private var confirmingProbeRemoval = false
-    @State private var vesselAnalysisDraft = VesselAnalysisDraft()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -54,9 +193,6 @@ struct ProjectSidebar: View {
                 ProbeRegionInspectorSheet(plan: plan, analysis: analysis)
             }
         }
-        .sheet(isPresented: $showingMajorVesselConflictInspector) {
-            MajorVesselConflictInspectorSheet(model: model)
-        }
         .confirmationDialog(
             "Remove this probe plan and its region analysis?",
             isPresented: $confirmingProbeRemoval,
@@ -73,21 +209,23 @@ struct ProjectSidebar: View {
         }
         .onChange(of: model.selectedProbePlan?.inputSha256, initial: true) {
             _, _ in
-            populateProbeDraft()
-            populateVesselAnalysisDraftForCurrentPlan()
+            if model.selectedProbePlan == nil {
+                clearProbeDraft()
+            } else {
+                populateProbeDraft()
+            }
         }
         .onChange(of: model.backendState?.project?.projectId) { _, _ in
-            populateVesselAnalysisDraftForCurrentPlan()
+            resetPlanningDraftsForProject()
         }
-        .onChange(of: model.selectedProbeVesselAnalysis?.analysis.inputSha256) { _, _ in
-            guard let result = model.selectedProbeVesselAnalysis else { return }
-            populateVesselAnalysisDraft(from: result)
-        }
-        .onChange(of: vesselAnalysisDraft) { _, draft in
-            guard let result = model.selectedProbeVesselAnalysis,
-                  !draft.matches(result.analysis)
-            else { return }
-            model.invalidateMajorVesselAnalysis()
+        .onChange(of: model.implantTargets.map(\.targetId), initial: true) {
+            _, targetIds in
+            if !probeTargetId.isEmpty, !targetIds.contains(probeTargetId) {
+                probeTargetId = ""
+            }
+            if targetCoordinatesAreBlank {
+                targetLabel = nextTargetLabel
+            }
         }
     }
 
@@ -100,34 +238,83 @@ struct ProjectSidebar: View {
                 }
             }
             .disabled(model.probeOperationInProgress)
+            .accessibilityLabel("Probe plan")
 
-            Picker("Model", selection: probeModelSelection) {
+            Picker("Probe model", selection: probeModelSelection) {
                 if model.probeCatalog.isEmpty {
                     Text("No model available").tag("")
+                } else if model.selectedProbePlan != nil,
+                          model.selectedProbeModel == nil
+                {
+                    Text("Archived model (read-only)").tag("")
                 }
                 ForEach(model.probeCatalog) { probe in
                     Text(probe.displayName).tag(probe.id)
                 }
             }
-            .disabled(model.probeCatalog.isEmpty || model.probeOperationInProgress)
+            .disabled(
+                model.probeCatalog.isEmpty
+                    || model.probeOperationInProgress
+                    || (model.selectedProbePlan != nil && model.selectedProbeModel == nil)
+            )
+            .accessibilityHint("Selects the exact hardware geometry used by this plan.")
 
-            Picker("Target", selection: $probeTargetId) {
+            if let probe = model.selectedProbeModel {
+                selectedProbeModelCard(probe)
+            } else if let plan = model.selectedProbePlan {
+                Label(
+                    "\(plan.modelDisplayName) is archived and read-only. "
+                        + "Only NP2 single- and standard four-shank models are supported.",
+                    systemImage: "archivebox"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            } else if !model.probeCatalog.isEmpty {
+                Label("Select the hardware model to continue.", systemImage: "cpu")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if !model.probeCatalog.isEmpty,
+               !ProbeCatalogPresentation.containsNeuropixels2(model.probeCatalog)
+            {
+                Label(
+                    "Neuropixels 2.0 is not available from this connected catalog.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Picker("Implant target", selection: $probeTargetId) {
                 Text("Select implant target").tag("")
                 ForEach(model.implantTargets) { target in
                     Text(target.label).tag(target.targetId)
                 }
             }
+            .disabled(model.implantTargets.isEmpty || model.probeOperationInProgress)
+            .accessibilityHint("Uses the selected bregma-relative AP, ML, and DV site.")
 
-            Picker("Mode", selection: $probePlacementMode) {
+            Picker("Placement", selection: $probePlacementMode) {
                 ForEach(ProbePlacementMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
             }
             .pickerStyle(.menu)
             .controlSize(.small)
+            .accessibilityLabel("Probe placement mode")
 
-            TextField("Probe plan name", text: $probeName)
+            Text(ProbePlacementGuidance.text(for: probePlacementMode))
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Required plan name", text: $probeName)
                 .textFieldStyle(.roundedBorder)
+                .accessibilityLabel("Probe plan name")
+                .accessibilityHint("Names this plan; it does not select the hardware model.")
 
             if probePlacementMode.requiresEntryCoordinates {
                 probeEntryCoordinateFields
@@ -145,8 +332,8 @@ struct ProjectSidebar: View {
                     text: $probeElevation
                 )
                 probeNumberField(
-                    "Insertion depth (µm)",
-                    sign: "Positive distance from entry toward tip",
+                    "Insertion depth (mm)",
+                    sign: "Positive distance in millimetres from entry toward tip",
                     text: $probeDepth
                 )
             }
@@ -182,12 +369,20 @@ struct ProjectSidebar: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!canSubmitProbeDraft)
+                    .help(
+                        probeDraftBlockingReason
+                            ?? "Create the probe plan and publish its trajectory preview."
+                    )
                 } else {
                     Button("Update plan", systemImage: "checkmark") {
                         Task { _ = await updateProbePlan() }
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(!canSubmitProbeDraft)
+                    .help(
+                        probeDraftBlockingReason
+                            ?? "Update the probe plan and recompute its trajectory preview."
+                    )
                     Button("Remove", systemImage: "trash", role: .destructive) {
                         confirmingProbeRemoval = true
                     }
@@ -195,6 +390,15 @@ struct ProjectSidebar: View {
                 }
             }
             .controlSize(.small)
+
+            if let probeDraftBlockingReason {
+                Label(probeDraftBlockingReason, systemImage: "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityLabel("Cannot submit probe plan")
+                    .accessibilityValue(probeDraftBlockingReason)
+            }
 
             if let plan = model.selectedProbePlan {
                 Text(plan.requiresPlanningGeometryUpdate
@@ -212,6 +416,10 @@ struct ProjectSidebar: View {
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if plan.hasCurrentPlanningGeometry {
+                    probeTrajectoryPreview(plan)
                 }
 
                 HStack {
@@ -295,41 +503,140 @@ struct ProjectSidebar: View {
     }
 
     private var canSubmitProbeDraft: Bool {
-        model.canManageProbePlanning
-            && model.selectedProbeModel != nil
-            && !probeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !probeTargetId.isEmpty
-            && validProbeNumber(probeAxialRotation, range: -180 ... 180)
-            && entryFieldsAreValid
-            && angleAndDepthFieldsAreValid
-            && (model.selectedProbeModel.map {
-                !$0.requiresExplicitAcknowledgement || probeGeometryAcknowledged
-            } == true)
+        probeDraftBlockingReason == nil
     }
 
-    private var entryFieldsAreValid: Bool {
-        !probePlacementMode.requiresEntryCoordinates
-            || [probeEntryAP, probeEntryML, probeEntryDV].allSatisfy {
-                validProbeNumber($0)
+    private var probeDraftBlockingReason: String? {
+        ProbeDraftReadinessPolicy.blockingReason(
+            planningUnavailableReason: model.probePlanningUnavailableReason,
+            hasSelectedModel: model.selectedProbeModel != nil,
+            availableTargetIds: model.implantTargets.map(\.targetId),
+            selectedTargetId: probeTargetId,
+            name: probeName,
+            mode: probePlacementMode,
+            entryAP: probeEntryAP,
+            entryML: probeEntryML,
+            entryDV: probeEntryDV,
+            azimuth: probeAzimuth,
+            elevation: probeElevation,
+            depth: probeDepth,
+            axialRotation: probeAxialRotation,
+            requiresAcknowledgement: model.selectedProbeModel?
+                .requiresExplicitAcknowledgement == true,
+            acknowledgementGiven: probeGeometryAcknowledged
+        )
+    }
+
+    private func selectedProbeModelCard(_ probe: ProbeCatalogModel) -> some View {
+        let productIdentity = [probe.manufacturer, probe.productCode]
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " · ")
+        let shanks = probe.shankCount == 1
+            ? "1 shank"
+            : "\(probe.shankCount) shanks"
+        let siteCount = probe.siteCount.formatted(.number.grouping(.automatic))
+        let simultaneousChannelCount = ProbeCatalogPresentation.simultaneousChannelCount(
+            modelId: probe.modelId
+        )
+        let channelIdentity = simultaneousChannelCount.map {
+            "\($0.formatted(.number.grouping(.automatic))) simultaneous channels"
+        }
+
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(probe.displayName)
+                .font(.caption.weight(.semibold))
+            if !productIdentity.isEmpty {
+                Text(productIdentity)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
+            Text("\(shanks) · \(siteCount) physical/addressable sites")
+                .font(.caption2.monospacedDigit())
+                .foregroundStyle(.secondary)
+            if let channelIdentity {
+                Text("\(channelIdentity) · IMRO/channel selection is not configured here")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Selected probe model")
+        .accessibilityValue(
+            [
+                probe.displayName,
+                productIdentity,
+                shanks,
+                "\(siteCount) physical/addressable sites",
+                channelIdentity.map {
+                    "\($0); IMRO/channel selection is not configured here"
+                } ?? "",
+            ]
+                .filter { !$0.isEmpty }
+                .joined(separator: ", ")
+        )
     }
 
-    private var angleAndDepthFieldsAreValid: Bool {
-        !probePlacementMode.requiresAnglesAndDepth
-            || (validProbeNumber(probeAzimuth, range: -180 ... 180)
-                && validProbeNumber(probeElevation, range: -90 ... 90)
-                && validProbeNumber(probeDepth, strictlyPositive: true))
+    private func probeTrajectoryPreview(_ plan: ProbePlanDetail) -> some View {
+        let source = plan.sourceTarget
+        let placement = plan.placement
+        let scenePlan = model.threeDimensionalSnapshot?.selectedProbePlan
+        let sceneContainsCurrentPlan = scenePlan?.planId == plan.planId
+            && scenePlan?.inputSha256 == plan.inputSha256
+
+        return VStack(alignment: .leading, spacing: 4) {
+            Label("Trajectory preview", systemImage: "line.diagonal.arrow")
+                .font(.caption.weight(.semibold))
+            Text(
+                "Bregma target · AP \(signed(source.apMillimetres)) mm · "
+                    + "ML \(signed(source.mlMillimetres)) mm · "
+                    + "DV \(signed(source.dvMillimetres)) mm"
+            )
+            .font(.caption2.monospacedDigit())
+            Text("Atlas physical · corner origin · AP / DV / ML · mm")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+            Text(probeAtlasPhysicalPointSummary("Entry", placement.atlasFrame.entry))
+                .font(.caption2.monospacedDigit())
+            Text(probeAtlasPhysicalPointSummary("Tip", placement.atlasFrame.tip))
+                .font(.caption2.monospacedDigit())
+            Text(
+                String(
+                    format: "Az %+.1f° · El %+.1f° · depth %.3f mm · roll %+.1f°",
+                    placement.azimuthDegrees,
+                    placement.elevationDegrees,
+                    ProbeInputUnits.millimetres(
+                        fromMicrometres: placement.insertionDepthMicrometres
+                    ),
+                    placement.axialRotationDegrees
+                )
+            )
+            .font(.caption2.monospacedDigit())
+            Text(
+                ProbeOverlayPresentation.text(
+                    threeDimensionalPhase: model.threeDimensionalPhase,
+                    sceneContainsCurrentPlan: sceneContainsCurrentPlan
+                )
+            )
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+        }
+        .padding(7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+        .accessibilityElement(children: .combine)
     }
 
-    private func validProbeNumber(
-        _ text: String,
-        range: ClosedRange<Double>? = nil,
-        strictlyPositive: Bool = false
-    ) -> Bool {
-        guard let value = try? CalibrationNumberInput.parse(text, field: "Probe value")
-        else { return false }
-        if let range, !range.contains(value) { return false }
-        return !strictlyPositive || value > 0
+    private func probeAtlasPhysicalPointSummary(
+        _ label: String,
+        _ point: ProbePhysicalPoint
+    ) -> String {
+        "\(label) · AP \(signedMillimetres(point.apMicrometres)) · "
+            + "DV \(signedMillimetres(point.dvMicrometres)) · "
+            + "ML \(signedMillimetres(point.mlMicrometres))"
     }
 
     private func probeNumberField(
@@ -341,9 +648,11 @@ struct ProjectSidebar: View {
             HStack {
                 Text(label)
                     .font(.caption.weight(.semibold))
-                TextField("", text: text)
+                TextField("Required", text: text)
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.trailing)
+                    .accessibilityLabel(label)
+                    .accessibilityHint(sign)
             }
             Text(sign)
                 .font(.caption2)
@@ -378,12 +687,26 @@ struct ProjectSidebar: View {
             Text(axis)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
-            TextField(axis, text: text)
+            TextField("Required", text: text)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
                 .accessibilityLabel("Entry \(axis) in millimetres from bregma")
+                .accessibilityHint(probeEntryAccessibilityHint(axis))
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private func probeEntryAccessibilityHint(_ axis: String) -> String {
+        switch axis {
+        case "AP":
+            "Positive is anterior; negative is posterior or back."
+        case "ML":
+            "Positive is right; negative is left."
+        case "DV":
+            "Positive is dorsal or up; negative is deep or ventral."
+        default:
+            "Signed coordinate from bregma."
+        }
     }
 
     private func createProbePlan() async -> Bool {
@@ -435,7 +758,9 @@ struct ProjectSidebar: View {
         probeEntryDV = draft.entryDVMillimetres.map(decimalText) ?? ""
         probeAzimuth = draft.azimuthDegrees.map(decimalText) ?? ""
         probeElevation = draft.elevationDegrees.map(decimalText) ?? ""
-        probeDepth = draft.insertionDepthMicrometres.map(decimalText) ?? ""
+        probeDepth = draft.insertionDepthMicrometres.map {
+            decimalText(ProbeInputUnits.millimetres(fromMicrometres: $0))
+        } ?? ""
         probeAxialRotation = decimalText(draft.axialRotationDegrees)
         probeGeometryAcknowledged = ProbePlanningContract.requiresExplicitAcknowledgement(
             verificationStatus: plan.verificationStatus
@@ -452,36 +777,35 @@ struct ProjectSidebar: View {
         probeAzimuth = ""
         probeElevation = ""
         probeDepth = ""
-        probeAxialRotation = ""
+        probeAxialRotation = "0"
         probeGeometryAcknowledged = false
+    }
+
+    private func resetPlanningDraftsForProject() {
+        clearProbeDraft()
+        clearTargetDraft()
+    }
+
+    private func clearTargetDraft() {
+        targetLabel = nextTargetLabel
+        targetAPMillimetres = ""
+        targetMLMillimetres = ""
+        targetDVMillimetres = ""
+    }
+
+    private var targetCoordinatesAreBlank: Bool {
+        [targetAPMillimetres, targetMLMillimetres, targetDVMillimetres]
+            .allSatisfy {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+    }
+
+    private var nextTargetLabel: String {
+        "Implant site \(model.implantTargets.count + 1)"
     }
 
     private func decimalText(_ value: Double) -> String {
         String(format: "%.12g", value)
-    }
-
-    private func populateVesselAnalysisDraftForCurrentPlan() {
-        guard let projectId = model.backendState?.project?.projectId,
-              let plan = model.selectedProbePlan,
-              let result = model.selectedProbeVesselAnalysis,
-              result.projectId == projectId,
-              result.planId == plan.planId,
-              result.planInputSha256 == plan.inputSha256
-        else {
-            vesselAnalysisDraft = VesselAnalysisDraft()
-            return
-        }
-        vesselAnalysisDraft = VesselAnalysisDraft(analysis: result.analysis)
-    }
-
-    private func populateVesselAnalysisDraft(from result: MajorVesselAnalysisResult) {
-        guard let projectId = model.backendState?.project?.projectId,
-              let plan = model.selectedProbePlan,
-              result.projectId == projectId,
-              result.planId == plan.planId,
-              result.planInputSha256 == plan.inputSha256
-        else { return }
-        vesselAnalysisDraft = VesselAnalysisDraft(analysis: result.analysis)
     }
 
     private func saveProbeRegions(_ format: ProbeRegionExportFormat) {
@@ -519,7 +843,10 @@ struct ProjectSidebar: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let source = model.majorVesselGeometry?.provenance {
-                StatusRow(label: "Source", value: "LAMBADA \(source.specimenId) · CC BY 4.0")
+                StatusRow(
+                    label: "Source",
+                    value: "VesSAP \(source.specimenId) · \(source.sourceLicense)"
+                )
                 Text(model.majorVesselDisclosure)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -536,185 +863,15 @@ struct ProjectSidebar: View {
                 }
                 .font(.caption)
             }
-            if model.selectedProbePlan?.hasCurrentPlanningGeometry == true,
-               model.majorVesselGeometry != nil
-            {
-                Divider()
-                Text("Probe clearance")
-                    .font(.caption.weight(.semibold))
-                vesselDistanceField(
-                    "Required margin (µm)",
-                    text: $vesselAnalysisDraft.requiredMarginMicrometres
-                )
-                vesselDistanceField(
-                    "Registration uncertainty (µm)",
-                    text: $vesselAnalysisDraft.registrationUncertaintyMicrometres
-                )
-                Toggle(
-                    "I reviewed these lab-defined inputs",
-                    isOn: $vesselAnalysisDraft.riskProfileConfirmed
-                )
-                .font(.caption)
-                Toggle(
-                    "I understand this is a single fixed reference with missing vessels",
-                    isOn: $vesselAnalysisDraft.referenceCoverageAcknowledged
-                )
-                .font(.caption)
-                Button("Analyze probe", systemImage: "waveform.path.ecg") {
-                    analyzeProbeMajorVessels()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(!canAnalyzeProbeMajorVessels)
-                if model.majorVesselAnalysisInProgress {
-                    ProgressView("Measuring tapered vessel surfaces…")
-                        .controlSize(.small)
-                }
-                if let error = model.majorVesselAnalysisError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let result = model.selectedProbeVesselAnalysis {
-                    vesselAnalysisSummary(result.analysis)
-                }
-            }
-        }
-    }
-
-    private func vesselDistanceField(_ label: String, text: Binding<String>) -> some View {
-        HStack {
-            Text(label)
-                .font(.caption)
-            TextField("0", text: text)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-        }
-    }
-
-    private var canAnalyzeProbeMajorVessels: Bool {
-        model.canAnalyzeMajorVesselClearance
-            && parsedVesselDistance(vesselAnalysisDraft.requiredMarginMicrometres) != nil
-            && parsedVesselDistance(
-                vesselAnalysisDraft.registrationUncertaintyMicrometres
-            ) != nil
-            && vesselAnalysisDraft.riskProfileConfirmed
-            && vesselAnalysisDraft.referenceCoverageAcknowledged
-    }
-
-    private func analyzeProbeMajorVessels() {
-        guard let margin = parsedVesselDistance(
-            vesselAnalysisDraft.requiredMarginMicrometres
-        ),
-              let uncertainty = parsedVesselDistance(
-                  vesselAnalysisDraft.registrationUncertaintyMicrometres
-              )
-        else { return }
-        let riskProfileConfirmed = vesselAnalysisDraft.riskProfileConfirmed
-        let referenceCoverageAcknowledged =
-            vesselAnalysisDraft.referenceCoverageAcknowledged
-        Task {
-            _ = await model.analyzeSelectedProbeMajorVessels(
-                requiredMarginMicrometres: margin,
-                registrationUncertaintyMicrometres: uncertainty,
-                riskProfileConfirmed: riskProfileConfirmed,
-                referenceCoverageAcknowledged: referenceCoverageAcknowledged
-            )
-        }
-    }
-
-    private func parsedVesselDistance(_ text: String) -> Double? {
-        guard let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              value.isFinite,
-              value >= 0,
-              value <= MajorVesselAnalysisContract.maximumDistanceMicrometres
-        else { return nil }
-        return value
-    }
-
-    private func vesselAnalysisSummary(
-        _ analysis: MajorVesselClearanceAnalysis
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(
-                vesselStatusLabel(analysis.resultStatus),
-                systemImage: vesselStatusIcon(analysis.resultStatus)
-            )
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(vesselStatusColor(analysis.resultStatus))
-            Text(analysis.statement)
-                .font(.caption)
-                .fixedSize(horizontal: false, vertical: true)
-            if let adjusted = analysis.minimumAdjustedClearanceMicrometres {
-                Text("Minimum adjusted clearance: \(signedMicrometres(adjusted))")
-                    .font(.caption2.monospacedDigit())
-            }
-            if let nearest = analysis.nearestCenterlineDistanceMicrometres {
-                Text("Nearest loaded centerline: \(nearest.formatted(.number.precision(.fractionLength(1)))) µm")
-                    .font(.caption2.monospacedDigit())
-            }
-            if !analysis.conflicts.isEmpty {
-                Button(
-                    "Inspect \(analysis.conflicts.count) returned conflict"
-                        + (analysis.conflicts.count == 1 ? "" : "s"),
-                    systemImage: "list.bullet.rectangle"
-                ) {
-                    showingMajorVesselConflictInspector = true
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-            if analysis.conflictsTruncated {
+            if model.majorVesselGeometry != nil {
                 Text(
-                    "The backend returned \(analysis.conflicts.count) conflicts; additional "
-                        + "conflicts were truncated at the reviewed request limit."
+                    "Display overlay only · population reference · clearance "
+                        + "classification is unavailable."
                 )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
             }
-            if let error = model.majorVesselNavigationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(analysis.warnings, id: \.self) { warning in
-                Label(warning, systemImage: "info.circle")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(8)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
-    }
-
-    private func vesselStatusLabel(_ status: MajorVesselResultStatus) -> String {
-        switch status {
-        case .intersection: "Intersection detected"
-        case .marginViolation: "Margin violation"
-        case .uncertaintyViolation: "Uncertainty-bound violation"
-        case .noConflictDetected: "Loaded reference evaluated"
-        case .insufficientGeometry: "Result not classifiable"
-        }
-    }
-
-    private func vesselStatusIcon(_ status: MajorVesselResultStatus) -> String {
-        switch status {
-        case .intersection: "exclamationmark.octagon.fill"
-        case .marginViolation, .uncertaintyViolation: "exclamationmark.triangle.fill"
-        case .noConflictDetected: "magnifyingglass.circle"
-        case .insufficientGeometry: "questionmark.circle"
-        }
-    }
-
-    private func vesselStatusColor(_ status: MajorVesselResultStatus) -> Color {
-        switch status {
-        case .intersection: .red
-        case .marginViolation, .uncertaintyViolation: .orange
-        case .noConflictDetected: .secondary
-        case .insufficientGeometry: .secondary
         }
     }
 
@@ -730,7 +887,7 @@ struct ProjectSidebar: View {
             )
             StatusRow(
                 label: "Stored sites",
-                value: "\(model.implantTargets.count) unprojected"
+                value: "\(model.implantTargets.count)"
             )
             Button("Calibrations…", systemImage: "ruler") {
                 showingCalibrationSheet = true
@@ -739,15 +896,21 @@ struct ProjectSidebar: View {
             .controlSize(.small)
             .disabled(!model.canManageCalibration)
             VStack(alignment: .leading, spacing: 7) {
-                TextField("Site label", text: $targetLabel)
+                TextField("Required site label", text: $targetLabel)
                     .textFieldStyle(.roundedBorder)
+                    .accessibilityLabel("Implant site label")
                 targetField("AP (mm)", sign: "−AP = posterior / back", text: $targetAPMillimetres)
                 targetField("ML (mm)", sign: "−ML = left", text: $targetMLMillimetres)
-                targetField("DV (mm)", sign: "−DV = deep / ventral", text: $targetDVMillimetres)
+                targetField(
+                    "DV / depth (mm)",
+                    sign: "−DV = deep / ventral",
+                    text: $targetDVMillimetres
+                )
             }
             .disabled(!model.canStoreImplantTarget)
             Button("Store unprojected site", systemImage: "plus") {
                 Task {
+                    let existingTargetIds = Set(model.implantTargets.map(\.targetId))
                     let added = await model.addUnprojectedImplantTarget(
                         label: targetLabel,
                         apText: targetAPMillimetres,
@@ -755,10 +918,10 @@ struct ProjectSidebar: View {
                         dvText: targetDVMillimetres
                     )
                     if added {
-                        targetLabel = "Implant site \(model.implantTargets.count + 1)"
-                        targetAPMillimetres = ""
-                        targetMLMillimetres = ""
-                        targetDVMillimetres = ""
+                        probeTargetId = model.implantTargets.first {
+                            !existingTargetIds.contains($0.targetId)
+                        }?.targetId ?? ""
+                        clearTargetDraft()
                     }
                 }
             }
@@ -856,9 +1019,9 @@ struct ProjectSidebar: View {
 
     private func atlasCoordinateSummary(_ result: CalibratedTargetProjectionResult) -> String {
         let point = result.atlasPoint
-        return "Atlas AP \(signedMicrometres(point.apMicrometres)) · "
-            + "DV \(signedMicrometres(point.dvMicrometres)) · "
-            + "ML \(signedMicrometres(point.mlMicrometres))"
+        return "Atlas AP \(signedMillimetres(point.apMicrometres)) · "
+            + "DV \(signedMillimetres(point.dvMicrometres)) · "
+            + "ML \(signedMillimetres(point.mlMicrometres))"
     }
 
     private func voxelSummary(_ result: CalibratedTargetProjectionResult) -> String {
@@ -866,8 +1029,11 @@ struct ProjectSidebar: View {
         return "Voxel AP \(voxel.ap) · DV \(voxel.dv) · ML \(voxel.ml)"
     }
 
-    private func signedMicrometres(_ value: Double) -> String {
-        String(format: "%+.1f µm", value)
+    private func signedMillimetres(_ micrometres: Double) -> String {
+        String(
+            format: "%+.3f mm",
+            ProbeInputUnits.millimetres(fromMicrometres: micrometres)
+        )
     }
 
     private func signed(_ value: Double) -> String {
@@ -906,9 +1072,11 @@ struct ProjectSidebar: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack {
                 Text(label).font(.caption.weight(.semibold))
-                TextField("0.000", text: text)
+                TextField("Required", text: text)
                     .textFieldStyle(.roundedBorder)
                     .multilineTextAlignment(.trailing)
+                    .accessibilityLabel("\(label) from bregma")
+                    .accessibilityHint(sign)
             }
             Text(sign)
                 .font(.caption2)
@@ -973,385 +1141,6 @@ struct ProjectSidebar: View {
         }
     }
 
-}
-
-private struct MajorVesselConflictInspectorSheet: View {
-    @ObservedObject var model: PlannerViewModel
-    @Environment(\.dismiss) private var dismiss
-
-    private var result: MajorVesselAnalysisResult? {
-        model.selectedProbeVesselAnalysis
-    }
-
-    private var selectedConflict: MajorVesselConflict? {
-        guard let selected = model.selectedMajorVesselConflict,
-              result?.analysis.conflicts.contains(selected) == true
-        else { return nil }
-        return selected
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            if let result {
-                provenanceBanner(result)
-                Divider()
-                HSplitView {
-                    conflictList(result.analysis)
-                        .frame(minWidth: 690, idealWidth: 760)
-                    conflictDetail(result)
-                        .frame(minWidth: 430, idealWidth: 500)
-                }
-            } else {
-                ContentUnavailableView(
-                    "No current vessel analysis",
-                    systemImage: "drop.triangle",
-                    description: Text("Run probe clearance analysis before inspecting conflicts.")
-                )
-            }
-        }
-        .frame(minWidth: 1_180, minHeight: 720)
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Major-vessel conflicts")
-                    .font(.title2.weight(.semibold))
-                Text("Select any returned row to atomically localize its probe point in all three atlas views.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if model.majorVesselNavigationInProgress {
-                ProgressView("Navigating all views…")
-                    .controlSize(.small)
-            }
-            if selectedConflict != nil {
-                Button("Clear selection") {
-                    model.clearMajorVesselConflictSelection()
-                }
-            }
-            Button("Done") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-        }
-        .padding(16)
-    }
-
-    private func provenanceBanner(_ result: MajorVesselAnalysisResult) -> some View {
-        let source = result.analysis.provenance
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Label(
-                    "\(result.analysis.conflicts.count) returned"
-                        + (result.analysis.conflictsTruncated ? " · response truncated" : ""),
-                    systemImage: result.analysis.conflictsTruncated
-                        ? "exclamationmark.triangle.fill" : "checklist"
-                )
-                .font(.callout.weight(.semibold))
-                Spacer()
-                Text("Project revision \(result.projectRevision) · plan v\(result.planVersion)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            Text("\(source.datasetTitle) · specimen \(source.specimenId) · \(source.sourceLicense)")
-                .font(.caption)
-            Text(
-                "Reference-only, not subject-specific; pial and choroidal vessels are excluded. "
-                    + "Registration and tissue-distortion bounds are not published."
-            )
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 14) {
-                if let dataset = URL(string: source.sourceRecordUrl) {
-                    Link("Dataset", destination: dataset)
-                }
-                if let paper = URL(string: "https://doi.org/\(source.sourcePaperDoi)") {
-                    Link("Paper", destination: paper)
-                }
-                Text("Asset \(String(source.derivedAssetSha256.prefix(14)))…")
-                    .textSelection(.enabled)
-            }
-            .font(.caption.monospaced())
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.quaternary.opacity(0.45))
-    }
-
-    private func conflictList(_ analysis: MajorVesselClearanceAnalysis) -> some View {
-        VStack(spacing: 0) {
-            conflictColumnHeader
-            Divider()
-            List(analysis.conflicts) { conflict in
-                Button {
-                    Task { _ = await model.navigateToMajorVesselConflict(conflict) }
-                } label: {
-                    conflictRow(conflict)
-                }
-                .buttonStyle(.plain)
-                .disabled(model.majorVesselNavigationInProgress)
-                .listRowBackground(
-                    selectedConflict?.conflictId == conflict.conflictId
-                        ? Color.accentColor.opacity(0.20) : Color.clear
-                )
-                .accessibilityLabel(
-                    "\(classificationLabel(conflict.classification)), shank "
-                        + "\(conflict.shankId), depth \(micrometres(conflict.insertionDepthMicrometres))"
-                )
-                .accessibilityHint("Select and navigate all atlas views to this conflict")
-            }
-            .listStyle(.inset)
-        }
-    }
-
-    private var conflictColumnHeader: some View {
-        HStack(spacing: 8) {
-            Text("Status").frame(width: 142, alignment: .leading)
-            Text("Shank").frame(width: 80, alignment: .leading)
-            Text("Depth µm").frame(width: 82, alignment: .trailing)
-            Text("Adjusted µm").frame(width: 92, alignment: .trailing)
-            Text("Centerline µm").frame(width: 100, alignment: .trailing)
-            Text("Vessel Ø µm").frame(width: 90, alignment: .trailing)
-            Spacer(minLength: 4)
-        }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
-    }
-
-    private func conflictRow(_ conflict: MajorVesselConflict) -> some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 5) {
-                if selectedConflict?.conflictId == conflict.conflictId {
-                    Image(systemName: "location.fill")
-                        .foregroundStyle(Color.accentColor)
-                }
-                Text(classificationLabel(conflict.classification))
-                    .lineLimit(1)
-            }
-            .frame(width: 142, alignment: .leading)
-            Text(conflict.shankId)
-                .lineLimit(1)
-                .frame(width: 80, alignment: .leading)
-            numericCell(conflict.insertionDepthMicrometres, width: 82)
-            numericCell(conflict.adjustedClearanceMicrometres, width: 92, signed: true)
-            numericCell(conflict.centerlineDistanceMicrometres, width: 100)
-            numericCell(conflict.vesselDiameterMicrometres, width: 90)
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.right")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .font(.caption.monospacedDigit())
-        .contentShape(Rectangle())
-        .padding(.vertical, 4)
-    }
-
-    private func numericCell(
-        _ value: Double,
-        width: CGFloat,
-        signed: Bool = false
-    ) -> some View {
-        Text(String(format: signed ? "%+.2f" : "%.2f", value))
-            .frame(width: width, alignment: .trailing)
-    }
-
-    @ViewBuilder
-    private func conflictDetail(_ result: MajorVesselAnalysisResult) -> some View {
-        if let conflict = selectedConflict {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Label("Selected conflict", systemImage: "location.fill")
-                        .font(.headline)
-                        .foregroundStyle(Color.accentColor)
-                    if let error = model.majorVesselNavigationError {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    detailSection("Identity") {
-                        detailRow("Conflict ID", conflict.conflictId)
-                        detailRow("Classification", classificationLabel(conflict.classification))
-                        detailRow("Shank ID", conflict.shankId)
-                        detailRow("Source edge", "\(conflict.vesselSourceEdgeIndex)")
-                        detailRow("Vessel run", "\(conflict.vesselRunIndex)")
-                        detailRow("Segment in run", "\(conflict.vesselSegmentIndexInRun)")
-                    }
-                    detailSection("Measured geometry") {
-                        detailRow("Insertion depth", micrometres(conflict.insertionDepthMicrometres))
-                        detailRow("Vessel diameter", micrometres(conflict.vesselDiameterMicrometres))
-                        detailRow("Probe-envelope radius", micrometres(conflict.probeEnvelopeRadiusMicrometres))
-                        detailRow("Centerline distance", micrometres(conflict.centerlineDistanceMicrometres))
-                        detailRow("Geometric surface clearance", signedMicrometres(conflict.geometricSurfaceClearanceMicrometres))
-                        detailRow("Required margin", micrometres(conflict.requiredMarginMicrometres))
-                        detailRow("Registration uncertainty", micrometres(conflict.registrationUncertaintyMicrometres))
-                        detailRow("Adjusted clearance", signedMicrometres(conflict.adjustedClearanceMicrometres))
-                    }
-                    detailSection("Closest points · physical ASR") {
-                        detailRow("Probe point", pointDescription(conflict.probePoint))
-                        detailRow("Vessel point", pointDescription(conflict.vesselPoint))
-                        detailRow("Frame", conflict.probePoint.frameId)
-                    }
-                    detailSection("Source fields") {
-                        detailRow("Source kind", conflict.sourceKind)
-                        detailRow("Subject-specific", conflict.subjectSpecific ? "yes" : "no")
-                        ForEach(Array(conflict.warnings.enumerated()), id: \.offset) { index, warning in
-                            detailRow("Warning \(index + 1)", warning)
-                        }
-                    }
-                    completeProvenance(result)
-                }
-                .padding(16)
-            }
-        } else {
-            ContentUnavailableView(
-                "Select a conflict",
-                systemImage: "cursorarrow.click.2",
-                description: Text(
-                    "A selected row shows every returned field and moves Coronal, Sagittal, and Horizontal to its probe point in one revision."
-                )
-            )
-        }
-    }
-
-    private func completeProvenance(_ result: MajorVesselAnalysisResult) -> some View {
-        let analysis = result.analysis
-        let source = analysis.provenance
-        let profile = analysis.riskProfile
-        return detailSection("Analysis and source provenance") {
-            detailRow("Algorithm", analysis.algorithmVersion)
-            detailRow("Analysis SHA-256", analysis.inputSha256)
-            detailRow("Plan input SHA-256", result.planInputSha256)
-            detailRow("Risk profile", profile.profileId)
-            detailRow("Lab policy", profile.sourceOrLabPolicy)
-            detailRow("Inputs confirmed", profile.confirmedByUser ? "yes" : "no")
-            detailRow("Reference coverage acknowledged", profile.referenceOnlyCoverageAcknowledged ? "yes" : "no")
-            detailRow("Candidate segments", "\(analysis.candidateSegmentCount)")
-            detailRow("Measured segments", "\(analysis.measuredSegmentCount)")
-            detailRow("Source ID", source.sourceId)
-            detailRow("Dataset", source.datasetTitle)
-            detailRow("Authors", source.authors.joined(separator: "; "))
-            detailRow("Specimen", source.specimenId)
-            detailRow("Dataset DOI", source.sourceDoi)
-            detailRow("Paper DOI", source.sourcePaperDoi)
-            detailRow("Source version", source.sourceVersion)
-            detailRow("License", source.sourceLicense)
-            detailRow("Archive digest", source.sourceArchiveDigest)
-            detailRow("Derived asset SHA-256", source.derivedAssetSha256)
-            detailRow("Extraction algorithm", source.extractionAlgorithmVersion)
-            detailRow("Atlas", "\(source.atlasIdentifier) \(source.atlasVersion)")
-            detailRow("Coordinate frame", source.coordinateFrameId)
-            detailRow("Minimum included diameter", micrometres(source.minimumIncludedDiameterMicrometres))
-            detailRow("Physical units declared", yesNo(source.physicalUnitsDeclared))
-            detailRow("Atlas scale applied", yesNo(source.atlasScaleApplied))
-            detailRow("Geometry source audited", yesNo(source.geometrySourceAudited))
-            detailRow("Subject-specific source", yesNo(source.subjectSpecific))
-            detailRow("Pial vessels excluded", yesNo(source.pialVesselsExcluded))
-            detailRow("Choroidal vessels excluded", yesNo(source.choroidalVesselsExcluded))
-            detailRow("Artery/vein classification", yesNo(source.arteryVeinClassificationAvailable))
-            detailRow("Registration transform", source.registrationTransformId ?? "not published")
-            detailRow("Registration bound", source.registrationUncertaintyBoundMicrometres.map(micrometres) ?? "not published")
-            detailRow("Tissue-distortion bound", source.tissueDistortionUncertaintyBoundMicrometres.map(micrometres) ?? "not published")
-            detailRow("Uncertainty bounds reviewed", yesNo(source.uncertaintyBoundsReviewed))
-            ForEach(Array(result.limitations.enumerated()), id: \.offset) { index, limitation in
-                detailRow("Limitation \(index + 1)", limitation)
-            }
-        }
-    }
-
-    private func detailSection<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func detailRow(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.monospacedDigit())
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func classificationLabel(
-        _ classification: MajorVesselConflictClassification
-    ) -> String {
-        switch classification {
-        case .intersection: "Intersection"
-        case .marginViolation: "Margin violation"
-        case .uncertaintyViolation: "Uncertainty violation"
-        }
-    }
-
-    private func micrometres(_ value: Double) -> String {
-        String(format: "%.3f µm", value)
-    }
-
-    private func signedMicrometres(_ value: Double) -> String {
-        String(format: "%+.3f µm", value)
-    }
-
-    private func pointDescription(_ point: MajorVesselPhysicalPoint) -> String {
-        "AP \(signedMicrometres(point.apMicrometres)) · "
-            + "DV \(signedMicrometres(point.dvMicrometres)) · "
-            + "ML \(signedMicrometres(point.mlMicrometres))"
-    }
-
-    private func yesNo(_ value: Bool) -> String { value ? "yes" : "no" }
-}
-
-private struct VesselAnalysisDraft: Equatable {
-    var requiredMarginMicrometres = ""
-    var registrationUncertaintyMicrometres = ""
-    var riskProfileConfirmed = false
-    var referenceCoverageAcknowledged = false
-
-    init() {}
-
-    init(analysis: MajorVesselClearanceAnalysis) {
-        let profile = analysis.riskProfile
-        requiredMarginMicrometres = String(profile.requiredMarginMicrometres)
-        registrationUncertaintyMicrometres = String(
-            profile.registrationUncertaintyMicrometres
-        )
-        riskProfileConfirmed = profile.confirmedByUser
-        referenceCoverageAcknowledged = profile.referenceOnlyCoverageAcknowledged
-    }
-
-    func matches(_ analysis: MajorVesselClearanceAnalysis) -> Bool {
-        let profile = analysis.riskProfile
-        guard let margin = Double(requiredMarginMicrometres.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )),
-              let uncertainty = Double(registrationUncertaintyMicrometres.trimmingCharacters(
-                  in: .whitespacesAndNewlines
-              ))
-        else { return false }
-        return margin == profile.requiredMarginMicrometres
-            && uncertainty == profile.registrationUncertaintyMicrometres
-            && riskProfileConfirmed == profile.confirmedByUser
-            && referenceCoverageAcknowledged
-                == profile.referenceOnlyCoverageAcknowledged
-    }
 }
 
 private struct SidebarSection<Content: View>: View {

@@ -345,6 +345,22 @@ def remove_implant_target(
             "The requested implant target is not in the current project.",
             details={"targetId": str(target_id)},
         )
+    referencing_plan_ids = sorted(
+        str(plan.plan_uuid)
+        for plan in snapshot.probe_plans
+        if plan.source_target.target_uuid == target_id
+    )
+    if referencing_plan_ids:
+        raise BridgeError(
+            "IMPLANT_TARGET_IN_USE",
+            "The implant target is referenced by persisted probe plans and cannot be removed.",
+            details={
+                "targetId": str(target_id),
+                "probePlanCount": len(referencing_plan_ids),
+                "probePlanIds": referencing_plan_ids,
+                "cascadeDeletePerformed": False,
+            },
+        )
     replacement = _replace_targets(
         snapshot,
         [

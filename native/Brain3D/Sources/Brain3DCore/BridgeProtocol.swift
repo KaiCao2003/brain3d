@@ -118,6 +118,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
     public let probeCatalog: Bool?
     public let calibratedProbePlanning: Bool?
     public let exactProbeRegionTraversal: Bool?
+    public let atlasRegionRecords: Bool?
+    public let atlasRegionSearch: Bool?
     public let atlasMeshDescriptor: Bool?
     public let atlasAnnotationRayPick: Bool?
     public let atlasDorsalRegionPick: Bool?
@@ -139,6 +141,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         case probeCatalog
         case calibratedProbePlanning
         case exactProbeRegionTraversal
+        case atlasRegionRecords
+        case atlasRegionSearch
         case atlasMeshDescriptor
         case atlasAnnotationRayPick
         case atlasDorsalRegionPick
@@ -161,6 +165,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         probeCatalog: Bool? = nil,
         calibratedProbePlanning: Bool? = nil,
         exactProbeRegionTraversal: Bool? = nil,
+        atlasRegionRecords: Bool? = nil,
+        atlasRegionSearch: Bool? = nil,
         atlasMeshDescriptor: Bool? = nil,
         atlasAnnotationRayPick: Bool? = nil,
         atlasDorsalRegionPick: Bool? = nil,
@@ -181,6 +187,8 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         self.probeCatalog = probeCatalog
         self.calibratedProbePlanning = calibratedProbePlanning
         self.exactProbeRegionTraversal = exactProbeRegionTraversal
+        self.atlasRegionRecords = atlasRegionRecords
+        self.atlasRegionSearch = atlasRegionSearch
         self.atlasMeshDescriptor = atlasMeshDescriptor
         self.atlasAnnotationRayPick = atlasAnnotationRayPick
         self.atlasDorsalRegionPick = atlasDorsalRegionPick
@@ -226,6 +234,14 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         exactProbeRegionTraversal = try container.decodeIfPresent(
             Bool.self,
             forKey: .exactProbeRegionTraversal
+        )
+        atlasRegionRecords = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasRegionRecords
+        )
+        atlasRegionSearch = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasRegionSearch
         )
         atlasMeshDescriptor = try container.decodeIfPresent(
             Bool.self,

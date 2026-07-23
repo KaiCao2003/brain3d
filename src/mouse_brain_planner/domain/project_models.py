@@ -187,6 +187,7 @@ class PlannerProject(BaseModel):
         target_ids = [target.target_uuid for target in self.unprojected_bregma_targets]
         if len(target_ids) != len(set(target_ids)):
             raise ValueError("unprojected bregma targets contain duplicate UUIDs")
+        targets_by_id = {target.target_uuid: target for target in self.unprojected_bregma_targets}
 
         calibration_ids = [item.calibration_uuid for item in self.calibrations]
         if len(calibration_ids) != len(set(calibration_ids)):
@@ -297,6 +298,13 @@ class PlannerProject(BaseModel):
 
         plans_by_id = {item.plan_uuid: item for item in self.probe_plans}
         for plan in self.probe_plans:
+            referenced_target = targets_by_id.get(plan.source_target.target_uuid)
+            if referenced_target is None:
+                raise ValueError("probe plan source target is not present in the current project")
+            if referenced_target != plan.source_target:
+                raise ValueError(
+                    "probe plan source target snapshot does not match the current project target"
+                )
             if plan.atlas_metadata_sha256 != self.atlas.metadata_sha256:
                 raise ValueError("probe plan atlas metadata digest does not match project atlas")
             if plan.placement.context.subject_id != self.subject_id:

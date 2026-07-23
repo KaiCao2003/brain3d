@@ -76,8 +76,8 @@ class MajorVesselSourceProvenance(BaseModel):
     atlas_scale_applied: Literal[True] = True
     geometry_source_audited: Literal[True] = True
     subject_specific: Literal[False] = False
-    pial_vessels_excluded: Literal[True] = True
-    choroidal_vessels_excluded: Literal[True] = True
+    pial_vessels_excluded: bool = True
+    choroidal_vessels_excluded: bool = True
     artery_vein_classification_available: Literal[False] = False
     registration_transform_id: str | None = Field(default=None, min_length=1, max_length=300)
     registration_uncertainty_bound_um: NonNegativeFiniteFloat | None = None

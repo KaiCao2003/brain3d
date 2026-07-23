@@ -87,7 +87,7 @@ src/mouse_brain_planner/
   probes/                     source-traceable NP1 and synthetic test catalog
   surgery/                    product-reachable probe/measurement geometry
   analysis/                   region traversal plus archived vessel-analysis algorithms
-  vasculature/                archived LAMBADA evidence and qualification workflows
+  vasculature/                VesSAP display geometry plus archived qualification workflows
 tests/                        headless unit/contract/integration tests
 docs/                         audit, architecture, validation, and ADRs
 ```
@@ -105,8 +105,9 @@ The old Qt/PyVista/VTK application was removed after the audit in
 - Project files store model state and immutable data references, never UI objects or complete
   atlas/vessel volumes.
 - The rejected LAMBADA derivative, archived population density, and archived 2D subject evidence
-  remain separate types and workflows. None is a subject-vessel layer; the LAMBADA geometry and
-  analysis endpoints fail closed with `VESSEL_GEOMETRY_UNAVAILABLE`.
+  remain separate types and workflows. None is a subject-vessel layer. The runtime vessel
+  geometry endpoint serves only the digest-checked VesSAP display reference; analysis fails
+  closed with `VESSEL_ANALYSIS_UNAVAILABLE`, and LAMBADA is never loaded.
 
 ## Coordinate-change checklist
 

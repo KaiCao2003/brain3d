@@ -6,6 +6,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final
@@ -70,7 +71,7 @@ from mouse_brain_planner.domain.stereotaxy_models import (
 from mouse_brain_planner.domain.transform_models import AnatomicalPoint
 from mouse_brain_planner.probes.catalog import (
     PROBE_CATALOG_VERSION,
-    get_probe_model,
+    get_supported_probe_model,
     list_probe_models,
 )
 from mouse_brain_planner.surgery.probe_planning import (
@@ -81,9 +82,12 @@ from mouse_brain_planner.surgery.trajectory import (
     ProbePlacementError,
     placed_recording_sites,
     placed_shank_centerlines,
+    placement_cross_section_axes,
 )
 
 MAX_EXPORT_CHARACTERS: Final = 4 * 1024 * 1024
+REGION_EXPORT_SCHEMA_VERSION: Final = 2
+MAX_SUBJECT_FILENAME_COMPONENT_CHARACTERS: Final = 64
 
 ProjectGetter = Callable[[], PlannerProject]
 RevisionGetter = Callable[[], int]
@@ -453,7 +457,11 @@ class ProbePlanningBridge:
             "analysisSha256": analysis.analysis_sha256,
             "format": export_format,
             "mimeType": mime_type,
-            "suggestedFileName": f"probe-regions-{plan.plan_uuid}.{file_extension}",
+            "suggestedFileName": _region_export_filename(
+                project,
+                plan,
+                file_extension=file_extension,
+            ),
             "content": content,
             "contentSha256": content_sha256,
             "projectMutated": False,
@@ -776,11 +784,11 @@ def _catalog_model(params: Mapping[str, object]) -> ProbeModelDefinition:
     model_id = text_value(params["modelId"], "modelId", maximum=200)
     model_version = text_value(params["modelVersion"], "modelVersion", maximum=100)
     try:
-        return get_probe_model(model_id, model_version)
+        return get_supported_probe_model(model_id, model_version)
     except KeyError as error:
         raise BridgeError(
             "PROBE_MODEL_NOT_FOUND",
-            "The exact probe model identity is not in the reviewed catalog.",
+            "The exact probe model identity is not in the supported production catalog.",
             details={"modelId": model_id, "modelVersion": model_version},
         ) from error
 
@@ -982,6 +990,8 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
         raise ValueError("probe plan detail requires project atlas metadata")
     shanks = placed_shank_centerlines(plan.probe_model, plan.placement)
     sites = placed_recording_sites(plan.probe_model, plan.placement)
+    lateral_direction, normal_direction = placement_cross_section_axes(plan.placement)
+    direction_frame_id = plan.placement.entry.frame_id
     return {
         **_plan_summary(plan, None),
         "sourceTarget": {
@@ -1014,6 +1024,27 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
             "insertionDepthMicrometres": plan.placement.insertion_depth_um,
             "axialRotationDegrees": plan.placement.axial_rotation_deg,
             "angleConvention": plan.placement.angle_convention,
+            "inwardDirection": _direction_payload(
+                direction_frame_id,
+                plan.placement.inward_direction.as_ap_ml_dv(),
+            ),
+            "localLateralDirection": _direction_payload(
+                direction_frame_id,
+                (
+                    float(lateral_direction[0]),
+                    float(lateral_direction[1]),
+                    float(lateral_direction[2]),
+                ),
+            ),
+            "localNormalDirection": _direction_payload(
+                direction_frame_id,
+                (
+                    float(normal_direction[0]),
+                    float(normal_direction[1]),
+                    float(normal_direction[2]),
+                ),
+            ),
+            "modelToPlacementUniformScale": (plan.placement.model_to_placement_uniform_scale),
             "canonicalFrame": {
                 "frameId": plan.placement.entry.frame_id,
                 "componentOrder": ["AP", "ML", "DV"],
@@ -1048,7 +1079,7 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
             "catalogVersion": PROBE_CATALOG_VERSION,
         },
         "warning": (
-            "Animal research planning only — generic geometry and atlas placement must be "
+            "Animal research planning only — probe geometry and atlas placement must be "
             "independently verified against the animal, probe, and rig"
         ),
         "usableForNavigation": False,
@@ -1060,6 +1091,23 @@ def _anatomical_point_payload(point: AnatomicalPoint) -> JsonObject:
         "apMicrometres": point.ap_um,
         "mlMicrometres": point.ml_um,
         "dvMicrometres": point.dv_um,
+    }
+
+
+def _direction_payload(
+    frame_id: str,
+    components: tuple[float, float, float],
+) -> JsonObject:
+    """Serialize an AP/ML/DV unit vector without leaving frame or unit implicit."""
+
+    ap, ml, dv = components
+    return {
+        "frameId": frame_id,
+        "componentOrder": ["AP", "ML", "DV"],
+        "units": "dimensionless",
+        "ap": ap,
+        "ml": ml,
+        "dv": dv,
     }
 
 
@@ -1227,6 +1275,40 @@ def _atlas_analysis_point_payload(point: AtlasPhysicalPointAPMLDV) -> JsonObject
     }
 
 
+def _region_export_filename(
+    project: PlannerProject,
+    plan: ProbePlanRecord,
+    *,
+    file_extension: str,
+) -> str:
+    """Return a bounded filename with a filesystem-safe animal identifier."""
+
+    subject_component = _safe_subject_filename_component(
+        project.subject_id,
+        fallback_seed=str(project.project_uuid),
+    )
+    return f"probe-regions-{subject_component}-{plan.plan_uuid}.{file_extension}"
+
+
+def _safe_subject_filename_component(subject_id: str | None, *, fallback_seed: str) -> str:
+    """Preserve safe ASCII IDs and digest-bind any lossy filename normalization."""
+
+    raw = "" if subject_id is None else subject_id.strip()
+    digest_seed = raw or fallback_seed
+    digest = hashlib.sha256(digest_seed.encode("utf-8")).hexdigest()[:12]
+    normalized = re.sub(r"[^A-Za-z0-9_-]+", "-", raw)
+    normalized = re.sub(r"-{2,}", "-", normalized).strip("-_")
+    if not normalized:
+        return f"subject-{digest}"
+    if normalized == raw and len(normalized) <= MAX_SUBJECT_FILENAME_COMPONENT_CHARACTERS:
+        return normalized
+    prefix = normalized[: MAX_SUBJECT_FILENAME_COMPONENT_CHARACTERS - len(digest) - 1]
+    prefix = prefix.rstrip("-_")
+    if not prefix:
+        return f"subject-{digest}"
+    return f"{prefix}-{digest}"
+
+
 def _region_csv(
     project: PlannerProject,
     calibration: AtlasRegisteredCalibration,
@@ -1247,6 +1329,9 @@ def _region_csv(
         [
             "record_type",
             "export_schema_version",
+            "project_id",
+            "project_title",
+            "subject_id",
             "plan_id",
             "plan_version",
             "plan_input_sha256",
@@ -1281,7 +1366,10 @@ def _region_csv(
         ]
     )
     common = [
-        1,
+        REGION_EXPORT_SCHEMA_VERSION,
+        str(project.project_uuid),
+        project.title,
+        project.subject_id or "",
         str(plan.plan_uuid),
         plan.plan_version,
         plan.input_sha256,
@@ -1365,6 +1453,22 @@ def _region_export_content(
                 "planCalibrationSha256": plan.calibration_sha256,
             },
         )
+    if not calibration.permits_final_export:
+        raise BridgeError(
+            "CALIBRATION_FINAL_EXPORT_BLOCKED",
+            "The exact animal calibration referenced by this probe plan does not permit "
+            "final export.",
+            details={
+                "calibrationId": str(calibration.calibration_uuid),
+                "calibrationSha256": actual_calibration_sha256,
+                "quality": calibration.effective_quality.value,
+                "transformMethod": calibration.atlas_transform.method.value,
+                "affineDistortionAcknowledged": (
+                    calibration.atlas_transform.affine_distortion_acknowledged
+                ),
+                "permitsFinalExport": False,
+            },
+        )
     export_format = text_value(raw_format, "format", maximum=10).lower()
     if export_format == "csv":
         content = _region_csv(project, calibration, plan, analysis)
@@ -1398,7 +1502,12 @@ def _region_export_content(
                 },
                 "coordinateConvention": project.coordinate_convention,
                 "exportKind": "probe-region-analysis",
-                "exportSchemaVersion": 1,
+                "exportSchemaVersion": REGION_EXPORT_SCHEMA_VERSION,
+                "project": {
+                    "projectId": str(project.project_uuid),
+                    "subjectId": project.subject_id,
+                    "title": project.title,
+                },
                 "probePlan": {
                     "planId": str(plan.plan_uuid),
                     "planInputSha256": plan.input_sha256,

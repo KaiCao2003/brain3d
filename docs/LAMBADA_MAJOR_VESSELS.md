@@ -13,13 +13,10 @@ vascular measurement. It cannot establish subject-specific clearance or trajecto
 ## Runtime status
 
 Coordinate qualification is rejected. The current runtime does not load, serve, display, mirror,
-or analyze the P60_606 derivative:
-
-- `auditedReferenceMajorVessels` is absent from advertised capabilities;
-- `radiusAwareReferenceVesselAnalysis` is absent from advertised capabilities; and
-- `vessel.major.reference.get`, `vessel.major.reference.geometry`, and
-  `vessel.major.reference.analyze` fail closed with `VESSEL_GEOMETRY_UNAVAILABLE` before the
-  project, atlas, or derivative can be used to produce a payload.
+or analyze the P60_606 derivative. The production `auditedReferenceMajorVessels` capability and
+reference metadata/geometry endpoints now belong exclusively to the separately qualified VesSAP
+BL6J-no1 display reference. `radiusAwareReferenceVesselAnalysis` remains absent and clearance
+analysis fails with `VESSEL_ANALYSIS_UNAVAILABLE`.
 
 No geometry from this derivative may appear in a slice, Dorsal, or 3D view. It cannot support a
 probe/vessel intersection, margin, distance, conflict, no-conflict, or surgical-clearance claim.
@@ -47,9 +44,10 @@ SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 Its blocking reason codes are `SOURCE_HEMISPHERE_PROPERTY_MISSING` and
 `SOURCE_SPECIMEN_COVERAGE_IS_HEMISPHERE`; `qualifiedMapping` is null.
 
-## Rejected replacement sources
+## Sources rejected for subject-clearance integration
 
-No audited source met all five requirements: downloadable major-vessel centerlines/radii, an
+No audited source met all five requirements for subject-clearance integration: downloadable
+major-vessel centerlines/radii, an
 explicit Allen 25 µm transform, biological laterality, a documented CCF-to-bregma relationship,
 and terms that permit the required redistributed derivative.
 
@@ -60,8 +58,10 @@ and terms that permit the required redistributed derivative.
 | [Hinz et al. 2021](https://www.biorxiv.org/content/10.1101/2021.10.21.465264v1) | Geometry is in a study-specific 78 µm MRI template with no Allen/bregma transform, and CC BY-NC-ND terms do not permit the required transformed redistribution. |
 | [Xiong et al. 2017](https://www.frontiersin.org/journals/neuroanatomy/articles/10.3389/fnana.2017.00128/full) | Named vessels are documented, but no downloadable graph or CCF transform is provided. |
 
-These are rejected alternatives, not integrated data. A future source must be audited against the
-same five requirements before any geometry or analysis capability can be advertised.
+These are rejected alternatives, not integrated data. VesSAP is separately accepted only for a
+display reference; it does not meet the subject/bregma/error-bound requirements for clearance. A
+future clearance source must be audited against the same requirements before any analysis
+capability can be advertised.
 
 ## Archived derivative
 

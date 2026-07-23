@@ -235,7 +235,7 @@ struct CalibrationSheet: View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    GroupBox("Measured skull frame · AP / ML / DV · µm") {
+                    GroupBox("Measured skull frame · AP / ML / DV · mm") {
                         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
                             formTextRow("Profile ID", text: $profileId)
                             formTextRow("Frame ID", text: $sourceFrameId)
@@ -262,13 +262,13 @@ struct CalibrationSheet: View {
                             Grid(alignment: .leading, horizontalSpacing: 8, verticalSpacing: 8) {
                                 GridRow {
                                     Text("Landmark").frame(width: 88, alignment: .leading)
-                                    Text("Skull AP").frame(width: 82)
-                                    Text("Skull ML").frame(width: 82)
-                                    Text("Skull DV").frame(width: 82)
+                                    Text("Skull AP (mm)").frame(width: 94)
+                                    Text("Skull ML (mm)").frame(width: 94)
+                                    Text("Skull DV (mm)").frame(width: 94)
                                     Divider().frame(height: 20)
-                                    Text("Atlas AP").frame(width: 82)
-                                    Text("Atlas DV").frame(width: 82)
-                                    Text("Atlas ML").frame(width: 82)
+                                    Text("Atlas AP (mm)").frame(width: 94)
+                                    Text("Atlas DV (mm)").frame(width: 94)
+                                    Text("Atlas ML (mm)").frame(width: 94)
                                 }
                                 .font(.caption.weight(.semibold))
                                 ForEach($rows) { $row in
@@ -286,7 +286,7 @@ struct CalibrationSheet: View {
                             }
                             .padding(8)
                         }
-                        Text("Skull order AP / ML / DV · BrainGlobe physical order AP / DV / ML · µm")
+                        Text("Skull order AP / ML / DV · BrainGlobe physical order AP / DV / ML · mm")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 8)
@@ -295,7 +295,7 @@ struct CalibrationSheet: View {
 
                     GroupBox("Animal measurement") {
                         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
-                            formTextRow("Reported bregma–lambda distance (µm)", text: $reportedDistance)
+                            formTextRow("Reported bregma–lambda distance (mm)", text: $reportedDistance)
                             formTextRow("DV reference description", text: $dvReferenceDescription)
                             GridRow {
                                 Text("Laterality")
@@ -380,7 +380,7 @@ struct CalibrationSheet: View {
         TextField("", text: text)
             .textFieldStyle(.roundedBorder)
             .multilineTextAlignment(.trailing)
-            .frame(width: 82)
+            .frame(width: 94)
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
@@ -438,16 +438,16 @@ struct CalibrationSheet: View {
         let skull = try rows.map { row in
             CalibrationSkullPoint(
                 frameId: frameId,
-                ap: try CalibrationNumberInput.parse(row.skullAP, field: "\(row.label) skull AP"),
-                ml: try CalibrationNumberInput.parse(row.skullML, field: "\(row.label) skull ML"),
-                dv: try CalibrationNumberInput.parse(row.skullDV, field: "\(row.label) skull DV")
+                ap: try coordinateMicrometres(row.skullAP, "\(row.label) skull AP"),
+                ml: try coordinateMicrometres(row.skullML, "\(row.label) skull ML"),
+                dv: try coordinateMicrometres(row.skullDV, "\(row.label) skull DV")
             )
         }
         let atlas = try rows.map { row in
             CalibrationAtlasPoint(
-                ap: try CalibrationNumberInput.parse(row.atlasAP, field: "\(row.label) atlas AP"),
-                dv: try CalibrationNumberInput.parse(row.atlasDV, field: "\(row.label) atlas DV"),
-                ml: try CalibrationNumberInput.parse(row.atlasML, field: "\(row.label) atlas ML")
+                ap: try coordinateMicrometres(row.atlasAP, "\(row.label) atlas AP"),
+                dv: try coordinateMicrometres(row.atlasDV, "\(row.label) atlas DV"),
+                ml: try coordinateMicrometres(row.atlasML, "\(row.label) atlas ML")
             )
         }
         let request = CalibrationCreateParameters(
@@ -466,9 +466,9 @@ struct CalibrationSheet: View {
                 lambdaPoint: skull[1],
                 leftSkull: skull[2],
                 rightSkull: skull[3],
-                reportedBregmaLambdaDistanceMicrometres: try CalibrationNumberInput.parse(
+                reportedBregmaLambdaDistanceMicrometres: try coordinateMicrometres(
                     reportedDistance,
-                    field: "Reported bregma–lambda distance"
+                    "Reported bregma–lambda distance"
                 ),
                 lateralityConfirmedFromAnimal: lateralityConfirmed
             ),
@@ -499,6 +499,15 @@ struct CalibrationSheet: View {
 
     private func number(_ text: String, _ field: String) throws -> Double {
         try CalibrationNumberInput.parse(text, field: field)
+    }
+
+    private func coordinateMicrometres(_ text: String, _ field: String) throws -> Double {
+        ProbeInputUnits.micrometres(
+            fromMillimetres: try CalibrationNumberInput.parse(
+                text,
+                field: "\(field) (mm)"
+            )
+        )
     }
 
     private func resetForm() {

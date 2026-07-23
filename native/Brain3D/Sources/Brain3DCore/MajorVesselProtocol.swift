@@ -3,20 +3,23 @@ import Foundation
 import simd
 
 public enum MajorVesselContract {
-    public static let sourceId = "lambada-p60-606-major-vessels-v1"
-    public static let sourceDoi = "10.5281/zenodo.18876865"
-    public static let sourceRecordURL = "https://zenodo.org/records/18876865"
-    public static let sourcePaperDoi = "10.1016/j.cell.2026.03.013"
-    public static let specimenId = "P60_606"
+    public static let sourceId = "vessap-bl6j-no1-major-vessels-50um-v1"
+    public static let sourceDoi = "10.1038/s41592-020-0792-1"
+    public static let sourceRecordURL = "https://www.discotechnologies.org/VesSAP/"
+    public static let sourcePaperDoi = "10.1038/s41592-020-0792-1"
+    public static let specimenId = "BL6J-no1"
     public static let sourceArchiveDigest =
-        "sha256:cc6d252ee57154f5bc0f06605a703253470a57c210d76e075831effa2098d66f"
+        "sha256:d0216b9f6fcec428845f8ecc24860b4838f27b6b69496a88d8b7ab0dcd1dbf8a"
     public static let derivedAssetSHA256 =
-        "fb2344e845e604be3424bd63f4222d273eafba34db0df2eaff32f4400fa9afec"
-    public static let extractionAlgorithmVersion = "lambada-p60-606-major-runs-v1"
+        "9300dacf25ca57a5d23377ca0dc885e34ff0d18e8d21ef7590c6dcd156cf5db7"
+    public static let extractionAlgorithmVersion = "vessap-bl6j1-major-skeleton-50um-v1"
+    public static let registrationTransformId =
+        "vessap-bl6j-no1-rigid-bspline-fullres-" +
+        "sha256-ab2509e07dcab65f176b72337624fa2ccc38f9e32f17530964ed17af5e1e88ad"
     public static let minimumIncludedDiameterMicrometres = 30.0
-    public static let expectedPointCount = 71_313
-    public static let expectedRunCount = 11_818
-    public static let expectedSegmentCount = 59_495
+    public static let expectedPointCount = 196_377
+    public static let expectedRunCount = 76_622
+    public static let expectedSegmentCount = 119_755
     public static let maximumPointCount = 500_000
     public static let maximumRunCount = 250_000
     public static let maximumBufferByteCount = 16 * 1024 * 1024
@@ -178,14 +181,14 @@ public struct MajorVesselSourceProvenance: Decodable, Equatable, Sendable {
               atlasScaleApplied,
               geometrySourceAudited,
               !subjectSpecific,
-              pialVesselsExcluded,
-              choroidalVesselsExcluded,
+              !pialVesselsExcluded,
+              !choroidalVesselsExcluded,
               !arteryVeinClassificationAvailable,
-              registrationTransformId == nil,
+              registrationTransformId == MajorVesselContract.registrationTransformId,
               registrationUncertaintyBoundMicrometres == nil,
               tissueDistortionUncertaintyBoundMicrometres == nil,
               !uncertaintyBoundsReviewed,
-              sourceLicense == "CC BY 4.0",
+              sourceLicense == "CC BY-NC 4.0",
               !datasetTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !sourceVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !authors.isEmpty,
