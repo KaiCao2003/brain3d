@@ -24,6 +24,10 @@ struct WorkspaceView: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 12)
 
+            MajorVesselDisplayControl(model: model)
+                .padding(.horizontal, 18)
+                .padding(.bottom, 10)
+
             AtlasRegionBrowserBar(model: model)
                 .padding(.horizontal, 18)
                 .padding(.bottom, 10)
@@ -49,6 +53,69 @@ struct WorkspaceView: View {
         case .threeDimensional:
             ThreeDimensionalWorkspace(model: model)
         }
+    }
+}
+
+private struct MajorVesselDisplayControl: View {
+    @ObservedObject var model: PlannerViewModel
+    @State private var pendingDiameterMicrometres =
+        MajorVesselDisplayFilter.defaultMinimumDiameterMicrometres
+    @State private var isEditing = false
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Label("Vessels", systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.caption.weight(.semibold))
+
+            Slider(
+                value: $pendingDiameterMicrometres,
+                in: MajorVesselDisplayFilter.allowedMinimumDiameterRange,
+                step: MajorVesselDisplayFilter.adjustmentStepMicrometres,
+                onEditingChanged: commitWhenEditingEnds
+            )
+            .frame(width: 150)
+            .accessibilityLabel("Minimum visible major-vessel diameter")
+            .accessibilityValue(pendingThresholdText)
+            .accessibilityHint(
+                "Filters display only. The verified VesSAP source remains unchanged."
+            )
+
+            Text(pendingThresholdText)
+                .font(.caption.monospacedDigit().weight(.semibold))
+                .frame(width: 58, alignment: .trailing)
+
+            Text(model.majorVesselVisibleCountText)
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            Spacer(minLength: 0)
+        }
+        .help(
+            "Display filter only. VesSAP source data retain their verified "
+                + "30 µm minimum diameter and provenance."
+        )
+        .onAppear {
+            pendingDiameterMicrometres =
+                model.minimumVisibleVesselDiameterMicrometres
+        }
+        .onChange(of: model.minimumVisibleVesselDiameterMicrometres) {
+            _, newValue in
+            if !isEditing {
+                pendingDiameterMicrometres = newValue
+            }
+        }
+    }
+
+    private var pendingThresholdText: String {
+        "≥\(Int(pendingDiameterMicrometres.rounded())) µm"
+    }
+
+    private func commitWhenEditingEnds(_ editing: Bool) {
+        isEditing = editing
+        guard !editing else { return }
+        model.setMinimumVisibleVesselDiameterMicrometres(
+            pendingDiameterMicrometres
+        )
     }
 }
 
@@ -483,15 +550,6 @@ private struct DorsalAtlasWorkspace: View {
                 Label("Dorsal atlas surface", systemImage: "brain.head.profile")
                     .font(.headline)
                 Spacer()
-                Text(
-                    model.majorVesselGeometry == nil
-                        ? "Vessels unavailable"
-                        : "≥30 µm · display only"
-                )
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(
-                    model.majorVesselGeometry == nil ? Color.secondary : Color.primary
-                )
                 Button("Reset view", systemImage: "arrow.counterclockwise") {
                     resetGeneration &+= 1
                 }
@@ -706,7 +764,8 @@ private struct ThreeDimensionalWorkspace: View {
             Spacer()
             if model.majorVesselGeometry != nil {
                 Label(
-                    "Reference vessels · diameter ≥30 µm · display only",
+                    "Vessels \(model.majorVesselDisplayThresholdText) · "
+                        + model.majorVesselVisibleCountText,
                     systemImage: "point.3.connected.trianglepath.dotted"
                 )
                     .font(.caption)

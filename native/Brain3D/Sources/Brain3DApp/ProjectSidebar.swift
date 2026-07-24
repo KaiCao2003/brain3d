@@ -1,8 +1,6 @@
-import AppKit
 import Brain3DCore
 import Foundation
 import SwiftUI
-import UniformTypeIdentifiers
 
 enum ProbePlacementGuidance {
     static func text(for mode: ProbePlacementMode) -> String {
@@ -145,6 +143,22 @@ enum ProbeInputUnits {
     }
 }
 
+enum ProbeDraftSelectionPolicy {
+    static func targetId(
+        selectedPlanTargetId: String?,
+        currentTargetId: String,
+        availableTargetIds: [String]
+    ) -> String {
+        if let selectedPlanTargetId {
+            return selectedPlanTargetId
+        }
+        if availableTargetIds.contains(currentTargetId) {
+            return currentTargetId
+        }
+        return availableTargetIds.first ?? ""
+    }
+}
+
 struct ProjectSidebar: View {
     @ObservedObject var model: PlannerViewModel
     let saveProject: () -> Void
@@ -166,15 +180,14 @@ struct ProjectSidebar: View {
     @State private var probeDepth = ""
     @State private var probeAxialRotation = "0"
     @State private var probeGeometryAcknowledged = false
-    @State private var showingProbeRegionInspector = false
     @State private var confirmingProbeRemoval = false
+    @State private var showingSurgeryPlanExport = false
 
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
-                    backendSection
-                    atlasSection
+                    projectSection
                     implantTargetSection
                     probeSection
                     majorVesselsSection
@@ -186,53 +199,62 @@ struct ProjectSidebar: View {
         .sheet(isPresented: $showingCalibrationSheet) {
             CalibrationSheet(model: model)
         }
-        .sheet(isPresented: $showingProbeRegionInspector) {
-            if let plan = model.selectedProbePlan,
-               let analysis = model.selectedProbeRegionAnalysis
-            {
-                ProbeRegionInspectorSheet(plan: plan, analysis: analysis)
-            }
+        .sheet(isPresented: $showingSurgeryPlanExport) {
+            SurgeryPlanExportSheet(model: model)
         }
         .confirmationDialog(
-            "Remove this probe plan and its region analysis?",
+            "Remove this probe plan?",
             isPresented: $confirmingProbeRemoval,
             titleVisibility: .visible
         ) {
             Button("Remove Probe Plan", role: .destructive) {
                 Task {
                     if await model.removeSelectedProbePlan() {
-                        clearProbeDraft()
+                        prepareNewProbeDraft()
                     }
                 }
             }
             Button("Cancel", role: .cancel) {}
         }
-        .onChange(of: model.selectedProbePlan?.inputSha256, initial: true) {
+        .onChange(of: model.selectedProbePlan?.planId, initial: true) {
+            _, _ in
+            synchronizeProbeDraft()
+        }
+        .onChange(of: model.selectedProbePlan?.inputSha256) {
             _, _ in
             if model.selectedProbePlan == nil {
-                clearProbeDraft()
+                prepareNewProbeDraft()
             } else {
                 populateProbeDraft()
             }
         }
         .onChange(of: model.backendState?.project?.projectId) { _, _ in
-            resetPlanningDraftsForProject()
+            clearTargetDraft()
+            synchronizeProbeDraft()
         }
         .onChange(of: model.implantTargets.map(\.targetId), initial: true) {
             _, targetIds in
-            if !probeTargetId.isEmpty, !targetIds.contains(probeTargetId) {
-                probeTargetId = ""
+            probeTargetId = ProbeDraftSelectionPolicy.targetId(
+                selectedPlanTargetId: model.selectedProbePlan?.targetId,
+                currentTargetId: probeTargetId,
+                availableTargetIds: targetIds
+            )
+            if model.selectedProbePlan == nil {
+                fillSuggestedProbeNameIfNeeded()
             }
             if targetCoordinatesAreBlank {
                 targetLabel = nextTargetLabel
             }
         }
+        .onChange(of: model.selectedProbeModel?.id, initial: true) { _, _ in
+            fillSuggestedProbeNameIfNeeded()
+        }
     }
 
     private var probeSection: some View {
-        SidebarSection(title: "Probe", systemImage: "line.diagonal.arrow") {
+        SidebarSection(title: "Neuropixels 2.0", systemImage: "line.diagonal.arrow") {
             Picker("Plan", selection: probePlanSelection) {
-                Text("New probe plan").tag("")
+                Text("New plan").tag("")
                 ForEach(model.probePlans) { plan in
                     Text(plan.name).tag(plan.planId)
                 }
@@ -240,56 +262,39 @@ struct ProjectSidebar: View {
             .disabled(model.probeOperationInProgress)
             .accessibilityLabel("Probe plan")
 
-            Picker("Probe model", selection: probeModelSelection) {
-                if model.probeCatalog.isEmpty {
-                    Text("No model available").tag("")
+            Picker("Probe", selection: probeModelSelection) {
+                if supportedProbeCatalog.isEmpty {
+                    Text("NPX2 unavailable").tag("")
                 } else if model.selectedProbePlan != nil,
                           model.selectedProbeModel == nil
                 {
                     Text("Archived model (read-only)").tag("")
                 }
-                ForEach(model.probeCatalog) { probe in
-                    Text(probe.displayName).tag(probe.id)
+                ForEach(supportedProbeCatalog) { probe in
+                    Text(probePickerLabel(probe)).tag(probe.id)
                 }
             }
             .disabled(
-                model.probeCatalog.isEmpty
+                supportedProbeCatalog.isEmpty
                     || model.probeOperationInProgress
                     || (model.selectedProbePlan != nil && model.selectedProbeModel == nil)
             )
-            .accessibilityHint("Selects the exact hardware geometry used by this plan.")
+            .accessibilityHint("Choose the NPX2 single- or four-shank geometry.")
 
-            if let probe = model.selectedProbeModel {
-                selectedProbeModelCard(probe)
-            } else if let plan = model.selectedProbePlan {
+            if let plan = model.selectedProbePlan,
+               model.selectedProbeModel == nil
+            {
                 Label(
-                    "\(plan.modelDisplayName) is archived and read-only. "
-                        + "Only NP2 single- and standard four-shank models are supported.",
+                    "\(plan.modelDisplayName) is archived and read-only.",
                     systemImage: "archivebox"
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            } else if !model.probeCatalog.isEmpty {
-                Label("Select the hardware model to continue.", systemImage: "cpu")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
-            if !model.probeCatalog.isEmpty,
-               !ProbeCatalogPresentation.containsNeuropixels2(model.probeCatalog)
-            {
-                Label(
-                    "Neuropixels 2.0 is not available from this connected catalog.",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Picker("Implant target", selection: $probeTargetId) {
-                Text("Select implant target").tag("")
+            Picker("Implant site", selection: $probeTargetId) {
+                Text("Choose a site").tag("")
                 ForEach(model.implantTargets) { target in
                     Text(target.label).tag(target.targetId)
                 }
@@ -297,66 +302,30 @@ struct ProjectSidebar: View {
             .disabled(model.implantTargets.isEmpty || model.probeOperationInProgress)
             .accessibilityHint("Uses the selected bregma-relative AP, ML, and DV site.")
 
-            Picker("Placement", selection: $probePlacementMode) {
-                ForEach(ProbePlacementMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .pickerStyle(.menu)
-            .controlSize(.small)
-            .accessibilityLabel("Probe placement mode")
-
-            Text(ProbePlacementGuidance.text(for: probePlacementMode))
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            TextField("Required plan name", text: $probeName)
+            TextField("Plan name", text: $probeName)
                 .textFieldStyle(.roundedBorder)
                 .accessibilityLabel("Probe plan name")
-                .accessibilityHint("Names this plan; it does not select the hardware model.")
 
             if probePlacementMode.requiresEntryCoordinates {
+                Label("Legacy entry-based plan", systemImage: "archivebox")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 probeEntryCoordinateFields
             }
 
             if probePlacementMode.requiresAnglesAndDepth {
-                probeNumberField(
-                    "Azimuth (°)",
-                    sign: "+ rotates anterior → right; − rotates toward left",
-                    text: $probeAzimuth
-                )
-                probeNumberField(
-                    "Elevation (°)",
-                    sign: "+ dorsal / up; − deep / ventral",
-                    text: $probeElevation
-                )
-                probeNumberField(
-                    "Insertion depth (mm)",
-                    sign: "Positive distance in millimetres from entry toward tip",
-                    text: $probeDepth
-                )
+                probeAngleAndDepthFields
             }
-            probeNumberField(
-                "Axial rotation (°)",
-                sign: "Right-hand rotation about the entry → tip axis",
-                text: $probeAxialRotation
-            )
 
             if let probe = model.selectedProbeModel,
                probe.requiresExplicitAcknowledgement
             {
-                if let warning = probe.warning {
-                    Text(warning)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                Label("Verify the selected NPX2 geometry before animal use.",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
                 Toggle(
-                    probe.verificationStatus
-                        == ProbePlanningContract.sourceTranscribedReviewPendingStatus
-                        ? "I understand independent transcription review is pending"
-                        : "I acknowledge this synthetic software-test geometry",
+                    "Geometry checked",
                     isOn: $probeGeometryAcknowledged
                 )
                 .font(.caption)
@@ -371,7 +340,7 @@ struct ProjectSidebar: View {
                     .disabled(!canSubmitProbeDraft)
                     .help(
                         probeDraftBlockingReason
-                            ?? "Create the probe plan and publish its trajectory preview."
+                            ?? "Create this NPX2 plan."
                     )
                 } else {
                     Button("Update plan", systemImage: "checkmark") {
@@ -381,7 +350,7 @@ struct ProjectSidebar: View {
                     .disabled(!canSubmitProbeDraft)
                     .help(
                         probeDraftBlockingReason
-                            ?? "Update the probe plan and recompute its trajectory preview."
+                            ?? "Update this NPX2 plan."
                     )
                     Button("Remove", systemImage: "trash", role: .destructive) {
                         confirmingProbeRemoval = true
@@ -391,8 +360,10 @@ struct ProjectSidebar: View {
             }
             .controlSize(.small)
 
-            if let probeDraftBlockingReason {
-                Label(probeDraftBlockingReason, systemImage: "info.circle")
+            if model.backendState?.project != nil,
+               let probeDraftBlockingReason
+            {
+                Text(probeDraftBlockingReason)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -401,58 +372,19 @@ struct ProjectSidebar: View {
             }
 
             if let plan = model.selectedProbePlan {
-                Text(plan.requiresPlanningGeometryUpdate
-                    ? "v\(plan.planVersion) · legacy geometry hidden · update required"
-                    : "v\(plan.planVersion) · \(plan.modelDisplayName) · planning only · not navigation")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
                 if plan.requiresPlanningGeometryUpdate {
                     Label(
-                        "This legacy plan uses obsolete projection geometry. Review the restored inputs and choose Update plan to recompute it. Slice, 3D, region, and vessel analysis are disabled until then.",
+                        "Review this older plan, then choose Update.",
                         systemImage: "arrow.triangle.2.circlepath"
                     )
                     .font(.caption.weight(.medium))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
                 }
-
-                if plan.hasCurrentPlanningGeometry {
-                    probeTrajectoryPreview(plan)
-                }
-
-                HStack {
-                    Button("Analyze regions", systemImage: "list.bullet.indent") {
-                        Task { _ = await model.analyzeSelectedProbeRegions() }
-                    }
-                    .disabled(!model.canAnalyzeSelectedProbeRegions)
-
-                    if plan.hasCurrentPlanningGeometry,
-                       model.selectedProbeRegionAnalysis != nil
-                    {
-                        Button("Inspect…", systemImage: "tablecells") {
-                            showingProbeRegionInspector = true
-                        }
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                if plan.hasCurrentPlanningGeometry,
-                   model.selectedProbeRegionAnalysis != nil
-                {
-                    HStack {
-                        Button("Save CSV…") { saveProbeRegions(.csv) }
-                        Button("Save JSON…") { saveProbeRegions(.json) }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
             }
 
             if model.probeOperationInProgress {
-                ProgressView("Updating probe planning data…")
+                ProgressView("Updating probe…")
                     .controlSize(.small)
             }
             if let error = model.probeOperationError {
@@ -471,7 +403,7 @@ struct ProjectSidebar: View {
                 if planId.isEmpty {
                     Task {
                         _ = await model.selectProbePlan(nil)
-                        clearProbeDraft()
+                        prepareNewProbeDraft()
                     }
                 } else if planId != model.selectedProbePlanId {
                     Task {
@@ -527,136 +459,48 @@ struct ProjectSidebar: View {
         )
     }
 
-    private func selectedProbeModelCard(_ probe: ProbeCatalogModel) -> some View {
-        let productIdentity = [probe.manufacturer, probe.productCode]
-            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " · ")
-        let shanks = probe.shankCount == 1
-            ? "1 shank"
-            : "\(probe.shankCount) shanks"
-        let siteCount = probe.siteCount.formatted(.number.grouping(.automatic))
-        let simultaneousChannelCount = ProbeCatalogPresentation.simultaneousChannelCount(
-            modelId: probe.modelId
-        )
-        let channelIdentity = simultaneousChannelCount.map {
-            "\($0.formatted(.number.grouping(.automatic))) simultaneous channels"
+    private var supportedProbeCatalog: [ProbeCatalogModel] {
+        model.probeCatalog.filter {
+            ProbeCatalogPresentation.isNeuropixels2(modelId: $0.modelId)
         }
+    }
 
-        return VStack(alignment: .leading, spacing: 3) {
-            Text(probe.displayName)
+    private func probePickerLabel(_ probe: ProbeCatalogModel) -> String {
+        probe.shankCount == 1 ? "NPX2 1-shank" : "NPX2 4-shank"
+    }
+
+    private var probeAngleAndDepthFields: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Angles (°) · depth (mm)")
                 .font(.caption.weight(.semibold))
-            if !productIdentity.isEmpty {
-                Text(productIdentity)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Text("\(shanks) · \(siteCount) physical/addressable sites")
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.secondary)
-            if let channelIdentity {
-                Text("\(channelIdentity) · IMRO/channel selection is not configured here")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Selected probe model")
-        .accessibilityValue(
-            [
-                probe.displayName,
-                productIdentity,
-                shanks,
-                "\(siteCount) physical/addressable sites",
-                channelIdentity.map {
-                    "\($0); IMRO/channel selection is not configured here"
-                } ?? "",
-            ]
-                .filter { !$0.isEmpty }
-                .joined(separator: ", ")
-        )
-    }
-
-    private func probeTrajectoryPreview(_ plan: ProbePlanDetail) -> some View {
-        let source = plan.sourceTarget
-        let placement = plan.placement
-        let scenePlan = model.threeDimensionalSnapshot?.selectedProbePlan
-        let sceneContainsCurrentPlan = scenePlan?.planId == plan.planId
-            && scenePlan?.inputSha256 == plan.inputSha256
-
-        return VStack(alignment: .leading, spacing: 4) {
-            Label("Trajectory preview", systemImage: "line.diagonal.arrow")
-                .font(.caption.weight(.semibold))
-            Text(
-                "Bregma target · AP \(signed(source.apMillimetres)) mm · "
-                    + "ML \(signed(source.mlMillimetres)) mm · "
-                    + "DV \(signed(source.dvMillimetres)) mm"
-            )
-            .font(.caption2.monospacedDigit())
-            Text("Atlas physical · corner origin · AP / DV / ML · mm")
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(probeAtlasPhysicalPointSummary("Entry", placement.atlasFrame.entry))
-                .font(.caption2.monospacedDigit())
-            Text(probeAtlasPhysicalPointSummary("Tip", placement.atlasFrame.tip))
-                .font(.caption2.monospacedDigit())
-            Text(
-                String(
-                    format: "Az %+.1f° · El %+.1f° · depth %.3f mm · roll %+.1f°",
-                    placement.azimuthDegrees,
-                    placement.elevationDegrees,
-                    ProbeInputUnits.millimetres(
-                        fromMicrometres: placement.insertionDepthMicrometres
-                    ),
-                    placement.axialRotationDegrees
+            HStack(spacing: 7) {
+                compactProbeNumberField(
+                    "Azimuth",
+                    text: $probeAzimuth,
+                    accessibilityLabel: "Azimuth in degrees",
+                    accessibilityHint: "Degrees from negative 180 through 180."
                 )
-            )
-            .font(.caption2.monospacedDigit())
-            Text(
-                ProbeOverlayPresentation.text(
-                    threeDimensionalPhase: model.threeDimensionalPhase,
-                    sceneContainsCurrentPlan: sceneContainsCurrentPlan
+                compactProbeNumberField(
+                    "Elevation",
+                    text: $probeElevation,
+                    accessibilityLabel: "Elevation in degrees",
+                    accessibilityHint: "Degrees from negative 90 through 90."
                 )
-            )
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-        }
-        .padding(7)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color.accentColor.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
-        .accessibilityElement(children: .combine)
-    }
-
-    private func probeAtlasPhysicalPointSummary(
-        _ label: String,
-        _ point: ProbePhysicalPoint
-    ) -> String {
-        "\(label) · AP \(signedMillimetres(point.apMicrometres)) · "
-            + "DV \(signedMillimetres(point.dvMicrometres)) · "
-            + "ML \(signedMillimetres(point.mlMicrometres))"
-    }
-
-    private func probeNumberField(
-        _ label: String,
-        sign: String,
-        text: Binding<String>
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(label)
-                    .font(.caption.weight(.semibold))
-                TextField("Required", text: text)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .accessibilityLabel(label)
-                    .accessibilityHint(sign)
             }
-            Text(sign)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+            HStack(spacing: 7) {
+                compactProbeNumberField(
+                    "Depth",
+                    text: $probeDepth,
+                    accessibilityLabel: "Insertion depth in millimetres",
+                    accessibilityHint: "Positive insertion depth in millimetres."
+                )
+                compactProbeNumberField(
+                    "Roll",
+                    text: $probeAxialRotation,
+                    accessibilityLabel: "Axial rotation in degrees",
+                    accessibilityHint: "Axial rotation in degrees."
+                )
+            }
         }
     }
 
@@ -681,7 +525,9 @@ struct ProjectSidebar: View {
 
     private func compactProbeNumberField(
         _ axis: String,
-        text: Binding<String>
+        text: Binding<String>,
+        accessibilityLabel: String? = nil,
+        accessibilityHint: String? = nil
     ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(axis)
@@ -690,8 +536,12 @@ struct ProjectSidebar: View {
             TextField("Required", text: text)
                 .textFieldStyle(.roundedBorder)
                 .multilineTextAlignment(.trailing)
-                .accessibilityLabel("Entry \(axis) in millimetres from bregma")
-                .accessibilityHint(probeEntryAccessibilityHint(axis))
+                .accessibilityLabel(
+                    accessibilityLabel ?? "Entry \(axis) in millimetres from bregma"
+                )
+                .accessibilityHint(
+                    accessibilityHint ?? probeEntryAccessibilityHint(axis)
+                )
         }
         .frame(maxWidth: .infinity)
     }
@@ -781,9 +631,30 @@ struct ProjectSidebar: View {
         probeGeometryAcknowledged = false
     }
 
-    private func resetPlanningDraftsForProject() {
+    private func prepareNewProbeDraft() {
         clearProbeDraft()
-        clearTargetDraft()
+        probeTargetId = model.implantTargets.first?.targetId ?? ""
+        fillSuggestedProbeNameIfNeeded()
+    }
+
+    private func synchronizeProbeDraft() {
+        if model.selectedProbePlan == nil {
+            prepareNewProbeDraft()
+        } else {
+            populateProbeDraft()
+        }
+    }
+
+    private func fillSuggestedProbeNameIfNeeded() {
+        guard model.selectedProbePlan == nil,
+              probeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let probe = model.selectedProbeModel,
+              let siteLabel = model.implantTargets.first(where: {
+                  $0.targetId == probeTargetId
+              })?.label
+        else { return }
+
+        probeName = "\(probePickerLabel(probe)) · \(siteLabel)"
     }
 
     private func clearTargetDraft() {
@@ -808,52 +679,24 @@ struct ProjectSidebar: View {
         String(format: "%.12g", value)
     }
 
-    private func saveProbeRegions(_ format: ProbeRegionExportFormat) {
-        Task {
-            guard let export = await model.exportSelectedProbeRegions(format: format) else {
-                return
-            }
-            let panel = NSSavePanel()
-            panel.title = "Save exact probe-region analysis"
-            panel.prompt = "Save"
-            panel.nameFieldStringValue = export.suggestedFileName
-            panel.canCreateDirectories = true
-            panel.allowedContentTypes = [format == .csv ? .commaSeparatedText : .json]
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            do {
-                try Data(export.content.utf8).write(to: url, options: .atomic)
-                _ = await model.confirmProbeRegionExport(export)
-            } catch {
-                model.recordProbeFileError(error)
-            }
-        }
-    }
-
     private var majorVesselsSection: some View {
         SidebarSection(title: "Major vessels", systemImage: "drop.triangle") {
-            StatusRow(label: "Geometry", value: model.majorVesselStatus)
             if model.majorVesselLoadInProgress {
-                ProgressView("Verifying vessel geometry…")
+                ProgressView("Loading vessels…")
                     .controlSize(.small)
-            }
-            if let error = model.majorVesselLoadError {
+            } else if let error = model.majorVesselLoadError {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if let source = model.majorVesselGeometry?.provenance {
-                StatusRow(
-                    label: "Source",
-                    value: "VesSAP \(source.specimenId) · \(source.sourceLicense)"
-                )
-                Text(model.majorVesselDisclosure)
+            } else if let source = model.majorVesselGeometry?.provenance {
+                Label("Visible in every brain view", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("VesSAP \(source.specimenId)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 14) {
                     if let recordURL = URL(string: source.sourceRecordUrl) {
-                        Link("Dataset", destination: recordURL)
+                        Link("Dataset source", destination: recordURL)
                     }
                     if let paperURL = URL(
                         string: "https://doi.org/\(source.sourcePaperDoi)"
@@ -862,81 +705,76 @@ struct ProjectSidebar: View {
                     }
                 }
                 .font(.caption)
-            }
-            if model.majorVesselGeometry != nil {
-                Text(
-                    "Display overlay only · population reference · clearance "
-                        + "classification is unavailable."
-                )
+                Text("Reference anatomy—verify against the individual animal.")
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Label(model.majorVesselStatus, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
         }
     }
 
     private var implantTargetSection: some View {
-        SidebarSection(title: "Implant target", systemImage: "scope") {
-            StatusRow(
-                label: "Coordinate frame",
-                value: "Bregma-relative AP / ML / DV in millimetres"
-            )
-            StatusRow(
-                label: "Projection",
-                value: projectionStatus
-            )
-            StatusRow(
-                label: "Stored sites",
-                value: "\(model.implantTargets.count)"
-            )
-            Button("Calibrations…", systemImage: "ruler") {
-                showingCalibrationSheet = true
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            .disabled(!model.canManageCalibration)
-            VStack(alignment: .leading, spacing: 7) {
-                TextField("Required site label", text: $targetLabel)
-                    .textFieldStyle(.roundedBorder)
-                    .accessibilityLabel("Implant site label")
-                targetField("AP (mm)", sign: "−AP = posterior / back", text: $targetAPMillimetres)
-                targetField("ML (mm)", sign: "−ML = left", text: $targetMLMillimetres)
-                targetField(
-                    "DV / depth (mm)",
-                    sign: "−DV = deep / ventral",
-                    text: $targetDVMillimetres
-                )
+        SidebarSection(title: "Implant site", systemImage: "scope") {
+            Text("From bregma (mm) · −AP back · −ML left · −DV deep")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 7) {
+                compactTargetField("AP", text: $targetAPMillimetres)
+                compactTargetField("ML", text: $targetMLMillimetres)
+                compactTargetField("DV", text: $targetDVMillimetres)
             }
             .disabled(!model.canStoreImplantTarget)
-            Button("Store unprojected site", systemImage: "plus") {
-                Task {
-                    let existingTargetIds = Set(model.implantTargets.map(\.targetId))
-                    let added = await model.addUnprojectedImplantTarget(
-                        label: targetLabel,
-                        apText: targetAPMillimetres,
-                        mlText: targetMLMillimetres,
-                        dvText: targetDVMillimetres
-                    )
-                    if added {
-                        probeTargetId = model.implantTargets.first {
-                            !existingTargetIds.contains($0.targetId)
-                        }?.targetId ?? ""
-                        clearTargetDraft()
+            HStack {
+                Button("Add site", systemImage: "plus") {
+                    Task {
+                        let existingTargetIds = Set(model.implantTargets.map(\.targetId))
+                        let added = await model.addUnprojectedImplantTarget(
+                            label: targetLabel,
+                            apText: targetAPMillimetres,
+                            mlText: targetMLMillimetres,
+                            dvText: targetDVMillimetres
+                        )
+                        if added {
+                            let addedTargetId = model.implantTargets.first {
+                                !existingTargetIds.contains($0.targetId)
+                            }?.targetId ?? ""
+                            probeTargetId = addedTargetId
+                            if !addedTargetId.isEmpty, model.activeCalibration != nil {
+                                _ = await model.projectImplantTarget(
+                                    targetId: addedTargetId
+                                )
+                            }
+                            clearTargetDraft()
+                            fillSuggestedProbeNameIfNeeded()
+                        }
                     }
                 }
+                .buttonStyle(.borderedProminent)
+                .disabled(
+                    !model.canStoreImplantTarget
+                        || targetLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        || targetAPMillimetres.trimmingCharacters(in: .whitespacesAndNewlines)
+                            .isEmpty
+                        || targetMLMillimetres.trimmingCharacters(in: .whitespacesAndNewlines)
+                            .isEmpty
+                        || targetDVMillimetres.trimmingCharacters(in: .whitespacesAndNewlines)
+                            .isEmpty
+                )
+                if model.activeCalibration == nil {
+                    Button("Set up atlas mapping…", systemImage: "ruler") {
+                        showingCalibrationSheet = true
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(!model.canManageCalibration)
+                }
             }
-            .buttonStyle(.borderedProminent)
             .controlSize(.small)
-            .disabled(
-                !model.canStoreImplantTarget
-                    || targetLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || targetAPMillimetres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || targetMLMillimetres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || targetDVMillimetres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            )
-            .help("Stores the signed values from bregma without creating an atlas marker.")
             if model.implantOperationInProgress {
-                ProgressView("Updating stored implant sites…")
+                ProgressView("Updating site…")
                     .controlSize(.small)
             }
             if let error = model.implantOperationError {
@@ -959,9 +797,24 @@ struct ProjectSidebar: View {
 
     private func implantTargetCard(_ target: UnprojectedImplantTarget) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(target.label)
-                    .font(.caption.weight(.semibold))
+            Text(target.label)
+                .font(.caption.weight(.semibold))
+            Text(targetCoordinateSummary(target))
+                .font(.caption2.monospacedDigit())
+            HStack(spacing: 8) {
+                if model.projection(for: target.targetId) != nil {
+                    Button("Show", systemImage: "eye") {
+                        Task {
+                            await model.navigateToImplantTarget(targetId: target.targetId)
+                        }
+                    }
+                    .help("Show this site in Coronal, Sagittal, and Horizontal views.")
+                } else if model.activeCalibration != nil {
+                    Button("Project", systemImage: "scope") {
+                        Task { _ = await model.projectImplantTarget(targetId: target.targetId) }
+                    }
+                    .disabled(model.calibrationOperationInProgress)
+                }
                 Spacer(minLength: 4)
                 Button(role: .destructive) {
                     Task {
@@ -977,63 +830,12 @@ struct ProjectSidebar: View {
                 .help("Remove this stored unprojected site")
                 .accessibilityLabel("Remove \(target.label)")
             }
-            Text(targetCoordinateSummary(target))
-            .font(.caption2.monospacedDigit())
-            .fixedSize(horizontal: false, vertical: true)
-            if let projection = model.projection(for: target.targetId) {
-                Text(atlasCoordinateSummary(projection))
-                    .font(.caption2.monospacedDigit())
-                Text(voxelSummary(projection))
-                    .font(.caption2.monospacedDigit())
-                Text(
-                    "Calibration \(String(projection.provenance.calibrationSha256.prefix(10)))… "
-                        + "· planning only · not navigation"
-                )
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.orange)
-            } else {
-                Text("From bregma · unprojected · not navigation")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.orange)
-                if model.activeCalibration != nil {
-                    Button("Project to atlas") {
-                        Task { _ = await model.projectImplantTarget(targetId: target.targetId) }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .disabled(model.calibrationOperationInProgress)
-                }
-            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
         }
         .padding(8)
         .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
         .accessibilityElement(children: .contain)
-    }
-
-    private var projectionStatus: String {
-        guard let calibration = model.activeCalibration else {
-            return "Locked — subject calibration required"
-        }
-        return "Active v\(calibration.calibrationVersion) · \(calibration.quality.uppercased())"
-    }
-
-    private func atlasCoordinateSummary(_ result: CalibratedTargetProjectionResult) -> String {
-        let point = result.atlasPoint
-        return "Atlas AP \(signedMillimetres(point.apMicrometres)) · "
-            + "DV \(signedMillimetres(point.dvMicrometres)) · "
-            + "ML \(signedMillimetres(point.mlMicrometres))"
-    }
-
-    private func voxelSummary(_ result: CalibratedTargetProjectionResult) -> String {
-        let voxel = result.containingVoxelIndex
-        return "Voxel AP \(voxel.ap) · DV \(voxel.dv) · ML \(voxel.ml)"
-    }
-
-    private func signedMillimetres(_ micrometres: Double) -> String {
-        String(
-            format: "%+.3f mm",
-            ProbeInputUnits.millimetres(fromMicrometres: micrometres)
-        )
     }
 
     private func signed(_ value: Double) -> String {
@@ -1042,75 +844,66 @@ struct ProjectSidebar: View {
     }
 
     private func targetCoordinateSummary(_ target: UnprojectedImplantTarget) -> String {
-        let apDirection = direction(
-            target.apMillimetres,
-            positive: "anterior",
-            negative: "posterior/back"
-        )
-        let mlDirection = direction(target.mlMillimetres, positive: "right", negative: "left")
-        let dvDirection = direction(
-            target.dvMillimetres,
-            positive: "dorsal/up",
-            negative: "deep/ventral"
-        )
-        return "AP \(signed(target.apMillimetres)) mm (\(apDirection)) · "
-            + "ML \(signed(target.mlMillimetres)) mm (\(mlDirection)) · "
-            + "DV \(signed(target.dvMillimetres)) mm (\(dvDirection))"
+        "AP \(signed(target.apMillimetres)) · "
+            + "ML \(signed(target.mlMillimetres)) · "
+            + "DV \(signed(target.dvMillimetres)) mm"
     }
 
-    private func direction(_ value: Double, positive: String, negative: String) -> String {
-        if value > 0 { return positive }
-        if value < 0 { return negative }
-        return "zero"
-    }
-
-    private func targetField(
-        _ label: String,
-        sign: String,
-        text: Binding<String>
-    ) -> some View {
+    private func compactTargetField(_ label: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(label).font(.caption.weight(.semibold))
-                TextField("Required", text: text)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-                    .accessibilityLabel("\(label) from bregma")
-                    .accessibilityHint(sign)
-            }
-            Text(sign)
-                .font(.caption2)
+            Text(label)
+                .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
+            TextField("mm", text: text)
+                .textFieldStyle(.roundedBorder)
+                .multilineTextAlignment(.trailing)
+                .accessibilityLabel("\(label) in millimetres from bregma")
         }
+        .frame(maxWidth: .infinity)
     }
 
-    private var backendSection: some View {
-        SidebarSection(title: "Planning service", systemImage: "point.3.connected.trianglepath.dotted") {
-            StatusRow(label: "Connection", value: model.connection.title)
-            StatusRow(label: "Project", value: model.projectStatus)
+    private var projectSection: some View {
+        SidebarSection(title: "Surgery plan", systemImage: "doc") {
             HStack {
-                Button("Reconnect") {
-                    reconnect()
-                }
-                .disabled(model.connection == .connecting)
-
-                Button("Refresh state") {
-                    Task { await model.refreshState() }
-                }
-                .disabled(!model.connection.isReady)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            HStack {
-                Button("Open…", systemImage: "folder") { openProject() }
+                Button("Open", systemImage: "folder") { openProject() }
                     .disabled(!model.canOpenProject)
-                Button("Save As…", systemImage: "square.and.arrow.down") { saveProject() }
+                Button("Save", systemImage: "square.and.arrow.down") { saveProject() }
                     .disabled(!model.canSaveProject)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+            Button("Export PDF…", systemImage: "doc.richtext") {
+                showingSurgeryPlanExport = true
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .disabled(
+                model.backendState?.project == nil
+                    || model.implantTargets.isEmpty
+            )
+            .help(
+                "Create a prefilled protocol PDF with selected planning views "
+                    + "and a matched Mouse Brain atlas plate."
+            )
+            if model.canDownloadAtlas {
+                Button("Download atlas", systemImage: "arrow.down.circle") {
+                    Task { await model.downloadAndOpenAtlas() }
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+            }
+            if !model.connection.isReady {
+                HStack {
+                    Label("Connection unavailable", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Retry") { reconnect() }
+                        .disabled(model.connection == .connecting)
+                }
+            }
             if model.projectOperationInProgress {
-                ProgressView("Validating project package…")
+                ProgressView("Working…")
                     .controlSize(.small)
             }
             if let error = model.projectOperationError {
@@ -1122,21 +915,6 @@ struct ProjectSidebar: View {
                 Label(notice, systemImage: "externaldrive.badge.exclamationmark")
                     .font(.caption)
                     .foregroundStyle(.orange)
-            }
-        }
-    }
-
-    private var atlasSection: some View {
-        SidebarSection(title: "Atlas", systemImage: "square.stack.3d.up") {
-            StatusRow(label: "Supported", value: SafetyPolicy.supportedAtlasDisplayName)
-            StatusRow(label: "Operational", value: model.atlasOperationalStatus)
-            if model.canDownloadAtlas {
-                Button("Download reviewed 25 µm atlas", systemImage: "arrow.down.circle") {
-                    Task { await model.downloadAndOpenAtlas() }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .help("Downloads only allen_mouse_25um v1.2, then validates it before use.")
             }
         }
     }
@@ -1175,23 +953,5 @@ private struct SidebarSection<Content: View>: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Color.secondary.opacity(0.20))
         }
-    }
-}
-
-struct StatusRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.callout)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

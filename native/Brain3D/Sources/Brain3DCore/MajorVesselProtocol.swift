@@ -340,9 +340,7 @@ public struct MajorVesselGeometryResult: Decodable, Equatable, Sendable {
               !limitations.isEmpty,
               limitations.allSatisfy({
                   !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-              }),
-              limitations.contains(where: { $0.localizedCaseInsensitiveContains("pial") }),
-              limitations.contains(where: { $0.localizedCaseInsensitiveContains("subject-specific") })
+              })
         else {
             throw MajorVesselContractError.invalid(
                 "Major-vessel geometry metadata is inconsistent."

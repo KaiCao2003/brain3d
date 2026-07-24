@@ -9,6 +9,7 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
     public let transform: AtlasSceneTransform
     public let selectedProbePlan: ProbePlanDetail?
     public let majorVessels: MajorVesselGeometryResult?
+    public let minimumVisibleVesselDiameterMicrometres: Double
     public let selectedVesselConflict: MajorVesselConflict?
 
     public init(
@@ -19,6 +20,8 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
         highlightedRegionMesh: AtlasMeshResult? = nil,
         selectedProbePlan: ProbePlanDetail?,
         majorVessels: MajorVesselGeometryResult? = nil,
+        minimumVisibleVesselDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres,
         selectedVesselConflict: MajorVesselConflict? = nil
     ) throws {
         guard !projectId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -72,7 +75,10 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
                   majorVessels.provenance.atlasIdentifier == meshResult.atlas.identifier,
                   majorVessels.provenance.atlasVersion == meshResult.atlas.version,
                   majorVessels.graph.sourceEdgeIndices.count
-                    == majorVessels.graph.runOffsets.count - 1
+                    == majorVessels.graph.runOffsets.count - 1,
+                  MajorVesselDisplayFilter.clampedMinimumDiameterMicrometres(
+                      minimumVisibleVesselDiameterMicrometres
+                  ) == minimumVisibleVesselDiameterMicrometres
             else {
                 throw AtlasSceneContractError.invalid(
                     "Reference major vessels and 3D atlas provenance do not match."
@@ -108,6 +114,8 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
         transform = try AtlasSceneTransform(anchor: rendererAnchor)
         self.selectedProbePlan = selectedProbePlan
         self.majorVessels = majorVessels
+        self.minimumVisibleVesselDiameterMicrometres =
+            minimumVisibleVesselDiameterMicrometres
         self.selectedVesselConflict = selectedVesselConflict
     }
 
@@ -119,6 +127,7 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
             highlightedRegionMesh?.mesh.sha256 ?? "no-highlighted-region",
             selectedProbePlan?.inputSha256 ?? "no-probe",
             majorVessels?.provenance.derivedAssetSha256 ?? "no-vessels",
+            String(minimumVisibleVesselDiameterMicrometres.bitPattern, radix: 16),
             selectedVesselConflict.map(Self.conflictIdentity) ?? "no-vessel-conflict",
         ].joined(separator: ":")
     }

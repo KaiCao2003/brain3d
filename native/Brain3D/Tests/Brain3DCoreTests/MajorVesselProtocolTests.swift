@@ -5,7 +5,7 @@ import Testing
 
 @Suite("Pinned major-vessel protocol")
 struct MajorVesselProtocolTests {
-    @Test("Exact binary geometry decodes with pinned provenance")
+    @Test("Exact production bridge geometry decodes with pinned provenance")
     func validGeometry() throws {
         let payload = try geometryPayload()
         let result = try JSONDecoder().decode(MajorVesselGeometryResult.self, from: payload)
@@ -27,6 +27,9 @@ struct MajorVesselProtocolTests {
         #expect(result.provenance.uncertaintyBoundsReviewed == false)
         #expect(result.limitations.contains(where: {
             $0.localizedCaseInsensitiveContains("pial")
+        }))
+        #expect(result.limitations.contains(where: {
+            $0.localizedCaseInsensitiveContains("not the current animal")
         }))
     }
 
@@ -133,6 +136,49 @@ struct MajorVesselProtocolTests {
         #expect(overlay.segments[0].endRadiusMicrometres == 21)
     }
 
+    @Test("Display diameter clips a tapered segment without changing source identity")
+    func taperedDisplayDiameterClip() throws {
+        let atlas = try atlasIdentity()
+        let graph = try MajorVesselGraph(
+            pointsASRMicrometres: [
+                SIMD3(25, 100, 50),
+                SIMD3(125, 200, 100),
+            ],
+            radiiMicrometres: [15, 35],
+            runOffsets: [0, 2],
+            sourceEdgeIndices: [17],
+            atlas: atlas,
+            minimumIncludedDiameterMicrometres: 30
+        )
+
+        let overlay = MajorVesselSliceOverlayGeometry.makeDorsalProjection(
+            graph: graph,
+            atlas: atlas,
+            assetSHA256: MajorVesselContract.derivedAssetSHA256,
+            minimumVisibleDiameterMicrometres: 50
+        )
+
+        #expect(overlay.assetSHA256 == MajorVesselContract.derivedAssetSHA256)
+        #expect(overlay.minimumVisibleDiameterMicrometres == 50)
+        #expect(overlay.segments.count == 1)
+        #expect(overlay.segments[0].start == ProbeSliceImagePoint(column: 3, row: 3))
+        #expect(overlay.segments[0].end == ProbeSliceImagePoint(column: 4, row: 5))
+        #expect(overlay.segments[0].startRadiusMicrometres == 25)
+        #expect(overlay.segments[0].endRadiusMicrometres == 35)
+        #expect(
+            MajorVesselDisplayFilter.visibleSegmentCount(
+                graph: graph,
+                minimumDiameterMicrometres: 50
+            ) == 1
+        )
+        #expect(
+            MajorVesselDisplayFilter.visibleSegmentCount(
+                graph: graph,
+                minimumDiameterMicrometres: 80
+            ) == 0
+        )
+    }
+
     private func geometryPayload() throws -> Data {
         let pointCount = MajorVesselContract.expectedPointCount
         let runCount = MajorVesselContract.expectedRunCount
@@ -165,8 +211,14 @@ struct MajorVesselProtocolTests {
             "sourceEdgeIndices": buffer(int32: edges, shape: [runCount]),
             "provenance": provenanceObject,
             "limitations": [
-                "Single cleared reference; not subject-specific anatomy.",
-                "Pial and choroidal coverage is not separately classified.",
+                "Animal research use only; this reference is not a medical device and is not validated for surgery.",
+                "Single fixed, cleared adult C57BL/6J specimen BL6J-no1; not the current animal and not a population prior.",
+                "Only centreline paths with radius at least 15 µm (diameter at least 30 µm) are included; capillaries and smaller vessels are intentionally omitted.",
+                "Registration and tissue-clearing distortion error bounds were not published and are not invented here.",
+                "The 50 µm centreline grid and public radius interpolation limit the spatial fidelity of the rendered paths.",
+                "Pial and choroidal coverage is not separately classified in the public source; visible surface coverage must not be interpreted as complete.",
+                "Display-only reference: it cannot establish clearance, vessel absence, trajectory suitability, or safety for an individual animal.",
+                "The pinned VesSAP source is CC BY-NC 4.0; downstream use must preserve attribution and non-commercial restrictions.",
             ],
             "atlas": atlasObject,
         ]

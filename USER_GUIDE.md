@@ -52,11 +52,13 @@ Enter millimetres from bregma in named `[AP, ML, DV]` fields:
 | DV | dorsal / up | deep / ventral |
 
 `AP -1.25`, `ML -0.70`, `DV -2.40` means 1.25 mm posterior, 0.70 mm left, and 2.40 mm deep.
-**Store unprojected site** preserves those exact inputs without inventing an atlas point.
+**Add site** preserves those exact inputs. If a passing atlas mapping is active, Brain3D also
+projects the new site; otherwise the stored bregma coordinates remain unprojected until you
+explicitly project them.
 
 ## Calibrate and project
 
-Open **Calibrations…** and create a subject calibration from measured skull-frame metadata,
+Open **Set up atlas mapping…** and create a subject calibration from measured skull-frame metadata,
 exactly four matched landmarks (bregma, lambda, left skull, right skull), laterality confirmation,
 the DV reference, declared QC limits/source, and either a rigid or similarity atlas fit. Skull
 landmarks are AP/ML/DV; BrainGlobe atlas landmarks are AP/DV/ML; the form accepts both in mm and
@@ -70,31 +72,16 @@ atlas** creates a provenance-bound projection while preserving the original breg
 The Allen CCF has no single official bregma transform. A project calibration is specific to its
 declared measurements and assumptions; it is not supplied by the atlas.
 
-## Create and inspect a probe plan
+## Create a probe plan
 
 Probe creation becomes available only after the project has a subject ID, a stored target, and an
 active calibration whose QC status permits planning. The Create area shows the first unmet
 prerequisite instead of leaving a disabled button unexplained.
 
-Choose a target, model, name, axial rotation, and one of exactly four placement modes:
-
-AP, ML, DV/depth, and insertion-depth fields are entered in **millimetres**. Azimuth,
-elevation, and axial rotation are entered in **degrees**. The app converts insertion depth to
-micrometres only inside the typed geometry protocol.
-
-- **Entry + target** accepts an editable bregma-relative entry and the selected target, then
-  derives direction and insertion depth from those two points.
-- **Entry + angles + depth** accepts an editable bregma-relative entry plus source-stereotaxic
-  azimuth, elevation, and depth. The complete physical pose crosses the same rigid/similarity
-  calibration as the entry; affine transforms are rejected because they would shear the probe.
-- **Target + angles + depth** accepts the selected target plus atlas-frame azimuth, elevation, and
-  depth, then derives the entry directly in atlas space.
-- **Stereotaxic target** uses the selected calibrated target with manipulator azimuth, elevation,
-  and depth under the explicit stereotaxic contract.
-
-Only fields belonging to the selected mode are submitted. Selecting an existing plan restores
-its exact mode and inputs for editing; changing modes cannot silently reuse hidden entry or angle
-values. The production catalog contains exactly:
+Choose an implant site, NPX2 probe, plan name, azimuth, elevation, insertion depth, and roll.
+Insertion depth is entered in **millimetres**; azimuth, elevation, and roll are entered in
+**degrees**. Brain3D converts depth to micrometres only inside the typed geometry protocol. The
+production catalog contains exactly:
 
 - NP2 single shank `NP2003` / `NP2004`: 1,280 physical sites and 384 simultaneous channels;
 - NP2 standard four shank `NP2013` / `NP2014`: 5,120 physical sites and 384 simultaneous
@@ -108,13 +95,9 @@ sites, not the active acquisition configuration; it does not yet import an IMRO/
 selection.
 
 After creating a plan, slice views show only probe geometry that intersects the current slab;
-3D shows the probe envelope with the brain. **Analyze regions** performs exact atlas
-voxel traversal and recording-site assignment. Use **Inspect…**, **Save CSV…**, or **Save JSON…**
-for the versioned result. Export generation is read-only; the project records an `exported` audit
-event only after the native client completes the atomic file write. Cancelling the save panel or a
-failed write does not advance the project revision or claim an export. Both formats carry the
-exact atlas identity/digest, printed coordinate convention, calibration identity/digest, source
-and destination frames, and the full AP/ML/DV transform matrix with residuals.
+3D shows the probe envelope with the brain. Older project packages may retain archived
+multi-mode probe records, and Brain3D preserves their inputs for compatibility, but the new-plan
+UI does not expose those extra placement modes or region-export controls.
 
 ## Use the major-vessel display reference
 
@@ -122,10 +105,11 @@ Brain3D automatically loads the pinned VesSAP `BL6J-no1` major-vessel layer afte
 25 µm atlas opens. It appears in Dorsal, Coronal, Sagittal, Horizontal, and 3D. The status panel
 identifies the specimen, source, CC BY-NC 4.0 license, segment count, and diameter threshold.
 
-The layer intentionally includes only nominal diameter ≥30 µm centerlines and uses a 50 µm
-display reduction. It does not contain capillaries, does not classify artery versus vein, and is
-not the current animal. Moving each slice depth filters the overlay to that view's physical slab;
-3D renders the same digest-checked paths as tubes over the brain.
+The source layer intentionally includes only nominal diameter ≥30 µm centerlines and uses a
+50 µm spatial reduction. The visible-diameter slider can be adjusted from 30–250 µm without
+changing the source asset or its provenance. It does not contain capillaries, does not classify
+artery versus vein, and is not the current animal. Moving each slice depth filters the overlay to
+that view's physical slab; 3D renders the same digest-checked paths as tubes over the brain.
 
 This is a display reference only. No **Analyze probe**, clearance, margin, conflict, no-conflict,
 or “safe” control is offered. The source does not publish numeric subject-registration,
@@ -136,6 +120,46 @@ Do not interpret a gap in the overlay as absence of a vessel or use it to approv
 For exact source files, hashes, transform validation, extraction, and limitations, see
 [VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md). The older LAMBADA P60_606 derivative
 remains archived and rejected; it is not mixed with or mirrored into this layer.
+
+## Export a prefilled surgery plan
+
+After storing a target, open **Export PDF…** in the Surgery plan section. Choose the animal
+record fields, one planning view or **All five views**, and the orientation of the final legacy
+atlas page. The exporter uses:
+
+- the prepared `Headplate Protocol.pdf` for the first two pages;
+- the selected Dorsal, Coronal, Sagittal, Horizontal, or 3D views for the middle pages;
+- the nearest plate in the supplied 132-page `MBSC_Figs_with_Layers.pdf` as the final page.
+
+Before the first export, open **Brain3D → Settings** and choose both PDFs. Brain3D stores those
+locations and reuses them for later exports; replace a location only from Settings. If a saved
+network volume is disconnected, reconnect it or choose the PDF again in Settings. The export
+sheet reports the saved-location status and does not ask for both files every time.
+
+Coronal plates are matched to signed AP under the historical atlas convention
+`Bregma = Interaural − 3.80 mm`. Sagittal plates are matched to `|ML|`; negative ML still appears
+as left and positive ML as right in the generated planning page. AP, ML, DV/depth, and insertion
+depth are millimetres. Azimuth, elevation, and roll are degrees.
+
+The export button remains unavailable until the selected target has a current active-calibration
+projection and the reviewed VesSAP display layer is present. Slice pages are rendered at that
+projected target voxel without changing the three interactive slice depths. Choosing 3D or All
+prepares an offscreen 3D scene automatically. Each page records the exact vessel asset digest and
+the real number of reference segments in its slice/projection; zero is reported explicitly and
+does not establish vessel absence or clearance.
+
+The file has `2 + selected-view count + 1` pages. Its last page preserves the source atlas artwork
+and adds a non-destructive identity/coordinate/probe summary in the unused margin; no unreviewed
+trajectory geometry is drawn onto the historical plate. The app verifies page identity, size,
+count, and order and performs an atomic write.
+
+An output is marked **FINAL** only when the saved project, target projection, selected current
+probe plan, and final-export calibration all agree. Otherwise it is visibly marked **DRAFT**.
+FINAL describes those software gates; it does not make the plan biologically validated or safe.
+The exporter reads the prepared protocol PDF and consolidated atlas PDF directly with
+PDFKit/Core Graphics. It does not open Word or Illustrator and requires no macOS Automation
+permission. Both user-owned sources remain outside the repository and app bundle. See
+[Surgery-plan export](docs/SURGERY_PLAN_EXPORT.md) for the exact page and source contract.
 
 ## Save and reopen
 

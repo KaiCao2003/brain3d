@@ -23,8 +23,9 @@ release or a validation claim.
 | Dorsal | Atlas surface with the selected probe's AP/ML projection and display-only major vessels |
 | 3D | Native SceneKit brain mesh with camera control, atlas-region picking, probes, and major-vessel tubes |
 | Stereotaxy | Required subject identity; signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC and guarded target projection |
-| Probes | Four explicit editable placement modes, slice/3D overlays, recording sites, exact region traversal, inspection, and CSV/JSON export |
+| Probes | NPX2 1-shank or 4-shank only; selected implant site, plan name, azimuth/elevation/depth/roll, and slice/3D overlays |
 | Vessels | VesSAP BL6J-no1 diameter-≥30 µm display reference overlaid in all five views; no capillary layer |
+| Surgery plan | Prefilled two-page protocol + selectable Dorsal/Coronal/Sagittal/Horizontal/3D planning pages + one coordinate-matched legacy atlas page |
 | Reference analysis | Unavailable: clearance calls fail closed with `VESSEL_ANALYSIS_UNAVAILABLE`; geometry remains display-only |
 | Persistence | Checksummed `.mouseplan` packages with revisions, provenance, migrations, and backup recovery |
 
@@ -49,10 +50,11 @@ remain centralized in Python. An unprojected entry stays unprojected until an ex
 calibration passes QC; the Allen CCF does not provide one official bregma transform. See
 [Coordinate Systems](COORDINATE_SYSTEMS.md).
 
-Probe creation and editing expose exactly four input contracts: **Entry + target**, **Entry +
-angles + depth**, **Target + angles + depth**, and **Stereotaxic target**. Inputs that are not
-part of the selected contract are neither submitted nor silently reused. Derived entry, target,
-angles, and depth remain provenance-bound to the selected mode.
+New probe creation exposes one direct stereotaxic contract: select an implant site and NPX2
+1-shank or 4-shank geometry, then enter azimuth/elevation/roll in degrees and insertion depth in
+millimetres. Older project packages may retain one of the archived multi-mode placement records;
+Brain3D preserves those inputs for compatibility, but does not expose the extra modes when
+creating a new plan.
 
 ## Probe geometry boundary
 
@@ -97,6 +99,24 @@ binding and whole-brain coverage are not qualified, so it is never served or mir
 [VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md),
 [LAMBADA Major Vessels](docs/LAMBADA_MAJOR_VESSELS.md), and
 [Known Limitations](KNOWN_LIMITATIONS.md).
+
+## Surgery-plan PDF
+
+**Export PDF…** fills pages 1–2 of the supplied Headplate Protocol from the selected animal
+plan, renders either one target-centred view or all five views with the current probe and VesSAP
+layer, and appends one coordinate-matched page from the user-owned 132-page
+`MBSC_Figs_with_Layers.pdf`. The final atlas page is chosen by AP for coronal plates or `|ML|`
+for sagittal plates; the signed left/right ML value remains explicit in the planning pages. The
+source template's third-page sketch is a placeholder and is replaced, not emitted.
+
+Set the prepared Headplate protocol PDF and `MBSC_Figs_with_Layers.pdf` once in
+**Brain3D → Settings**. Every export reuses those saved locations until they are replaced there;
+a disconnected volume is reported instead of opening a chooser on every export. The
+implementation reads both PDFs directly, uses SceneKit for the 3D snapshot, and uses
+PDFKit/Core Graphics for overlays, assembly, and verification. It does not open Word,
+Illustrator, or another converter. Neither supplied PDF is copied into this public repository.
+See
+[Surgery-plan export](docs/SURGERY_PLAN_EXPORT.md).
 
 ## Architecture
 
@@ -154,7 +174,7 @@ uv run --frozen ruff format --check .
 uv run --frozen ruff check .
 uv run --frozen mypy --no-incremental
 uv run --frozen pytest -q
-swift test --package-path native/Brain3D
+swift test --package-path native/Brain3D --no-parallel
 native/Brain3D/Scripts/build-app.sh
 codesign --verify --deep --strict native/Brain3D/build/Brain3D.app
 ```
@@ -187,6 +207,7 @@ docs/                           architecture, decisions, audits, and source reco
 - [Scientific Validation](SCIENTIFIC_VALIDATION.md)
 - [Probe Models](PROBE_MODELS.md)
 - [VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md)
+- [Surgery-plan export](docs/SURGERY_PLAN_EXPORT.md)
 - [Pinpoint interoperability](docs/PINPOINT_INTEGRATION.md)
 - [LAMBADA Major Vessels](docs/LAMBADA_MAJOR_VESSELS.md)
 - [Third-Party Software and Data](THIRD_PARTY.md)

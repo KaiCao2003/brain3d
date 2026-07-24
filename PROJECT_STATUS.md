@@ -1,11 +1,11 @@
 # Project Status
 
-Status reviewed: 2026-07-23
+Status reviewed: 2026-07-24
 
 ## Bottom line
 
 The current development tree implements the native research-planning path for independent 25 µm
-atlas slices, subject calibration and target projection, probe planning and region traversal, and
+atlas slices, subject calibration and target projection, simplified NPX2 probe planning, and
 a synchronized SceneKit 3D view. A pinned VesSAP C57BL/6J major-vessel reference is visible in
 all five views; clearance analysis remains unavailable. The application remains an engineering
 testing build—not a qualified distribution or a validated animal-surgery navigation system.
@@ -22,8 +22,9 @@ The source is public at [KaiCao2003/brain3d](https://github.com/KaiCao2003/brain
 | 3D | SceneKit whole-brain mesh, camera control/reset, non-cortical region highlight, probe envelopes, and major-vessel tubes | Rendering consumes schema-checked brain/probe/vessel geometry from the backend |
 | Coordinates | Required subject identity and signed AP/ML/DV millimetres from bregma | AP− posterior, ML− left, DV− deep/ventral |
 | Calibration | Create/list/inspect/validate/activate/remove subject calibration; QC-gated target projection | No default Allen bregma transform is invented |
-| Probes | Production selector contains only NP2 single and standard four-shank; four explicit placement modes, CRUD, 2D/3D overlays, site/region traversal, inspector, CSV/JSON export | Manufacturer models are source-transcribed and review-pending, not independently verified |
-| Major vessels | VesSAP BL6J-no1, nominal diameter ≥30 µm, overlaid on Dorsal/Coronal/Sagittal/Horizontal/3D | One cleared ex-vivo population reference; 50 µm display reduction; no capillaries |
+| Probes | Production selector contains only NP2 single and standard four-shank; new plans use implant site + name + azimuth/elevation/depth/roll with 2D/3D overlays | Manufacturer models are source-transcribed and review-pending, not independently verified |
+| Major vessels | VesSAP BL6J-no1, nominal diameter ≥30 µm, overlaid on Dorsal/Coronal/Sagittal/Horizontal/3D; visible-diameter filter is adjustable from 30–250 µm | One cleared ex-vivo population reference; geometry is reduced on a 50 µm spatial grid; no capillaries |
+| Surgery-plan PDF | Direct-PDF two-page protocol prefill, one target-centred view or all five, then one AP/`|ML|`-matched page from `MBSC_Figs_with_Layers.pdf` | User-owned PDF locations are saved once in Settings and are not bundled; disconnected volumes must be reconnected |
 | Vessel analysis | Unavailable; geometry is display-only and analysis returns `VESSEL_ANALYSIS_UNAVAILABLE` | No conflict, no-conflict, clearance, absence, suitability, or safety claim is produced |
 | Projects | Revisioned, checksummed `.mouseplan` save/open, migrations, backup recovery | Stale revisions and source mismatches fail closed |
 
@@ -74,6 +75,9 @@ Legacy synthetic tests preserve isolated tapered-geometry contracts, but the pro
 cannot expose them. Swift tests cover strict protocol decoding, independent view state, viewport
 math, complete ontology paging/closure, slice overlays, SceneKit transforms, bounded mesh
 caching, and an off-screen composite containing whole brain, Thalamus, NP2, and VesSAP vessels.
+Surgery-export tests cover the exact 132-page atlas catalog, historical Bregma/Interaural
+convention, AP/`|ML|` matching, direct protocol-PDF overlay units, per-page vessel
+identity/count disclosure, and deterministic page assembly.
 The app can be built and ad-hoc signed for development and is exercised as a real macOS process.
 
 That evidence validates software behavior, not biological or procedural accuracy. Remaining work

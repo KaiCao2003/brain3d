@@ -63,6 +63,17 @@ struct SceneKitRenderSmokeTests {
             start: data,
             count: bitmap.bytesPerRow * bitmap.pixelsHigh
         )
+        let brainLayer = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "allen-mouse-root-mesh",
+                recursively: false
+            )
+        )
+        brainLayer.isHidden = true
+        let unobscuredVesselBitmap = try self.bitmap(
+            from: controller.offscreenSnapshot(size: CGSize(width: 320, height: 240))
+        )
+        brainLayer.isHidden = false
 
         #expect(phase == .ready)
         #expect(vesselGraph.pointCount == 3)
@@ -72,12 +83,12 @@ struct SceneKitRenderSmokeTests {
         #expect(vesselNode.geometry?.name == "radius-bearing-reference-major-vessels")
         #expect(vesselNode.geometry?.elements.first?.primitiveType == .triangles)
         #expect(vesselNode.geometry?.elements.first?.primitiveCount == 24)
-        #expect(vesselNode.renderingOrder == 20)
+        #expect(vesselNode.renderingOrder == 10)
         #expect(vesselNode.opacity == 1)
         let vesselMaterial = try #require(vesselNode.geometry?.firstMaterial)
         #expect(vesselMaterial.lightingModel == .constant)
-        #expect(vesselMaterial.readsFromDepthBuffer)
-        #expect(vesselMaterial.writesToDepthBuffer)
+        #expect(!vesselMaterial.readsFromDepthBuffer)
+        #expect(!vesselMaterial.writesToDepthBuffer)
         let importedBrainRoot = try #require(
             view.scene?.rootNode.childNode(withName: "verified-atlas-obj", recursively: true)
         )
@@ -88,15 +99,23 @@ struct SceneKitRenderSmokeTests {
         )
         let brainMaterial = try #require(brainNode.geometry?.firstMaterial)
         #expect(brainNode.renderingOrder == -10_000)
-        #expect(abs(brainNode.opacity - 0.28) < 0.0001)
-        #expect(brainMaterial.lightingModel == .constant)
-        #expect(abs(brainMaterial.transparency - 0.65) < 0.0001)
-        #expect(brainMaterial.transparencyMode == .singleLayer)
+        #expect(abs(brainNode.opacity - 1) < 0.0001)
+        #expect(brainMaterial.lightingModel == .blinn)
+        #expect(abs(brainMaterial.transparency - 0.36) < 0.0001)
+        #expect(brainMaterial.transparencyMode == .dualLayer)
         #expect(!brainMaterial.readsFromDepthBuffer)
         #expect(!brainMaterial.writesToDepthBuffer)
         #expect(bytes.min() != bytes.max())
+        let background = try #require(
+            view.scene?.background.contents as? NSColor
+        ).usingColorSpace(.deviceRGB)
+        #expect(try #require(background).redComponent > 0.85)
+        #expect(nearBlackPixelCount(brainOnlyBitmap) < 100)
         #expect(visibleVesselPixelCount(brainOnlyBitmap) == 0)
-        #expect(visibleVesselPixelCount(bitmap) >= 20)
+        let visibleThroughShell = visibleVesselPixelCount(bitmap)
+        let visibleWithoutShell = visibleVesselPixelCount(unobscuredVesselBitmap)
+        #expect(visibleWithoutShell >= 20)
+        #expect(visibleThroughShell * 10 >= visibleWithoutShell * 9)
     }
 
     @Test("Selected probe remains visible through the atlas shell")
@@ -236,7 +255,7 @@ struct SceneKitRenderSmokeTests {
         #expect(changedPixelCount(before, after) >= 20)
     }
 
-    @Test("Whole-brain, non-cortical region, NP2 probe, and VesSAP vessels coexist")
+    @Test("Whole-brain, region, NP2 four-shank probe, and VesSAP vessels coexist")
     @MainActor
     func completePlanningCompositeRenders() async throws {
         let fixture = try makeFixture()
@@ -277,25 +296,28 @@ struct SceneKitRenderSmokeTests {
             from: controller.offscreenSnapshot(size: CGSize(width: 400, height: 300))
         )
 
-        let np2Shank = ProbePlacedShank(
-            shankId: "shank-0",
-            entry: ProbePhysicalPoint(
-                apMicrometres: 6_600,
-                dvMicrometres: 2_000,
-                mlMicrometres: 5_700
-            ),
-            tip: ProbePhysicalPoint(
-                apMicrometres: 6_600,
-                dvMicrometres: 6_000,
-                mlMicrometres: 5_700
-            ),
-            widthMicrometres: 70,
-            thicknessMicrometres: 24,
-            conservativeEnvelopeRadiusMicrometres: 35,
-            envelopeDefinition: "half maximum shank width"
-        )
+        let np2Shanks = (0 ..< 4).map { index in
+            let ml = 5_325.0 + Double(index) * 250
+            return ProbePlacedShank(
+                shankId: "shank-\(index)",
+                entry: ProbePhysicalPoint(
+                    apMicrometres: 6_600,
+                    dvMicrometres: 2_000,
+                    mlMicrometres: ml
+                ),
+                tip: ProbePhysicalPoint(
+                    apMicrometres: 6_600,
+                    dvMicrometres: 6_000,
+                    mlMicrometres: ml
+                ),
+                widthMicrometres: 70,
+                thicknessMicrometres: 24,
+                conservativeEnvelopeRadiusMicrometres: 35,
+                envelopeDefinition: "half maximum shank width"
+            )
+        }
         let probe = try ProbeEnvelopeNodeFactory.makeNode(
-            for: [np2Shank],
+            for: np2Shanks,
             usableForNavigation: true,
             transform: highlighted.transform
         )
@@ -340,17 +362,23 @@ struct SceneKitRenderSmokeTests {
         let region = try #require(
             view.scene?.rootNode.childNode(withName: "allen-region-549", recursively: true)
         )
-        let shank = try #require(
-            probe.childNode(withName: "probe-shank-shank-0", recursively: true)
-        )
+        let shanks = (0 ..< 4).compactMap { index in
+            probe.childNode(
+                withName: "probe-shank-shank-\(index)",
+                recursively: true
+            )
+        }
         #expect(phase == .ready)
         #expect(brain.parent != nil)
         #expect(region.parent != nil)
-        #expect(shank.parent != nil)
+        #expect(shanks.count == 4)
+        #expect(shanks.allSatisfy { $0.parent != nil })
         #expect(vessel.parent === vesselLayer)
-        #expect(np2Shank.widthMicrometres == 70)
-        #expect(np2Shank.thicknessMicrometres == 24)
-        #expect(shank.categoryBitMask == SceneCategory.probe.rawValue)
+        #expect(np2Shanks.allSatisfy { $0.widthMicrometres == 70 })
+        #expect(np2Shanks.allSatisfy { $0.thicknessMicrometres == 24 })
+        #expect(shanks.allSatisfy {
+            $0.categoryBitMask == SceneCategory.probe.rawValue
+        })
         #expect(vessel.categoryBitMask == SceneCategory.majorVessel.rawValue)
         #expect(changedPixelCount(rootBitmap, regionBitmap) >= 20)
         #expect(changedPixelCount(regionBitmap, probeBitmap) >= 20)
@@ -442,6 +470,24 @@ struct SceneKitRenderSmokeTests {
                    color.redComponent > color.greenComponent * 1.5,
                    color.redComponent > color.blueComponent * 1.3
                 {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func nearBlackPixelCount(_ bitmap: NSBitmapImageRep) -> Int {
+        var count = 0
+        for y in 0 ..< bitmap.pixelsHigh {
+            for x in 0 ..< bitmap.pixelsWide {
+                guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB)
+                else { continue }
+                let luminance =
+                    color.redComponent * 0.2126
+                        + color.greenComponent * 0.7152
+                        + color.blueComponent * 0.0722
+                if luminance < 0.12 {
                     count += 1
                 }
             }

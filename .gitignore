@@ -11,6 +11,8 @@ __pycache__/
 build/
 dist/
 htmlcov/
+output/
+tmp/
 .coverage
 
 # Local logs and configuration/credentials

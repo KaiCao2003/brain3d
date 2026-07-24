@@ -27,6 +27,12 @@ receive no runtime payload.
 Scientific coordinate conversion and analysis remain in Python. The former PySide6/PyVista/VTK
 application was removed from the package and lockfile after the Phase 1 reachability audit.
 
+Surgery-plan export adds no third-party Swift document parser. Apple PDFKit/Core Graphics read
+the user-prepared protocol PDF and 132-page `MBSC_Figs_with_Layers.pdf` directly, add fields,
+preserve vector pages, assemble, and verify the result; SceneKit produces the offscreen 3D page.
+Word, Illustrator, Apple Events automation, and document-conversion subprocesses are not part of
+the export path.
+
 ## Direct runtime dependencies
 
 | Package/version | License | Purpose | Classification / source |
@@ -76,6 +82,8 @@ This is a review aid, not a substitute for the full lockfile/SBOM.
 | Kim, Yongsoo (2022), *Cerebrovascular, pericyte, and neuronal cell type mapping data 2022*, Mendeley Data V1, DOI `10.17632/stxvn5sv44.1` | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Optional pinned population vascular length-density field. Archive `NVU_mapping_Adult_mouse_brain (1).7z`, 311,493,514 bytes, SHA-256 `c715c92ad153bff7f676b883f47108f886147e5d6fcd4502bcc04a0f92ed98fe`; downloaded to user cache and never bundled. The archived backend can prepare a symmetrized dorsal DV maximum projection, but it is absent from the primary UI, is not subject-specific, has no vessel paths, and is not used for clearance. | Data — optional downloaded; [versioned dataset](https://data.mendeley.com/datasets/stxvn5sv44/1), [Wu et al. Cell Reports paper](https://doi.org/10.1016/j.celrep.2022.110978), [open-access paper](https://pmc.ncbi.nlm.nih.gov/articles/PMC9271215/) |
 | Renier, Nicolas; de Launoit, Elisa; Skriabine, Sophie (2026), *Vascular graphs of the developing post-natal mouse brain*, record DOI `10.5281/zenodo.18876865` | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | Packaged archived derivative evidence for specimen P60_606: maximal consecutive in-bounds graph runs with point radius at least 15 µm. NPZ is 814,393 bytes, SHA-256 `fb2344e845e604be3424bd63f4222d273eafba34db0df2eaff32f4400fa9afec`. The 5,050,194,723-byte source archive and 12,282,574,483-byte extracted graph are not bundled. Coordinate qualification is rejected because the source is a hemisphere and the graph lacks a persisted biological laterality binding. It is not displayed, mirrored, served, or analyzed. | Data — bundled derived evidence; [versioned Zenodo record](https://zenodo.org/records/18876865), [Cell paper](https://doi.org/10.1016/j.cell.2026.03.013), [derivation and qualification record](docs/LAMBADA_MAJOR_VESSELS.md) |
 | Todorov et al. (2020), VesSAP BL6J-no1 whole-brain vasculature, public repository release 2021.10.01 | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) | Bundled display-only major-vessel derivative from the official 3 µm skeleton and radius volumes. Source radius ≥5 voxels retains nominal diameter ≥30 µm; true 26-neighbour source adjacency is transformed with the published Euler plus B-spline registration and reduced on a 50 µm display grid. NPZ is 1,853,131 bytes, SHA-256 `9300dacf25ca57a5d23377ca0dc885e34ff0d18e8d21ef7590c6dcd156cf5db7`, with 196,377 points, 76,622 runs, and 119,755 segments. It is one fixed, cleared C57BL/6J specimen and cannot establish vessel absence, subject-specific clearance, trajectory suitability, or safety. | Data — bundled derivative; [VesSAP data record](https://www.discotechnologies.org/VesSAP/), [Nature Methods paper](https://doi.org/10.1038/s41592-020-0792-1), [exact derivation and validation](docs/VESSAP_MAJOR_VESSELS.md) |
+| User-prepared Headplate Protocol PDF | Source-owner terms; not redistributed or relicensed | Read directly; pages 1–2 receive a flattened prefill overlay and the template's page-3 sketch placeholder is replaced. The source stays outside the repository and app bundle; its digest prefix is printed on planning pages. | External user-owned document |
+| User-supplied Mouse Brain CD `MBSC_Figs_with_Layers.pdf`, Figures 1–132 | Source-owner terms; not redistributed or relicensed | Read directly. Brain3D validates all 132 landscape-Letter pages against the reviewed figure/coordinate catalog, verifies the source SHA, selects the nearest coronal AP or sagittal `|ML|` page, and adds an identity summary to the output copy. No atlas artwork is committed or bundled. | External user-owned data/artwork |
 | brainrender 2.2.0 | BSD-3-Clause | Scene/API design review only; package not imported or bundled | Concept only; [release](https://github.com/brainglobe/brainrender/releases/tag/v2.2.0) |
 | iblatlas 1.2.0 | MIT | Coordinate and trajectory design review only; package and PyQt5 GUI extra not imported or bundled | Concept only; [release](https://github.com/int-brain-lab/iblatlas/releases/tag/1.2.0) |
 | Neuropixels Trajectory Explorer v2.0.0 | GPL-3.0 | Workflow review only; no code or assets copied | Concept only; [release](https://github.com/petersaj/neuropixels_trajectory_explorer/releases/tag/v2.0.0) |
@@ -124,6 +132,8 @@ surgical safety determination.
 6. Preserve the NP1 model's pinned source identities/digests and review-pending status until a
    separately recorded independent review is complete; do not bundle upstream documents or code
    without a new terms review.
-7. Re-review this file when a dependency, atlas version, packaging mode, copied asset, or
+7. Do not distribute the user-supplied protocol or Mouse Brain atlas through the repository,
+   application, test fixtures, or release package without a separate rights review.
+8. Re-review this file when a dependency, atlas version, packaging mode, copied asset, or
    distribution model changes. A concept-only item must be reclassified before any code or asset
    is copied.

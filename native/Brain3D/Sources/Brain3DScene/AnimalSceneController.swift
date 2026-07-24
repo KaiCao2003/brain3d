@@ -74,6 +74,7 @@ final class AnimalSceneController {
         phaseChanged: @escaping (AnimalScenePhase) -> Void
     ) async {
         guard currentSnapshotIdentity != snapshot.identity else {
+            requestDisplay()
             phaseChanged(.ready)
             return
         }
@@ -103,11 +104,13 @@ final class AnimalSceneController {
             guard generation == loadGeneration else { return }
             try replaceSelectedVesselConflict(for: snapshot)
             currentSnapshotIdentity = snapshot.identity
+            requestDisplay()
             phaseChanged(.ready)
         } catch is CancellationError {
             return
         } catch {
             guard generation == loadGeneration else { return }
+            requestDisplay()
             phaseChanged(.failed(error.localizedDescription))
         }
     }
@@ -128,12 +131,19 @@ final class AnimalSceneController {
         SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         cameraNode.simdTransform = homeCameraTransform
         SCNTransaction.commit()
+        requestDisplay()
     }
 
     func offscreenSnapshot(size: CGSize) -> NSImage {
+        // Scene mutations are transaction-backed even when no animation is
+        // requested. Flush them before handing the shared scene to a fresh
+        // offscreen renderer, otherwise a snapshot taken immediately after an
+        // overlay change can intermittently capture the preceding frame.
+        SCNTransaction.flush()
         let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
         renderer.scene = scene
         renderer.pointOfView = cameraNode
+        _ = renderer.prepare(scene, shouldAbortBlock: nil)
         return renderer.snapshot(
             atTime: 0,
             with: size,
@@ -175,7 +185,7 @@ final class AnimalSceneController {
         let ambientNode = SCNNode()
         let ambient = SCNLight()
         ambient.type = .ambient
-        ambient.intensity = 520
+        ambient.intensity = 220
         ambient.color = NSColor(calibratedWhite: 0.94, alpha: 1)
         ambientNode.light = ambient
         scene.rootNode.addChildNode(ambientNode)
@@ -183,16 +193,22 @@ final class AnimalSceneController {
         let keyNode = SCNNode()
         let key = SCNLight()
         key.type = .directional
-        key.intensity = 920
+        key.intensity = 1_050
         key.color = NSColor(calibratedWhite: 1, alpha: 1)
         keyNode.light = key
         keyNode.eulerAngles = SCNVector3(-0.75, 0.55, 0.25)
         scene.rootNode.addChildNode(keyNode)
 
-        scene.background.contents = NSColor(calibratedWhite: 0.055, alpha: 1)
+        let background = NSColor(
+            srgbRed: 0.91,
+            green: 0.935,
+            blue: 0.96,
+            alpha: 1
+        )
+        scene.background.contents = background
         view.scene = scene
         view.pointOfView = cameraNode
-        view.backgroundColor = NSColor(calibratedWhite: 0.055, alpha: 1)
+        view.backgroundColor = background
         view.antialiasingMode = .multisampling4X
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = false
@@ -220,24 +236,31 @@ final class AnimalSceneController {
             let material = SCNMaterial()
             material.name = "xray-allen-mouse-atlas-shell"
             material.diffuse.contents = NSColor(
-                calibratedRed: 0.16,
-                green: 0.48,
-                blue: 0.78,
-                alpha: 0.65
+                srgbRed: 0.10,
+                green: 0.43,
+                blue: 0.72,
+                alpha: 1
             )
-            material.emission.contents = NSColor.clear
-            material.lightingModel = .constant
-            material.transparency = 0.65
-            material.transparencyMode = .singleLayer
+            material.emission.contents = NSColor(
+                srgbRed: 0.005,
+                green: 0.025,
+                blue: 0.05,
+                alpha: 1
+            )
+            material.specular.contents = NSColor(white: 0.85, alpha: 1)
+            material.shininess = 0.38
+            material.lightingModel = .blinn
+            material.transparency = 0.36
+            material.transparencyMode = .dualLayer
             material.blendMode = .alpha
             material.isDoubleSided = true
             material.readsFromDepthBuffer = false
             material.writesToDepthBuffer = false
             geometry.materials = [material]
-            // SceneKit's imported-OBJ path can flatten or otherwise reinterpret
-            // material transparency. Node opacity is an independent final-stage
-            // guarantee that the anatomical shell cannot become opaque.
-            node.opacity = 0.28
+            // One opacity authority avoids the previous diffuse-alpha ×
+            // material-transparency × node-opacity collapse that reduced the
+            // whole brain to an almost-black gray silhouette.
+            node.opacity = 1
             node.castsShadow = false
             // Render the non-depth-writing context shell before every planning
             // overlay. Applying the order to geometry-bearing descendants is
@@ -326,7 +349,13 @@ final class AnimalSceneController {
             currentMajorVesselDigest = nil
             return
         }
-        let digest = vessels.provenance.derivedAssetSha256
+        let digest = [
+            vessels.provenance.derivedAssetSha256,
+            String(
+                snapshot.minimumVisibleVesselDiameterMicrometres.bitPattern,
+                radix: 16
+            ),
+        ].joined(separator: ":")
         if currentMajorVesselDigest == digest,
            !majorVesselLayer.childNodes.isEmpty
         {
@@ -344,10 +373,16 @@ final class AnimalSceneController {
         let mesh = try await MajorVesselTubeMeshBuilder.buildAsync(
             pointsASRMicrometres: graph.pointsASRMicrometres,
             radiiMicrometres: graph.radiiMicrometres,
-            runOffsets: graph.runOffsets
+            runOffsets: graph.runOffsets,
+            minimumVisibleDiameterMicrometres:
+                snapshot.minimumVisibleVesselDiameterMicrometres
         )
         try Task.checkCancellation()
         guard generation == loadGeneration else { return }
+        guard mesh.visibleSourceSegmentCount > 0 else {
+            currentMajorVesselDigest = digest
+            return
+        }
         let node = MajorVesselNodeFactory.makeNode(
             mesh: mesh,
             transform: snapshot.transform
@@ -407,6 +442,12 @@ final class AnimalSceneController {
         homeCameraTransform = cameraNode.simdTransform
         view.defaultCameraController.target = SCNVector3(center)
         view.defaultCameraController.stopInertia()
+        requestDisplay()
+    }
+
+    private func requestDisplay() {
+        view.needsDisplay = true
+        view.setNeedsDisplay(view.bounds)
     }
 
     private func pick(at point: CGPoint) {

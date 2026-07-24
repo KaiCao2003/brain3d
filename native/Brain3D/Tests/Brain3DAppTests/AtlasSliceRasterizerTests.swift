@@ -38,6 +38,10 @@ struct AtlasSliceRasterizerTests {
 
         let bytes = try rgbaBytes(result.image)
         #expect(alpha(in: bytes, image: result.image, x: 5, y: 3) > 0)
+        let core = rgba(in: bytes, image: result.image, x: 5, y: 3)
+        #expect(core.red > 220)
+        #expect(Int(core.red) > Int(core.green) * 4)
+        #expect(Int(core.red) > Int(core.blue) * 6)
         #expect(alpha(in: bytes, image: result.image, x: 0, y: 9) == 0)
     }
 
@@ -75,6 +79,21 @@ struct AtlasSliceRasterizerTests {
         y: Int
     ) -> UInt8 {
         bytes[y * image.bytesPerRow + x * 4 + 3]
+    }
+
+    private func rgba(
+        in bytes: [UInt8],
+        image: CGImage,
+        x: Int,
+        y: Int
+    ) -> (red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8) {
+        let offset = y * image.bytesPerRow + x * 4
+        return (
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3]
+        )
     }
 }
 

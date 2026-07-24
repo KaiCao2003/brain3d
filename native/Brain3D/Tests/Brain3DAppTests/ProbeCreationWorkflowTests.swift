@@ -38,6 +38,34 @@ struct ProbeCreationWorkflowTests {
         #expect(ProbeInputUnits.millimetres(fromMicrometres: 3_500) == 3.5)
     }
 
+    @Test("Saved-plan target survives asynchronous project and target loading")
+    func savedPlanTargetSynchronization() {
+        #expect(ProbeDraftSelectionPolicy.targetId(
+            selectedPlanTargetId: "saved-target",
+            currentTargetId: "",
+            availableTargetIds: []
+        ) == "saved-target")
+        #expect(ProbeDraftSelectionPolicy.targetId(
+            selectedPlanTargetId: "saved-target",
+            currentTargetId: "other-target",
+            availableTargetIds: ["other-target", "saved-target"]
+        ) == "saved-target")
+    }
+
+    @Test("New probe draft chooses a usable implant target")
+    func newDraftTargetSynchronization() {
+        #expect(ProbeDraftSelectionPolicy.targetId(
+            selectedPlanTargetId: nil,
+            currentTargetId: "target-2",
+            availableTargetIds: ["target-1", "target-2"]
+        ) == "target-2")
+        #expect(ProbeDraftSelectionPolicy.targetId(
+            selectedPlanTargetId: nil,
+            currentTargetId: "",
+            availableTargetIds: ["target-1", "target-2"]
+        ) == "target-1")
+    }
+
     @Test("Placement modes require only the fields defined by their backend contract")
     func placementModeFields() {
         #expect(blocker(
@@ -146,6 +174,26 @@ struct ProbeCreationWorkflowTests {
             threeDimensionalPhase: .unavailable("service capability missing"),
             sceneContainsCurrentPlan: false
         ) == "\(slicePrefix) 3D overlay unavailable.")
+    }
+
+    @Test("3D render callbacks cannot publish a stale scene as ready")
+    func threeDimensionalRenderPublication() {
+        #expect(ThreeDimensionalRenderPhaseReducer.phaseAfterPreparing(
+            snapshotIdentity: "scene-B",
+            renderedSnapshotIdentity: "scene-B"
+        ) == .ready)
+        #expect(ThreeDimensionalRenderPhaseReducer.phaseAfterPreparing(
+            snapshotIdentity: "scene-B",
+            renderedSnapshotIdentity: "scene-A"
+        ) == .loadingGeometry)
+        #expect(ThreeDimensionalRenderPhaseReducer.acceptsCallback(
+            snapshotIdentity: "scene-B",
+            currentSnapshotIdentity: "scene-B"
+        ))
+        #expect(!ThreeDimensionalRenderPhaseReducer.acceptsCallback(
+            snapshotIdentity: "scene-A",
+            currentSnapshotIdentity: "scene-B"
+        ))
     }
 
     private func blocker(

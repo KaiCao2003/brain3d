@@ -47,6 +47,9 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
-      - run: swift test --package-path native/Brain3D
+      # SceneKit/Model I/O offscreen smoke tests share process-global Metal
+      # state on the macOS runner. Run the suite serially, matching the app's
+      # MainActor rendering path and avoiding cross-test GPU interference.
+      - run: swift test --package-path native/Brain3D --no-parallel
       - run: native/Brain3D/Scripts/build-app.sh
       - run: codesign --verify --deep --strict native/Brain3D/build/Brain3D.app

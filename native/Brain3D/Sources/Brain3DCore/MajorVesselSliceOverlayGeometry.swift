@@ -1,6 +1,96 @@
 import Foundation
 import simd
 
+/// Presentation-only filtering for the immutable, provenance-checked VesSAP graph.
+///
+/// The source floor remains `MajorVesselContract.minimumIncludedDiameterMicrometres`;
+/// changing this value never changes or reclassifies the source data.
+public enum MajorVesselDisplayFilter {
+    public static let defaultMinimumDiameterMicrometres = 50.0
+    public static let maximumMinimumDiameterMicrometres = 250.0
+    public static let adjustmentStepMicrometres = 10.0
+
+    public static var allowedMinimumDiameterRange: ClosedRange<Double> {
+        MajorVesselContract.minimumIncludedDiameterMicrometres
+            ... maximumMinimumDiameterMicrometres
+    }
+
+    public static func clampedMinimumDiameterMicrometres(_ proposed: Double) -> Double {
+        guard proposed.isFinite else { return defaultMinimumDiameterMicrometres }
+        return min(
+            maximumMinimumDiameterMicrometres,
+            max(MajorVesselContract.minimumIncludedDiameterMicrometres, proposed)
+        )
+    }
+
+    public static func snappedMinimumDiameterMicrometres(_ proposed: Double) -> Double {
+        let clamped = clampedMinimumDiameterMicrometres(proposed)
+        let sourceFloor = MajorVesselContract.minimumIncludedDiameterMicrometres
+        let steps = ((clamped - sourceFloor) / adjustmentStepMicrometres).rounded()
+        return min(
+            maximumMinimumDiameterMicrometres,
+            sourceFloor + steps * adjustmentStepMicrometres
+        )
+    }
+
+    /// Returns the positive-length portion of a linearly tapered source segment
+    /// whose physical diameter meets the display threshold.
+    public static func visibleInterval(
+        startRadiusMicrometres: Double,
+        endRadiusMicrometres: Double,
+        minimumDiameterMicrometres: Double
+    ) -> ClosedRange<Double>? {
+        guard startRadiusMicrometres.isFinite,
+              endRadiusMicrometres.isFinite,
+              startRadiusMicrometres > 0,
+              endRadiusMicrometres > 0
+        else { return nil }
+        let minimumRadius = clampedMinimumDiameterMicrometres(
+            minimumDiameterMicrometres
+        ) / 2
+        let startOffset = startRadiusMicrometres - minimumRadius
+        let endOffset = endRadiusMicrometres - minimumRadius
+        if startOffset >= 0, endOffset >= 0 { return 0 ... 1 }
+        if startOffset < 0, endOffset < 0 { return nil }
+
+        let crossing = min(
+            1,
+            max(
+                0,
+                (minimumRadius - startRadiusMicrometres)
+                    / (endRadiusMicrometres - startRadiusMicrometres)
+            )
+        )
+        let interval = startOffset >= 0 ? 0 ... crossing : crossing ... 1
+        return interval.upperBound - interval.lowerBound > 1e-12 ? interval : nil
+    }
+
+    public static func visibleSegmentCount(
+        graph: MajorVesselGraph,
+        minimumDiameterMicrometres: Double
+    ) -> Int {
+        var count = 0
+        for runIndex in 0 ..< graph.runCount {
+            let start = graph.runOffsets[runIndex]
+            let end = graph.runOffsets[runIndex + 1]
+            for pointIndex in start ..< end - 1 {
+                if visibleInterval(
+                    startRadiusMicrometres: Double(
+                        graph.radiiMicrometres[pointIndex]
+                    ),
+                    endRadiusMicrometres: Double(
+                        graph.radiiMicrometres[pointIndex + 1]
+                    ),
+                    minimumDiameterMicrometres: minimumDiameterMicrometres
+                ) != nil {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+}
+
 public struct MajorVesselSliceSegment: Equatable, Sendable {
     public let start: ProbeSliceImagePoint
     public let end: ProbeSliceImagePoint
@@ -146,6 +236,7 @@ public struct MajorVesselSliceOverlay: Equatable, Sendable {
     public let sliceIndex: Int
     public let assetSHA256: String
     public let inPlaneResolutionMicrometres: Double
+    public let minimumVisibleDiameterMicrometres: Double
     public let segments: [MajorVesselSliceSegment]
 
     public init(
@@ -153,12 +244,18 @@ public struct MajorVesselSliceOverlay: Equatable, Sendable {
         sliceIndex: Int,
         assetSHA256: String,
         inPlaneResolutionMicrometres: Double,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres,
         segments: [MajorVesselSliceSegment]
     ) {
         self.orientation = orientation
         self.sliceIndex = sliceIndex
         self.assetSHA256 = assetSHA256
         self.inPlaneResolutionMicrometres = inPlaneResolutionMicrometres
+        self.minimumVisibleDiameterMicrometres =
+            MajorVesselDisplayFilter.clampedMinimumDiameterMicrometres(
+                minimumVisibleDiameterMicrometres
+            )
         self.segments = segments
     }
 }
@@ -167,20 +264,29 @@ public enum MajorVesselSliceOverlayGeometry {
     /// Project the complete reference graph onto the dorsal AP/ML plane.
     /// The result is explicitly a depth projection; it is not a pial-vessel map.
     public static func makeDorsalProjection(
-        geometry: MajorVesselGeometryResult
+        geometry: MajorVesselGeometryResult,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres
     ) -> MajorVesselSliceOverlay {
         makeDorsalProjection(
             graph: geometry.graph,
             atlas: geometry.atlas,
-            assetSHA256: geometry.provenance.derivedAssetSha256
+            assetSHA256: geometry.provenance.derivedAssetSha256,
+            minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres
         )
     }
 
     public static func makeDorsalProjection(
         graph: MajorVesselGraph,
         atlas: ViewerAtlasIdentity,
-        assetSHA256: String
+        assetSHA256: String,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres
     ) -> MajorVesselSliceOverlay {
+        let minimumVisibleDiameterMicrometres =
+            MajorVesselDisplayFilter.clampedMinimumDiameterMicrometres(
+                minimumVisibleDiameterMicrometres
+            )
         let resolution = atlas.resolutionMicrometres
         var segments: [MajorVesselSliceSegment] = []
         segments.reserveCapacity(graph.segmentCount)
@@ -191,18 +297,35 @@ public enum MajorVesselSliceOverlayGeometry {
             for pointIndex in runStart ..< runEnd - 1 {
                 let start = graph.pointsASRMicrometres[pointIndex]
                 let end = graph.pointsASRMicrometres[pointIndex + 1]
+                let startRadius = Double(graph.radiiMicrometres[pointIndex])
+                let endRadius = Double(graph.radiiMicrometres[pointIndex + 1])
+                guard let interval = MajorVesselDisplayFilter.visibleInterval(
+                    startRadiusMicrometres: startRadius,
+                    endRadiusMicrometres: endRadius,
+                    minimumDiameterMicrometres: minimumVisibleDiameterMicrometres
+                ) else { continue }
+                let clippedStart = interpolate(start, end, interval.lowerBound)
+                let clippedEnd = interpolate(start, end, interval.upperBound)
                 segments.append(
                     MajorVesselSliceSegment(
                         start: ProbeSliceImagePoint(
-                            column: Double(start.z) / resolution.mlMicrometres,
-                            row: Double(start.x) / resolution.apMicrometres
+                            column: clippedStart.z / resolution.mlMicrometres,
+                            row: clippedStart.x / resolution.apMicrometres
                         ),
                         end: ProbeSliceImagePoint(
-                            column: Double(end.z) / resolution.mlMicrometres,
-                            row: Double(end.x) / resolution.apMicrometres
+                            column: clippedEnd.z / resolution.mlMicrometres,
+                            row: clippedEnd.x / resolution.apMicrometres
                         ),
-                        startRadiusMicrometres: Double(graph.radiiMicrometres[pointIndex]),
-                        endRadiusMicrometres: Double(graph.radiiMicrometres[pointIndex + 1]),
+                        startRadiusMicrometres: interpolate(
+                            startRadius,
+                            endRadius,
+                            interval.lowerBound
+                        ),
+                        endRadiusMicrometres: interpolate(
+                            startRadius,
+                            endRadius,
+                            interval.upperBound
+                        ),
                         sourceEdgeIndex: sourceEdgeIndex,
                         runIndex: runIndex,
                         segmentIndexInRun: pointIndex - runStart
@@ -217,6 +340,7 @@ public enum MajorVesselSliceOverlayGeometry {
             inPlaneResolutionMicrometres: (
                 resolution.apMicrometres * resolution.mlMicrometres
             ).squareRoot(),
+            minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
             segments: segments
         )
     }
@@ -227,6 +351,8 @@ public enum MajorVesselSliceOverlayGeometry {
         geometry: MajorVesselGeometryResult,
         orientation: AtlasSliceOrientation,
         sliceIndex: Int,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres,
         spatialIndex: MajorVesselSliceSpatialIndex? = nil
     ) -> MajorVesselSliceOverlay {
         let references: [MajorVesselSegmentReference]? = if let spatialIndex,
@@ -244,6 +370,7 @@ public enum MajorVesselSliceOverlayGeometry {
             assetSHA256: geometry.provenance.derivedAssetSha256,
             orientation: orientation,
             sliceIndex: sliceIndex,
+            minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
             segmentReferences: references
         )
     }
@@ -254,6 +381,8 @@ public enum MajorVesselSliceOverlayGeometry {
         assetSHA256: String,
         orientation: AtlasSliceOrientation,
         sliceIndex: Int,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres,
         spatialIndex: MajorVesselSliceSpatialIndex? = nil
     ) -> MajorVesselSliceOverlay {
         let references: [MajorVesselSegmentReference]? = if let spatialIndex,
@@ -270,6 +399,7 @@ public enum MajorVesselSliceOverlayGeometry {
             assetSHA256: assetSHA256,
             orientation: orientation,
             sliceIndex: sliceIndex,
+            minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
             segmentReferences: references
         )
     }
@@ -280,8 +410,13 @@ public enum MajorVesselSliceOverlayGeometry {
         assetSHA256: String,
         orientation: AtlasSliceOrientation,
         sliceIndex: Int,
+        minimumVisibleDiameterMicrometres: Double,
         segmentReferences: [MajorVesselSegmentReference]?
     ) -> MajorVesselSliceOverlay {
+        let minimumVisibleDiameterMicrometres =
+            MajorVesselDisplayFilter.clampedMinimumDiameterMicrometres(
+                minimumVisibleDiameterMicrometres
+            )
         let resolution = atlas.resolutionMicrometres
         let shape = atlas.shapeVoxels
         let fixedAxis = orientation.fixedAxis
@@ -293,6 +428,7 @@ public enum MajorVesselSliceOverlayGeometry {
                 inPlaneResolutionMicrometres: (
                     resolution[orientation.rowAxis] * resolution[orientation.columnAxis]
                 ).squareRoot(),
+                minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
                 segments: []
             )
         }
@@ -307,7 +443,11 @@ public enum MajorVesselSliceOverlayGeometry {
             let end = graph.pointsASRMicrometres[pointIndex + 1]
             let startRadius = Double(graph.radiiMicrometres[pointIndex])
             let endRadius = Double(graph.radiiMicrometres[pointIndex + 1])
-            guard let interval = radiusBearingSlabInterval(
+            guard let diameterInterval = MajorVesselDisplayFilter.visibleInterval(
+                startRadiusMicrometres: startRadius,
+                endRadiusMicrometres: endRadius,
+                minimumDiameterMicrometres: minimumVisibleDiameterMicrometres
+            ), let slabInterval = radiusBearingSlabInterval(
                 startFixed: Double(axisValue(start, fixedAxis)),
                 endFixed: Double(axisValue(end, fixedAxis)),
                 startRadius: startRadius,
@@ -315,6 +455,10 @@ public enum MajorVesselSliceOverlayGeometry {
                 slabMinimum: slabMinimum,
                 slabMaximum: slabMaximum
             ) else { return }
+            let lower = max(diameterInterval.lowerBound, slabInterval.lowerBound)
+            let upper = min(diameterInterval.upperBound, slabInterval.upperBound)
+            guard upper - lower > 1e-12 else { return }
+            let interval = lower ... upper
             let clippedStart = interpolate(start, end, interval.lowerBound)
             let clippedEnd = interpolate(start, end, interval.upperBound)
             let clippedStartRadius = interpolate(
@@ -370,6 +514,7 @@ public enum MajorVesselSliceOverlayGeometry {
             inPlaneResolutionMicrometres: (
                 resolution[orientation.rowAxis] * resolution[orientation.columnAxis]
             ).squareRoot(),
+            minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
             segments: segments
         )
     }

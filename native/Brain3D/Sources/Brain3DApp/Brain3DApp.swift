@@ -19,6 +19,10 @@ struct Brain3DApp: App {
         }
         .defaultSize(width: 1_360, height: 860)
         .windowResizability(.contentMinSize)
+
+        Settings {
+            SurgeryPlanSettingsView()
+        }
     }
 }
 

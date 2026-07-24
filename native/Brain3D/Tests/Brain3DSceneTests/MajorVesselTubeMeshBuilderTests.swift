@@ -42,6 +42,41 @@ struct MajorVesselTubeMeshBuilderTests {
         #expect(indices[36 ..< 72].allSatisfy { $0 >= 12 && $0 < 24 })
     }
 
+    @Test("3D mesh clips tapered runs at the display diameter")
+    func displayDiameterFilter() throws {
+        let mesh = try MajorVesselTubeMeshBuilder.build(
+            pointsASRMicrometres: [
+                SIMD3(0, 0, 0),
+                SIMD3(100, 0, 0),
+                SIMD3(200, 0, 0),
+            ],
+            radiiMicrometres: [15, 35, 15],
+            runOffsets: [0, 3],
+            minimumVisibleDiameterMicrometres: 50
+        )
+
+        #expect(mesh.visibleSourceSegmentCount == 2)
+        #expect(mesh.vertexCount == 3 * MajorVesselTubeMeshBuilder.sideCount)
+        #expect(mesh.triangleCount == 24)
+        let first = vector(from: mesh.vertexData, at: 0)
+        let last = vector(
+            from: mesh.vertexData,
+            at: mesh.vertexCount - MajorVesselTubeMeshBuilder.sideCount
+        )
+        #expect(abs(simd_distance(first, SIMD3<Float>(50, 0, 0)) - 25) < 0.001)
+        #expect(abs(simd_distance(last, SIMD3<Float>(150, 0, 0)) - 25) < 0.001)
+
+        let hidden = try MajorVesselTubeMeshBuilder.build(
+            pointsASRMicrometres: [SIMD3(0, 0, 0), SIMD3(100, 0, 0)],
+            radiiMicrometres: [15, 35],
+            runOffsets: [0, 2],
+            minimumVisibleDiameterMicrometres: 80
+        )
+        #expect(hidden.visibleSourceSegmentCount == 0)
+        #expect(hidden.vertexCount == 0)
+        #expect(hidden.triangleCount == 0)
+    }
+
     @Test("Zero-length vessel segments fail closed")
     func zeroLengthRejected() {
         #expect(throws: AtlasSceneContractError.self) {
