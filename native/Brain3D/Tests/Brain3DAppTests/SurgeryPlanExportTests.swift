@@ -279,6 +279,45 @@ struct SurgeryPlanExportTests {
         #expect(!secondText.contains("Az +0.0°"))
     }
 
+    @MainActor
+    @Test("Protocol PDF verifies the exact rendered subject line")
+    func protocolPDFLongSubjectVerification() throws {
+        let source = try vectorTextPDF([
+            "protocol-source-page-one",
+            "protocol-source-page-two",
+            "atlas-placeholder-page-three",
+        ])
+        let runtimeSubject = "brain3d-direction-qa-20260724"
+        let truncatedSubject = String(repeating: "mouse-", count: 8)
+        let cases = [
+            (
+                runtimeSubject,
+                "Mouse / subject: \(runtimeSubject)"
+            ),
+            (
+                truncatedSubject,
+                "Mouse / subject: "
+                    + String(truncatedSubject.prefix(29))
+                    + "…"
+            ),
+        ]
+
+        for (subjectId, expectedLine) in cases {
+            let rendered = try SurgeryProtocolPDFRenderer.overlay(
+                protocolPDF: source,
+                prefill: makePrefill(
+                    azimuthDegrees: 0,
+                    elevationDegrees: -90,
+                    subjectId: subjectId
+                )
+            )
+            let document = try #require(PDFDocument(data: rendered))
+            let firstPage = try #require(document.page(at: 0))
+
+            #expect(firstPage.string?.contains(expectedLine) == true)
+        }
+    }
+
     @Test("Protocol header fields are width-bounded before drawing")
     func protocolHeaderFieldWidths() {
         let font = NSFont.systemFont(ofSize: 9, weight: .medium)
@@ -309,6 +348,25 @@ struct SurgeryPlanExportTests {
             #expect(fitted.hasSuffix("…"))
             #expect(renderedWidth <= maximumWidth)
         }
+    }
+
+    @Test("Planning-page summary keeps the full coordinate line on page")
+    func planningPageSummaryWidth() {
+        let text =
+            "brain3d-direction-qa-20260724 · "
+                + "AP- posterior / ML- animal-left direction QA · "
+                + "AP -1.000 mm · ML -0.500 mm · DV -1.500 mm"
+        let font = SurgeryPlanningPageRenderer.fittedPlanningSummaryFont(
+            for: text,
+            maximumWidth: 716
+        )
+        let renderedWidth = NSAttributedString(
+            string: text,
+            attributes: [.font: font]
+        ).size().width
+
+        #expect(renderedWidth <= 716)
+        #expect(font.pointSize >= 8)
     }
 
     @MainActor

@@ -625,7 +625,7 @@ enum SurgeryProtocolPDFRenderer {
               [
                   prefill.exportClass.rawValue,
                   prefill.date,
-                  shortened(prefill.subjectId, maximumCharacters: 24),
+                  protocolSubjectLine(prefill.subjectId),
                   String(format: "%+.3f mm", prefill.apMillimetres),
                   String(format: "%+.3f mm", prefill.mlMillimetres),
                   String(format: "%+.3f mm", prefill.dvMillimetres),
@@ -681,7 +681,7 @@ enum SurgeryProtocolPDFRenderer {
         )
 
         protocolText(
-            "Mouse / subject: " + shortened(prefill.subjectId, maximumCharacters: 30),
+            protocolSubjectLine(prefill.subjectId),
             at: CGPoint(x: 50, y: 650),
             font: .systemFont(ofSize: 9, weight: .medium),
             maximumWidth: 520
@@ -773,6 +773,10 @@ enum SurgeryProtocolPDFRenderer {
             }
         }
         return "…"
+    }
+
+    private static func protocolSubjectLine(_ subjectId: String) -> String {
+        "Mouse / subject: " + shortened(subjectId, maximumCharacters: 30)
     }
 
     private static func blankOrValue(_ value: String) -> String {
@@ -1063,10 +1067,16 @@ enum SurgeryPlanningPageRenderer {
             font: .systemFont(ofSize: 17, weight: .bold),
             color: prefill.exportClass == .draft ? .systemOrange : .black
         )
+        let planningSummary =
+            "\(prefill.subjectId) · \(prefill.targetLabel) · "
+                + prefill.targetCoordinateText
         draw(
-            "\(prefill.subjectId) · \(prefill.targetLabel) · \(prefill.targetCoordinateText)",
+            planningSummary,
             at: CGPoint(x: 38, y: 545),
-            font: .monospacedSystemFont(ofSize: 10.5, weight: .semibold)
+            font: fittedPlanningSummaryFont(
+                for: planningSummary,
+                maximumWidth: 716
+            )
         )
         let operatorIdentity = prefill.operatorName
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1180,6 +1190,28 @@ enum SurgeryPlanningPageRenderer {
             width: size.width,
             height: size.height
         )
+    }
+
+    static func fittedPlanningSummaryFont(
+        for text: String,
+        maximumWidth: CGFloat
+    ) -> NSFont {
+        var pointSize: CGFloat = 10.5
+        while pointSize > 8 {
+            let font = NSFont.monospacedSystemFont(
+                ofSize: pointSize,
+                weight: .semibold
+            )
+            let width = NSAttributedString(
+                string: text,
+                attributes: [.font: font]
+            ).size().width
+            if width <= maximumWidth {
+                return font
+            }
+            pointSize -= 0.25
+        }
+        return .monospacedSystemFont(ofSize: 8, weight: .semibold)
     }
 
     private static func draw(
