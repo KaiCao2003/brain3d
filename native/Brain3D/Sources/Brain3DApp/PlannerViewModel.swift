@@ -98,6 +98,16 @@ enum ThreeDimensionalRenderPhaseReducer {
     }
 }
 
+enum LivePlanningOverlayCoherence {
+    static func matches(
+        probeTargetId: String,
+        displayedImplantTargetId: String?
+    ) -> Bool {
+        displayedImplantTargetId == nil
+            || probeTargetId == displayedImplantTargetId
+    }
+}
+
 enum ProjectStatusPresentation {
     static func text(
         title: String,
@@ -339,6 +349,7 @@ final class PlannerViewModel: ObservableObject {
     @Published private(set) var activeCalibrationId: String?
     @Published private(set) var selectedCalibration: CalibrationSummary?
     @Published private(set) var targetProjections: [String: CalibratedTargetProjectionResult] = [:]
+    @Published private(set) var displayedImplantTargetId: String?
     @Published private(set) var calibrationOperationInProgress = false
     @Published private(set) var calibrationOperationError: String?
     @Published private(set) var probeCatalog: [ProbeCatalogModel] = []
@@ -642,12 +653,21 @@ final class PlannerViewModel: ObservableObject {
 
     var threeDimensionalPreparationIdentity: String {
         guard let project = backendState?.project else { return "no-project" }
+        let implantSiteIdentity = displayedImplantSceneMarker.map { marker in
+            [
+                marker.targetId,
+                String(marker.point.apMicrometres.bitPattern, radix: 16),
+                String(marker.point.dvMicrometres.bitPattern, radix: 16),
+                String(marker.point.mlMicrometres.bitPattern, radix: 16),
+            ].joined(separator: "@")
+        } ?? "no-implant-site"
         return [
             project.projectId,
             String(project.revision),
             atlasProvenance?.metadataSha256 ?? "no-atlas",
             cachedHighlightedRegionMesh?.mesh.sha256 ?? "no-highlighted-region",
-            selectedProbePlan?.inputSha256 ?? "no-probe",
+            displayedProbePlan?.inputSha256 ?? "no-probe",
+            implantSiteIdentity,
             majorVesselGeometry?.provenance.derivedAssetSha256 ?? "no-vessels",
             String(
                 minimumVisibleVesselDiameterMicrometres.bitPattern,
@@ -833,6 +853,7 @@ final class PlannerViewModel: ObservableObject {
         activeCalibrationId = nil
         selectedCalibration = nil
         targetProjections = [:]
+        setDisplayedImplantTargetId(nil)
         calibrationOperationError = nil
         clearProbePlanning()
         atlasLoadPhase = .idle
@@ -1012,6 +1033,11 @@ final class PlannerViewModel: ObservableObject {
                 targetProjections = targetProjections.filter {
                     listedTargetIds.contains($0.key)
                 }
+                if let displayedImplantTargetId,
+                   !listedTargetIds.contains(displayedImplantTargetId)
+                {
+                    setDisplayedImplantTargetId(nil)
+                }
                 if helloResult?.capabilities.subjectAtlasCalibration == true {
                     let listedCalibrations: CalibrationListResult = try await bridgeClient.request(
                         method: "calibration.list",
@@ -1039,12 +1065,14 @@ final class PlannerViewModel: ObservableObject {
                         || previousActiveCalibrationId != activeCalibrationId
                     {
                         targetProjections = [:]
+                        setDisplayedImplantTargetId(nil)
                     }
                 } else {
                     calibrations = []
                     activeCalibrationId = nil
                     selectedCalibration = nil
                     targetProjections = [:]
+                    setDisplayedImplantTargetId(nil)
                 }
                 if supportsProbePlanning {
                     try await synchronizeProbePlanning(using: bridgeClient, project: project)
@@ -1057,6 +1085,7 @@ final class PlannerViewModel: ObservableObject {
                 activeCalibrationId = nil
                 selectedCalibration = nil
                 targetProjections = [:]
+                setDisplayedImplantTargetId(nil)
                 clearProbePlanning()
             }
             backendState = state
@@ -1077,6 +1106,7 @@ final class PlannerViewModel: ObservableObject {
             activeCalibrationId = nil
             selectedCalibration = nil
             targetProjections = [:]
+            setDisplayedImplantTargetId(nil)
             clearProbePlanning()
             clearArchivedDisplayState()
             clearViewerState(message: "Planning state is unavailable")
@@ -1167,6 +1197,9 @@ final class PlannerViewModel: ObservableObject {
                 throw ImplantOperationFailure.mutationNotPublished
             }
             targetProjections[targetId] = nil
+            if displayedImplantTargetId == targetId {
+                setDisplayedImplantTargetId(nil)
+            }
             return true
         } catch {
             implantOperationError = error.localizedDescription
@@ -1276,6 +1309,7 @@ final class PlannerViewModel: ObservableObject {
                 expectedRevision: project.revision + 1
             )
             targetProjections = [:]
+            setDisplayedImplantTargetId(nil)
             await refreshState()
             guard activeCalibrationId == calibrationId else {
                 throw CalibrationValidationError.inconsistentCalibrationList
@@ -1351,6 +1385,11 @@ final class PlannerViewModel: ObservableObject {
             targetProjections = targetProjections.filter {
                 $0.value.provenance.calibrationId != calibrationId
             }
+            if let displayedImplantTargetId,
+               targetProjections[displayedImplantTargetId] == nil
+            {
+                setDisplayedImplantTargetId(nil)
+            }
             if selectedCalibration?.calibrationId == calibrationId {
                 selectedCalibration = nil
             }
@@ -1397,6 +1436,9 @@ final class PlannerViewModel: ObservableObject {
             return await navigateToImplantTarget(targetId: targetId)
         } catch {
             targetProjections[targetId] = nil
+            if displayedImplantTargetId == targetId {
+                setDisplayedImplantTargetId(nil)
+            }
             calibrationOperationError = error.localizedDescription
             return false
         }
@@ -1428,6 +1470,9 @@ final class PlannerViewModel: ObservableObject {
                   atlas: base.atlas
               )
         else {
+            if displayedImplantTargetId == targetId {
+                setDisplayedImplantTargetId(nil)
+            }
             calibrationOperationError =
                 "Project this implant site, then wait for the current atlas view."
             return false
@@ -1506,10 +1551,17 @@ final class PlannerViewModel: ObservableObject {
                     "Implant-site slice depths were not published coherently."
                 )
             }
+            setDisplayedImplantTargetId(
+                targetId,
+                forceThreeDimensionalRefresh: true
+            )
             return true
         } catch {
             let navigationError = error.localizedDescription
             await refreshState()
+            if displayedImplantTargetId == targetId {
+                setDisplayedImplantTargetId(nil)
+            }
             calibrationOperationError = navigationError
             return false
         }
@@ -1593,6 +1645,7 @@ final class PlannerViewModel: ObservableObject {
             }
             selectedProbePlanId = planId
             selectedProbePlan = result.plan
+            reconcileDisplayedImplantTarget(with: result.plan)
             selectedProbeRegionAnalysis = result.plan.hasCurrentPlanningGeometry
                 ? result.regionAnalysis : nil
             selectedProbeVesselAnalysis = result.plan.hasCurrentPlanningGeometry
@@ -1686,6 +1739,7 @@ final class PlannerViewModel: ObservableObject {
             )
             selectedProbePlanId = result.plan.planId
             selectedProbePlan = result.plan
+            reconcileDisplayedImplantTarget(with: result.plan)
             selectedProbeRegionAnalysis = nil
             clearMajorVesselAnalysis()
             await refreshState()
@@ -1778,6 +1832,7 @@ final class PlannerViewModel: ObservableObject {
             )
             selectedProbePlanId = result.plan.planId
             selectedProbePlan = result.plan
+            reconcileDisplayedImplantTarget(with: result.plan)
             selectedProbeRegionAnalysis = nil
             clearMajorVesselAnalysis()
             await refreshState()
@@ -2178,31 +2233,126 @@ final class PlannerViewModel: ObservableObject {
     }
 
     func probeSliceOverlay(for orientation: AtlasSliceOrientation) -> ProbeSliceOverlay? {
-        guard
-            let plan = selectedProbePlan,
-            plan.hasCurrentPlanningGeometry,
-            let frame = viewerFrame(for: orientation),
-            let atlas = viewerSnapshot?.atlas
+        guard let frame = viewerFrame(for: orientation),
+              let atlas = viewerSnapshot?.atlas
         else { return nil }
-        return ProbeSliceOverlayGeometry.make(
-            plan: plan,
+        let probe = displayedProbePlan.flatMap { plan in
+            plan.hasCurrentPlanningGeometry
+                ? ProbeSliceOverlayGeometry.make(
+                    plan: plan,
+                    orientation: orientation,
+                    sliceIndex: frame.index,
+                    resolution: atlas.resolutionMicrometres,
+                    shape: atlas.shapeVoxels
+                )
+                : nil
+        }
+        let implantSite = displayedImplantSite.map { target, projection in
+            ProbeSliceOverlayGeometry.makeImplantSite(
+                targetId: target.targetId,
+                label: target.label,
+                point: ProbePhysicalPoint(calibratedTargetProjection: projection),
+                orientation: orientation,
+                sliceIndex: frame.index,
+                resolution: atlas.resolutionMicrometres,
+                shape: atlas.shapeVoxels
+            )
+        }
+        return ProbeSliceOverlayGeometry.combine(
+            [probe, implantSite],
             orientation: orientation,
-            sliceIndex: frame.index,
-            resolution: atlas.resolutionMicrometres,
-            shape: atlas.shapeVoxels
+            sliceIndex: frame.index
         )
     }
 
     var probeDorsalOverlay: ProbeSliceOverlay? {
-        guard let plan = selectedProbePlan,
-              plan.hasCurrentPlanningGeometry,
-              let atlas = viewerSnapshot?.atlas
-        else { return nil }
-        return ProbeSliceOverlayGeometry.makeDorsalProjection(
-            plan: plan,
-            resolution: atlas.resolutionMicrometres,
-            shape: atlas.shapeVoxels
+        guard let atlas = viewerSnapshot?.atlas else { return nil }
+        let probe = displayedProbePlan.flatMap { plan in
+            plan.hasCurrentPlanningGeometry
+                ? ProbeSliceOverlayGeometry.makeDorsalProjection(
+                    plan: plan,
+                    resolution: atlas.resolutionMicrometres,
+                    shape: atlas.shapeVoxels
+                )
+                : nil
+        }
+        let implantSite = displayedImplantSite.map { target, projection in
+            ProbeSliceOverlayGeometry.makeImplantSiteDorsalProjection(
+                targetId: target.targetId,
+                label: target.label,
+                point: ProbePhysicalPoint(calibratedTargetProjection: projection),
+                resolution: atlas.resolutionMicrometres,
+                shape: atlas.shapeVoxels
+            )
+        }
+        return ProbeSliceOverlayGeometry.combine(
+            [probe, implantSite],
+            orientation: .horizontal,
+            sliceIndex: 0
         )
+    }
+
+    private var displayedImplantSite:
+        (target: UnprojectedImplantTarget, projection: CalibratedTargetProjectionResult)?
+    {
+        guard let displayedImplantTargetId,
+              let target = implantTargets.first(where: {
+                  $0.targetId == displayedImplantTargetId
+              }),
+              let project = backendState?.project,
+              let calibration = activeCalibration,
+              let atlas = viewerSnapshot?.atlas,
+              let projection = SurgeryPlanReadiness.currentProjection(
+                  targetProjections[displayedImplantTargetId],
+                  project: project,
+                  target: target,
+                  calibration: calibration,
+                  atlas: atlas
+              )
+        else { return nil }
+        return (target, projection)
+    }
+
+    private var displayedImplantSceneMarker: ImplantSiteSceneMarker? {
+        displayedImplantSite.map { target, projection in
+            ImplantSiteSceneMarker(
+                targetId: target.targetId,
+                label: target.label,
+                point: ProbePhysicalPoint(calibratedTargetProjection: projection)
+            )
+        }
+    }
+
+    private var displayedProbePlan: ProbePlanDetail? {
+        guard let plan = selectedProbePlan,
+              LivePlanningOverlayCoherence.matches(
+                  probeTargetId: plan.targetId,
+                  displayedImplantTargetId: displayedImplantTargetId
+              )
+        else { return nil }
+        return plan
+    }
+
+    private func reconcileDisplayedImplantTarget(with plan: ProbePlanDetail) {
+        guard let displayedImplantTargetId,
+              displayedImplantTargetId != plan.targetId
+        else { return }
+        setDisplayedImplantTargetId(nil)
+    }
+
+    private func setDisplayedImplantTargetId(
+        _ targetId: String?,
+        forceThreeDimensionalRefresh: Bool = false
+    ) {
+        let changed = displayedImplantTargetId != targetId
+        displayedImplantTargetId = targetId
+        guard changed || forceThreeDimensionalRefresh else { return }
+        guard cachedRootMesh != nil || threeDimensionalSnapshot != nil else { return }
+        do {
+            try rebuildThreeDimensionalSnapshot()
+        } catch {
+            threeDimensionalPickError = error.localizedDescription
+        }
     }
 
     func majorVesselSliceOverlay(
@@ -2475,9 +2625,10 @@ final class PlannerViewModel: ObservableObject {
                 rendererAnchor: rendererAnchor,
                 meshResult: meshResult,
                 highlightedRegionMesh: cachedHighlightedRegionMesh,
-                selectedProbePlan: selectedProbePlan.flatMap {
+                selectedProbePlan: displayedProbePlan.flatMap {
                     $0.hasCurrentPlanningGeometry ? $0 : nil
                 },
+                implantSite: displayedImplantSceneMarker,
                 majorVessels: majorVesselGeometry,
                 minimumVisibleVesselDiameterMicrometres:
                     minimumVisibleVesselDiameterMicrometres,
@@ -2772,9 +2923,10 @@ final class PlannerViewModel: ObservableObject {
             rendererAnchor: rendererAnchor,
             meshResult: meshResult,
             highlightedRegionMesh: cachedHighlightedRegionMesh,
-            selectedProbePlan: selectedProbePlan.flatMap {
+            selectedProbePlan: displayedProbePlan.flatMap {
                 $0.hasCurrentPlanningGeometry ? $0 : nil
             },
+            implantSite: displayedImplantSceneMarker,
             majorVessels: majorVesselGeometry,
             minimumVisibleVesselDiameterMicrometres:
                 minimumVisibleVesselDiameterMicrometres,
@@ -3841,6 +3993,7 @@ final class PlannerViewModel: ObservableObject {
         }
         selectedProbePlanId = chosenId
         selectedProbePlan = detail.plan
+        reconcileDisplayedImplantTarget(with: detail.plan)
         selectedProbeRegionAnalysis = detail.plan.hasCurrentPlanningGeometry
             ? detail.regionAnalysis : nil
         selectedProbeVesselAnalysis = detail.plan.hasCurrentPlanningGeometry

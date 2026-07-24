@@ -208,6 +208,85 @@ struct ProbeSliceOverlayGeometryTests {
         #expect(depthOnlyPoint == .init(column: 5, row: 2))
     }
 
+    @Test("Negative bregma AP and ML move toward P and the screen-right L side")
+    func negativeBregmaScreenDirections() throws {
+        // In BrainGlobe physical ASR, posterior and animal-left are the
+        // increasing AP and ML axes. This pair represents a target posterior
+        // and left of an aligned bregma point at this compact test scale.
+        let bregma = point(ap: 75, dv: 50, ml: 100)
+        let negativeTarget = point(ap: 125, dv: 50, ml: 150)
+
+        let bregmaDorsal = ProbeSliceOverlayGeometry.makeImplantSiteDorsalProjection(
+            targetId: "bregma",
+            label: "Bregma",
+            point: bregma,
+            resolution: resolution,
+            shape: shape
+        )
+        let targetDorsal = ProbeSliceOverlayGeometry.makeImplantSiteDorsalProjection(
+            targetId: "negative",
+            label: "AP− / ML−",
+            point: negativeTarget,
+            resolution: resolution,
+            shape: shape
+        )
+        let bregmaPoint = try #require(bregmaDorsal.markers.first?.imagePoint)
+        let targetPoint = try #require(targetDorsal.markers.first?.imagePoint)
+        #expect(targetPoint.row > bregmaPoint.row)
+        #expect(targetPoint.column > bregmaPoint.column)
+        #expect(targetPoint.column > Double(shape.mlVoxels) / 2)
+        #expect(targetDorsal.markers.first?.role == .implantSite)
+
+        let horizontalBregma = ProbeSliceOverlayGeometry.makeImplantSite(
+            targetId: "bregma",
+            label: "Bregma",
+            point: bregma,
+            orientation: .horizontal,
+            sliceIndex: 2,
+            resolution: resolution,
+            shape: shape
+        )
+        let horizontalTarget = ProbeSliceOverlayGeometry.makeImplantSite(
+            targetId: "negative",
+            label: "AP− / ML−",
+            point: negativeTarget,
+            orientation: .horizontal,
+            sliceIndex: 2,
+            resolution: resolution,
+            shape: shape
+        )
+        let horizontalBregmaPoint = try #require(
+            horizontalBregma.markers.first?.imagePoint
+        )
+        let horizontalTargetPoint = try #require(
+            horizontalTarget.markers.first?.imagePoint
+        )
+        #expect(horizontalTargetPoint.row > horizontalBregmaPoint.row)
+        #expect(horizontalTargetPoint.column > horizontalBregmaPoint.column)
+
+        let coronalTarget = ProbeSliceOverlayGeometry.makeImplantSite(
+            targetId: "negative",
+            label: "AP− / ML−",
+            point: negativeTarget,
+            orientation: .coronal,
+            sliceIndex: 5,
+            resolution: resolution,
+            shape: shape
+        )
+        #expect(coronalTarget.markers.first?.imagePoint.column == 6)
+
+        let sagittalTarget = ProbeSliceOverlayGeometry.makeImplantSite(
+            targetId: "negative",
+            label: "AP− / ML−",
+            point: negativeTarget,
+            orientation: .sagittal,
+            sliceIndex: 6,
+            resolution: resolution,
+            shape: shape
+        )
+        #expect(sagittalTarget.markers.first?.imagePoint.column == 5)
+    }
+
     @Test("Continuous image coordinates map through the viewport with half-open edges")
     func viewportContinuousMapping() throws {
         let viewport = AtlasSliceViewport(

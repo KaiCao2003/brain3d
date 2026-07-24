@@ -194,6 +194,172 @@ struct SceneKitRenderSmokeTests {
         #expect(changedPixelCount(brainOnly, rendered) >= 20)
     }
 
+    @Test("Displayed implant site remains visible through the shell and clears")
+    @MainActor
+    func implantSiteRendersAndClears() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let meshResult = try decodeMeshResult(fixture: fixture)
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let withoutMarker = try AnimalSceneSnapshot(
+            projectId: "render-implant-site-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: meshResult,
+            selectedProbePlan: nil
+        )
+        let marker = ImplantSiteSceneMarker(
+            targetId: "direction-target",
+            label: "AP- posterior / ML- animal-left",
+            point: ProbePhysicalPoint(
+                apMicrometres: 6_600,
+                dvMicrometres: 4_000,
+                mlMicrometres: 6_200,
+                voxelIndex: ProbeVoxelIndex(ap: 264, dv: 160, ml: 248)
+            )
+        )
+        let withMarker = try AnimalSceneSnapshot(
+            projectId: "render-implant-site-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: meshResult,
+            selectedProbePlan: nil,
+            implantSite: marker
+        )
+        let view = AtlasInteractiveSCNView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 240)
+        )
+        let controller = AnimalSceneController(view: view)
+
+        await controller.apply(snapshot: withoutMarker) { _ in }
+        let baseline = try bitmap(
+            from: controller.offscreenSnapshot(size: CGSize(width: 320, height: 240))
+        )
+        await controller.apply(snapshot: withMarker) { _ in }
+        let rendered = try bitmap(
+            from: controller.offscreenSnapshot(size: CGSize(width: 320, height: 240))
+        )
+        let layer = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "displayed-implant-site-layer",
+                recursively: false
+            )
+        )
+        let node = try #require(
+            layer.childNode(withName: "implant-site-direction-target", recursively: false)
+        )
+
+        #expect(node.categoryBitMask == SceneCategory.implantSite.rawValue)
+        #expect(changedPixelCount(baseline, rendered) >= 20)
+
+        await controller.apply(snapshot: withoutMarker) { _ in }
+        #expect(layer.childNodes.isEmpty)
+    }
+
+    @Test("Snapshot rejects stale or out-of-bounds implant projections")
+    func implantSiteSnapshotContract() throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let meshResult = try decodeMeshResult(fixture: fixture)
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let validMarker = ImplantSiteSceneMarker(
+            targetId: "direction-target",
+            label: "AP- posterior / ML- animal-left",
+            point: ProbePhysicalPoint(
+                apMicrometres: 6_600,
+                dvMicrometres: 4_000,
+                mlMicrometres: 6_200,
+                voxelIndex: ProbeVoxelIndex(ap: 264, dv: 160, ml: 248)
+            )
+        )
+        let valid = try AnimalSceneSnapshot(
+            projectId: "implant-site-contract-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: meshResult,
+            selectedProbePlan: nil,
+            implantSite: validMarker
+        )
+        let changedTarget = try AnimalSceneSnapshot(
+            projectId: "implant-site-contract-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: meshResult,
+            selectedProbePlan: nil,
+            implantSite: ImplantSiteSceneMarker(
+                targetId: "another-target",
+                label: validMarker.label,
+                point: validMarker.point
+            )
+        )
+        #expect(valid.identity != changedTarget.identity)
+
+        #expect(throws: AtlasSceneContractError.self) {
+            _ = try AnimalSceneSnapshot(
+                projectId: "implant-site-contract-project",
+                projectRevision: 1,
+                rendererAnchor: anchor,
+                meshResult: meshResult,
+                selectedProbePlan: nil,
+                implantSite: ImplantSiteSceneMarker(
+                    targetId: validMarker.targetId,
+                    label: validMarker.label,
+                    point: ProbePhysicalPoint(
+                        apMicrometres: 13_200,
+                        dvMicrometres: 4_000,
+                        mlMicrometres: 6_200,
+                        voxelIndex: ProbeVoxelIndex(ap: 528, dv: 160, ml: 248)
+                    )
+                )
+            )
+        }
+        #expect(throws: AtlasSceneContractError.self) {
+            _ = try AnimalSceneSnapshot(
+                projectId: "implant-site-contract-project",
+                projectRevision: 1,
+                rendererAnchor: anchor,
+                meshResult: meshResult,
+                selectedProbePlan: nil,
+                implantSite: ImplantSiteSceneMarker(
+                    targetId: validMarker.targetId,
+                    label: validMarker.label,
+                    point: ProbePhysicalPoint(
+                        apMicrometres: 6_600,
+                        dvMicrometres: 4_000,
+                        mlMicrometres: 6_200,
+                        insideAtlas: false,
+                        voxelIndex: ProbeVoxelIndex(ap: 264, dv: 160, ml: 248)
+                    )
+                )
+            )
+        }
+        #expect(throws: AtlasSceneContractError.self) {
+            _ = try AnimalSceneSnapshot(
+                projectId: "implant-site-contract-project",
+                projectRevision: 1,
+                rendererAnchor: anchor,
+                meshResult: meshResult,
+                selectedProbePlan: nil,
+                implantSite: ImplantSiteSceneMarker(
+                    targetId: validMarker.targetId,
+                    label: validMarker.label,
+                    point: ProbePhysicalPoint(
+                        apMicrometres: 6_600,
+                        dvMicrometres: 4_000,
+                        mlMicrometres: 6_200,
+                        voxelIndex: ProbeVoxelIndex(ap: 264, dv: 160, ml: 247)
+                    )
+                )
+            )
+        }
+    }
+
     @Test("A non-cortical Allen region mesh highlights inside the whole-brain shell")
     @MainActor
     func selectedWholeOntologyRegionRenders() async throws {

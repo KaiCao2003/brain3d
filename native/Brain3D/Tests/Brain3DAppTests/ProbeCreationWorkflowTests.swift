@@ -196,6 +196,22 @@ struct ProbeCreationWorkflowTests {
         ))
     }
 
+    @Test("Live implant and probe overlays never mix different targets")
+    func liveOverlayTargetCoherence() {
+        #expect(LivePlanningOverlayCoherence.matches(
+            probeTargetId: "target-a",
+            displayedImplantTargetId: nil
+        ))
+        #expect(LivePlanningOverlayCoherence.matches(
+            probeTargetId: "target-a",
+            displayedImplantTargetId: "target-a"
+        ))
+        #expect(!LivePlanningOverlayCoherence.matches(
+            probeTargetId: "target-b",
+            displayedImplantTargetId: "target-a"
+        ))
+    }
+
     private func blocker(
         planningUnavailableReason: String? = nil,
         hasSelectedModel: Bool = true,

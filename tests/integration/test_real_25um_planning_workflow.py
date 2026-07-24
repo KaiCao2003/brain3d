@@ -114,10 +114,14 @@ def _calibration_params(project_id: str, revision: int) -> dict[str, object]:
             "lateralityConfirmedFromAnimal": True,
         },
         "atlasLandmarks": {
-            "bregma": _atlas_point(3_000.0, 2_000.0, 4_500.0),
-            "lambdaPoint": _atlas_point(5_000.0, 2_000.0, 4_500.0),
-            "leftSkull": _atlas_point(3_000.0, 2_000.0, 5_500.0),
-            "rightSkull": _atlas_point(3_000.0, 2_000.0, 3_500.0),
+            # This is an engineering fixture, not an official Allen bregma.
+            # Keep its bregma/lambda axis on the reviewed 5.7 mm atlas
+            # midline so negative ML is visibly animal-left (screen-right) and the
+            # fixture cannot conceal a laterality regression.
+            "bregma": _atlas_point(3_000.0, 2_000.0, 5_700.0),
+            "lambdaPoint": _atlas_point(5_000.0, 2_000.0, 5_700.0),
+            "leftSkull": _atlas_point(3_000.0, 2_000.0, 6_700.0),
+            "rightSkull": _atlas_point(3_000.0, 2_000.0, 4_700.0),
         },
         "qualityLimits": {
             "minimumAxisBaselineMicrometres": 500.0,
@@ -304,7 +308,9 @@ def test_real_cached_25um_calibrated_neuropixels_workflow_round_trip(
     assert isinstance(projected_point, dict)
     assert projected_point["apMicrometres"] == pytest.approx(4_000.0)
     assert projected_point["dvMicrometres"] == pytest.approx(3_500.0)
-    assert projected_point["mlMicrometres"] == pytest.approx(5_000.0)
+    assert projected_point["mlMicrometres"] == pytest.approx(6_200.0)
+    assert projected_point["apMicrometres"] > 3_000.0
+    assert projected_point["mlMicrometres"] > 5_700.0
     assert projected["usableForNavigation"] is False
     assert session.project_revision == revision
 

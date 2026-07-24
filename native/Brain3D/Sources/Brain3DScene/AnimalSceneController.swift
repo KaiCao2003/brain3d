@@ -46,6 +46,7 @@ final class AnimalSceneController {
     private let brainLayer = SCNNode()
     private let highlightedRegionLayer = SCNNode()
     private let probeLayer = SCNNode()
+    private let implantSiteLayer = SCNNode()
     private let majorVesselLayer = SCNNode()
     private let selectedVesselConflictLayer = SCNNode()
     private let cameraNode = SCNNode()
@@ -98,6 +99,7 @@ final class AnimalSceneController {
             try Task.checkCancellation()
             guard generation == loadGeneration else { return }
             try replaceProbe(for: snapshot)
+            try replaceImplantSite(for: snapshot)
             selectedVesselConflictLayer.childNodes.forEach { $0.removeFromParentNode() }
             try await replaceMajorVessels(for: snapshot, generation: generation)
             try Task.checkCancellation()
@@ -155,17 +157,20 @@ final class AnimalSceneController {
         brainLayer.name = "allen-mouse-root-mesh"
         highlightedRegionLayer.name = "selected-allen-region-layer"
         probeLayer.name = "selected-probe-layer"
+        implantSiteLayer.name = "displayed-implant-site-layer"
         majorVesselLayer.name = "reviewed-major-vessel-layer"
         selectedVesselConflictLayer.name = "selected-vessel-conflict-layer"
         brainLayer.categoryBitMask = SceneCategory.brain.rawValue
         highlightedRegionLayer.categoryBitMask = SceneCategory.highlightedRegion.rawValue
         probeLayer.categoryBitMask = SceneCategory.probe.rawValue
+        implantSiteLayer.categoryBitMask = SceneCategory.implantSite.rawValue
         majorVesselLayer.categoryBitMask = SceneCategory.majorVessel.rawValue
         selectedVesselConflictLayer.categoryBitMask =
             SceneCategory.selectedVesselConflict.rawValue
         scene.rootNode.addChildNode(brainLayer)
         scene.rootNode.addChildNode(highlightedRegionLayer)
         scene.rootNode.addChildNode(probeLayer)
+        scene.rootNode.addChildNode(implantSiteLayer)
         scene.rootNode.addChildNode(majorVesselLayer)
         scene.rootNode.addChildNode(selectedVesselConflictLayer)
 
@@ -338,6 +343,17 @@ final class AnimalSceneController {
             transform: snapshot.transform
         )
         probeLayer.addChildNode(probe)
+    }
+
+    private func replaceImplantSite(for snapshot: AnimalSceneSnapshot) throws {
+        implantSiteLayer.childNodes.forEach { $0.removeFromParentNode() }
+        guard let marker = snapshot.implantSite else { return }
+        implantSiteLayer.addChildNode(
+            try ImplantSiteNodeFactory.makeNode(
+                for: marker,
+                transform: snapshot.transform
+            )
+        )
     }
 
     private func replaceMajorVessels(

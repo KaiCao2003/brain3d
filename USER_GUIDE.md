@@ -56,6 +56,11 @@ Enter millimetres from bregma in named `[AP, ML, DV]` fields:
 projects the new site; otherwise the stored bregma coordinates remain unprojected until you
 explicitly project them.
 
+The Dorsal, Coronal, and Horizontal canvases label animal right on the screen-left edge and
+animal left on the screen-right edge. Thus `ML < 0` appears on the screen-right `L` side, while
+`AP < 0` appears toward `P`. **Show** keeps the same projected implant site visible when switching
+among Dorsal, Coronal, Sagittal, Horizontal, and 3D.
+
 ## Calibrate and project
 
 Open **Set up atlas mapping…** and create a subject calibration from measured skull-frame metadata,

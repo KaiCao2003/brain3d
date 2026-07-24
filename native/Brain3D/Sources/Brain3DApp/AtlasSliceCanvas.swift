@@ -975,6 +975,9 @@ final class AtlasSliceNSView: NSView {
             case .entry:
                 path = triangle(at: point, radius: 6, pointsUp: true)
                 color = .systemGreen
+            case .implantSite:
+                path = diamond(at: point, radius: 7)
+                color = .systemPink
             case .target:
                 path = diamond(at: point, radius: 6)
                 color = .systemYellow

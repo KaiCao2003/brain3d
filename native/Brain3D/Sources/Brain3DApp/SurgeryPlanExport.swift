@@ -806,8 +806,14 @@ enum SurgeryPlanningViewRenderer {
         capture: SurgeryPlanModelCapture
     ) async throws -> SurgeryPlanningViewArtifact {
         if requestedView == .threeDimensional {
+            let expectedImplantSite = ImplantSiteSceneMarker(
+                targetId: capture.target.targetId,
+                label: capture.target.label,
+                point: ProbePhysicalPoint(calibratedTargetProjection: capture.projection)
+            )
             guard let snapshot = capture.sceneSnapshot,
                   let vessels = snapshot.majorVessels,
+                  snapshot.implantSite == expectedImplantSite,
                   vessels.provenance.derivedAssetSha256
                     == capture.majorVessels.provenance.derivedAssetSha256,
                   snapshot.minimumVisibleVesselDiameterMicrometres
@@ -870,13 +876,28 @@ enum SurgeryPlanningViewRenderer {
                 minimumVisibleDiameterMicrometres:
                     capture.minimumVisibleVesselDiameterMicrometres
             )
-            probeOverlay = capture.probePlan.flatMap {
+            let planOverlay = capture.probePlan.flatMap {
                 ProbeSliceOverlayGeometry.makeDorsalProjection(
                     plan: $0,
                     resolution: capture.atlas.resolutionMicrometres,
                     shape: capture.atlas.shapeVoxels
                 )
             }
+            let implantSiteOverlay =
+                ProbeSliceOverlayGeometry.makeImplantSiteDorsalProjection(
+                    targetId: capture.target.targetId,
+                    label: capture.target.label,
+                    point: ProbePhysicalPoint(
+                        calibratedTargetProjection: capture.projection
+                    ),
+                    resolution: capture.atlas.resolutionMicrometres,
+                    shape: capture.atlas.shapeVoxels
+                )
+            probeOverlay = ProbeSliceOverlayGeometry.combine(
+                [planOverlay, implantSiteOverlay],
+                orientation: .horizontal,
+                sliceIndex: 0
+            )
             subtitle = "Allen atlas dorsal surface projection · not a subject skull surface"
             vesselScope = "dorsal depth projection"
         } else {
@@ -896,7 +917,7 @@ enum SurgeryPlanningViewRenderer {
                 minimumVisibleDiameterMicrometres:
                     capture.minimumVisibleVesselDiameterMicrometres
             )
-            probeOverlay = capture.probePlan.flatMap {
+            let planOverlay = capture.probePlan.flatMap {
                 ProbeSliceOverlayGeometry.make(
                     plan: $0,
                     orientation: orientation,
@@ -905,6 +926,22 @@ enum SurgeryPlanningViewRenderer {
                     shape: capture.atlas.shapeVoxels
                 )
             }
+            let implantSiteOverlay = ProbeSliceOverlayGeometry.makeImplantSite(
+                targetId: capture.target.targetId,
+                label: capture.target.label,
+                point: ProbePhysicalPoint(
+                    calibratedTargetProjection: capture.projection
+                ),
+                orientation: orientation,
+                sliceIndex: frame.index,
+                resolution: capture.atlas.resolutionMicrometres,
+                shape: capture.atlas.shapeVoxels
+            )
+            probeOverlay = ProbeSliceOverlayGeometry.combine(
+                [planOverlay, implantSiteOverlay],
+                orientation: orientation,
+                sliceIndex: frame.index
+            )
             subtitle = String(
                 format:
                     "Target-centred slice %d of %d · %@ %.3f mm in atlas physical space",
@@ -1997,6 +2034,11 @@ enum SurgeryPlanExporter {
                 meshResult: baseScene.meshResult,
                 highlightedRegionMesh: nil,
                 selectedProbePlan: probePlan,
+                implantSite: ImplantSiteSceneMarker(
+                    targetId: target.targetId,
+                    label: target.label,
+                    point: ProbePhysicalPoint(calibratedTargetProjection: projection)
+                ),
                 majorVessels: majorVessels,
                 minimumVisibleVesselDiameterMicrometres:
                     minimumVisibleVesselDiameterMicrometres,

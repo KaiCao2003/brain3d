@@ -1,7 +1,24 @@
 import Foundation
 
+public extension ProbePhysicalPoint {
+    init(calibratedTargetProjection projection: CalibratedTargetProjectionResult) {
+        self.init(
+            apMicrometres: projection.atlasPoint.apMicrometres,
+            dvMicrometres: projection.atlasPoint.dvMicrometres,
+            mlMicrometres: projection.atlasPoint.mlMicrometres,
+            insideAtlas: true,
+            voxelIndex: ProbeVoxelIndex(
+                ap: projection.containingVoxelIndex.ap,
+                dv: projection.containingVoxelIndex.dv,
+                ml: projection.containingVoxelIndex.ml
+            )
+        )
+    }
+}
+
 public enum ProbeSliceMarkerRole: String, Equatable, Sendable {
     case entry
+    case implantSite
     case target
     case tip
     case recordingSite
@@ -73,6 +90,103 @@ public struct ProbeSliceOverlay: Equatable, Sendable {
 }
 
 public enum ProbeSliceOverlayGeometry {
+    /// Make the currently displayed implant site visible without requiring a
+    /// probe plan. BrainGlobe physical AP/ML increase toward posterior/left,
+    /// so these unflipped image coordinates place posterior at the bottom and
+    /// animal-left at the screen-right edge of the labelled atlas canvas.
+    public static func makeImplantSiteDorsalProjection(
+        targetId: String,
+        label: String,
+        point: ProbePhysicalPoint,
+        resolution: AtlasASRResolution,
+        shape: AtlasASRShape
+    ) -> ProbeSliceOverlay {
+        let marker = dorsalImagePoint(
+            point,
+            resolution: resolution,
+            shape: shape
+        ).map {
+            ProbeSliceMarker(
+                id: "implant-site:\(targetId)",
+                role: .implantSite,
+                label: label,
+                imagePoint: $0
+            )
+        }
+        return ProbeSliceOverlay(
+            orientation: .horizontal,
+            sliceIndex: 0,
+            markers: marker.map { [$0] } ?? [],
+            shankIntersections: []
+        )
+    }
+
+    public static func makeImplantSite(
+        targetId: String,
+        label: String,
+        point: ProbePhysicalPoint,
+        orientation: AtlasSliceOrientation,
+        sliceIndex: Int,
+        resolution: AtlasASRResolution,
+        shape: AtlasASRShape
+    ) -> ProbeSliceOverlay {
+        let sliceCount = shape[orientation.fixedAxis]
+        guard sliceIndex >= 0, sliceIndex < sliceCount else {
+            return ProbeSliceOverlay(
+                orientation: orientation,
+                sliceIndex: sliceIndex,
+                markers: [],
+                shankIntersections: []
+            )
+        }
+        let slab = Double(sliceIndex) * resolution[orientation.fixedAxis]
+            ..< Double(sliceIndex + 1) * resolution[orientation.fixedAxis]
+        var markers: [ProbeSliceMarker] = []
+        appendMarker(
+            point: point,
+            id: "implant-site:\(targetId)",
+            role: .implantSite,
+            label: label,
+            orientation: orientation,
+            slab: slab,
+            resolution: resolution,
+            shape: shape,
+            into: &markers
+        )
+        return ProbeSliceOverlay(
+            orientation: orientation,
+            sliceIndex: sliceIndex,
+            markers: markers,
+            shankIntersections: []
+        )
+    }
+
+    public static func combine(
+        _ overlays: [ProbeSliceOverlay?],
+        orientation: AtlasSliceOrientation,
+        sliceIndex: Int
+    ) -> ProbeSliceOverlay? {
+        let present = overlays.compactMap { $0 }
+        guard !present.isEmpty,
+              present.allSatisfy({
+                  $0.orientation == orientation && $0.sliceIndex == sliceIndex
+              })
+        else { return nil }
+
+        var markerIds = Set<String>()
+        var shankIds = Set<String>()
+        return ProbeSliceOverlay(
+            orientation: orientation,
+            sliceIndex: sliceIndex,
+            markers: present
+                .flatMap(\.markers)
+                .filter { markerIds.insert($0.id).inserted },
+            shankIntersections: present
+                .flatMap(\.shankIntersections)
+                .filter { shankIds.insert($0.shankId).inserted }
+        )
+    }
+
     public static func makeDorsalProjection(
         plan: ProbePlanDetail,
         resolution: AtlasASRResolution,

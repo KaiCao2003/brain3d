@@ -234,6 +234,8 @@ A calibration profile records at least:
 - source and citation;
 - landmark coordinates and their source frame;
 - full affine or other declared transform, including any rotation or scale;
+- an orientation-preserving anatomical linear component with positive determinant; a
+  left/right reflection is rejected rather than treated as affine distortion;
 - axis order, signs, units, and voxel-anchor policy;
 - atlas identity and content hash to which it applies;
 - uncertainty or validation notes.
@@ -310,7 +312,8 @@ The following are correctness errors:
 - treating AP/ML/DV, array axes, mesh axes, renderer XYZ, and screen axes as the same order;
 - identifying anatomical left or right from where a hemisphere appears on screen;
 - assuming all Allen files have the same array order after different readers load them;
-- applying a hidden left/right flip, half-voxel shift, tilt, scale, or unit conversion;
+- applying a hidden left/right flip, reflected anatomical calibration, half-voxel shift, tilt,
+  scale, or unit conversion;
 - treating `shape * resolution` as the last valid lookup coordinate;
 - passing negative, non-finite, or upper-bound coordinates to BrainGlobe;
 - using `shape` and `shape - 1` flip translations interchangeably;

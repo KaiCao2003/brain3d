@@ -808,7 +808,9 @@ struct ProjectSidebar: View {
                             await model.navigateToImplantTarget(targetId: target.targetId)
                         }
                     }
-                    .help("Show this site in Coronal, Sagittal, and Horizontal views.")
+                    .help(
+                        "Show this site in Dorsal, Coronal, Sagittal, Horizontal, and 3D views."
+                    )
                 } else if model.activeCalibration != nil {
                     Button("Project", systemImage: "scope") {
                         Task { _ = await model.projectImplantTarget(targetId: target.targetId) }

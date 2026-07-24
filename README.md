@@ -20,8 +20,8 @@ release or a validation claim.
 | Atlas | BrainGlobe `allen_mouse_25um` package `1.2` only; 10 µm is excluded from this testing phase |
 | Slice navigation | One full-size coronal, sagittal, or horizontal view; each retains an independent depth with buttons, slider, wheel, pan, and zoom |
 | Region inspection | Complete 840-structure Allen ontology search/browse; clicking replaces one shared selection without changing any slice depth |
-| Dorsal | Atlas surface with the selected probe's AP/ML projection and display-only major vessels |
-| 3D | Native SceneKit brain mesh with camera control, atlas-region picking, probes, and major-vessel tubes |
+| Dorsal | Atlas surface with the displayed implant site, selected probe AP/ML projection, and display-only major vessels |
+| 3D | Native SceneKit brain mesh with camera control, atlas-region picking, displayed implant site, probes, and major-vessel tubes |
 | Stereotaxy | Required subject identity; signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC and guarded target projection |
 | Probes | NPX2 1-shank or 4-shank only; selected implant site, plan name, azimuth/elevation/depth/roll, and slice/3D overlays |
 | Vessels | VesSAP BL6J-no1 diameter-≥30 µm display reference overlaid in all five views; no capillary layer |
@@ -49,6 +49,10 @@ For example, `AP -1.25`, `ML -0.70`, `DV -2.40` means 1.25 mm posterior, 0.70 mm
 remain centralized in Python. An unprojected entry stays unprojected until an explicit subject
 calibration passes QC; the Allen CCF does not provide one official bregma transform. See
 [Coordinate Systems](COORDINATE_SYSTEMS.md).
+
+On Dorsal, Coronal, and Horizontal atlas images, animal right is the screen-left edge and animal
+left is the screen-right edge. Therefore a negative ML target appears on the screen-right,
+`L`-labelled side; a negative AP target moves toward the `P`-labelled edge.
 
 New probe creation exposes one direct stereotaxic contract: select an implant site and NPX2
 1-shank or 4-shank geometry, then enter azimuth/elevation/roll in degrees and insertion depth in

@@ -98,4 +98,5 @@ enum SceneCategory: Int {
     case majorVessel = 4
     case selectedVesselConflict = 8
     case highlightedRegion = 16
+    case implantSite = 32
 }

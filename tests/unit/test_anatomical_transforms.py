@@ -250,5 +250,44 @@ def test_transform_model_rejects_singular_and_non_homogeneous_matrices() -> None
         )
 
 
+def test_affine_fit_and_model_reject_left_right_reflection() -> None:
+    atlas = _frame("atlas", CoordinateSystemKind.ATLAS)
+    subject = _frame("subject", CoordinateSystemKind.SUBJECT)
+    source = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [100.0, 0.0, 0.0],
+            [0.0, 100.0, 0.0],
+            [0.0, 0.0, 100.0],
+        ]
+    )
+    reflected = source.copy()
+    reflected[:, 1] *= -1
+    with pytest.raises(TransformValidationError, match="handedness"):
+        fit_anatomical_transform(
+            source_frame=atlas,
+            destination_frame=subject,
+            landmarks=_pairs(
+                atlas.frame_id,
+                subject.frame_id,
+                source,
+                reflected,
+            ),
+            method=TransformMethod.AFFINE,
+        )
+
+    from mouse_brain_planner.domain.transform_models import AnatomicalTransform
+
+    reflection_matrix = np.eye(4)
+    reflection_matrix[1, 1] = -1
+    with pytest.raises(ValueError, match="handedness"):
+        AnatomicalTransform(
+            source_frame=atlas,
+            destination_frame=subject,
+            method=TransformMethod.AFFINE,
+            matrix_row_major=tuple(reflection_matrix.reshape(-1)),
+        )
+
+
 def test_landmark_uuid_helper_is_not_accidentally_constant() -> None:
     assert uuid4() != uuid4()
