@@ -38,6 +38,315 @@ struct ProbeCreationWorkflowTests {
         #expect(ProbeInputUnits.millimetres(fromMicrometres: 3_500) == 3.5)
     }
 
+    @Test("Equivalent number spelling does not create a false unapplied-edit warning")
+    func equivalentProbeDraftNumbers() throws {
+        let saved = try #require(draft(depth: "3", axialRotation: "0"))
+        let current = try #require(draft(
+            azimuth: "0.000000",
+            elevation: "-90.0",
+            depth: "3.000",
+            axialRotation: "-0"
+        ))
+        #expect(!ProbeDraftComparisonPolicy.hasUnappliedEdits(
+            current: current,
+            saved: saved
+        ))
+    }
+
+    @Test("Changed or invalid depth cannot silently export the applied trajectory")
+    func unappliedProbeDraftDepth() throws {
+        let saved = try #require(draft(depth: "3"))
+        let changed = try #require(draft(depth: "2.5"))
+        #expect(ProbeDraftComparisonPolicy.hasUnappliedEdits(
+            current: changed,
+            saved: saved
+        ))
+        #expect(ProbeDraftComparisonPolicy.hasUnappliedEdits(
+            current: draft(depth: "not-a-number"),
+            saved: saved
+        ))
+    }
+
+    @Test("Hidden legacy fields do not make the simple NPX2 draft dirty")
+    func hiddenProbeDraftFields() throws {
+        let saved = try #require(draft(entryAP: "", entryML: "", entryDV: ""))
+        let current = try #require(draft(
+            entryAP: "999",
+            entryML: "999",
+            entryDV: "999"
+        ))
+        #expect(!ProbeDraftComparisonPolicy.hasUnappliedEdits(
+            current: current,
+            saved: saved
+        ))
+    }
+
+    @Test("Revert restores the saved NPX2 model identity and clears the draft difference")
+    func revertedProbeModelIdentity() throws {
+        let saved = try #require(draft(
+            modelId: ProbePlanningContract.neuropixels2SingleShankModelId
+        ))
+        let switched = try #require(draft(
+            modelId: ProbePlanningContract.neuropixels2StandardFourShankModelId
+        ))
+        #expect(ProbeDraftComparisonPolicy.hasUnappliedEdits(
+            current: switched,
+            saved: saved
+        ))
+
+        let identity = try #require(
+            ProbeDraftComparisonPolicy.modelIdentityToRestore(
+                currentModelId: switched.modelId,
+                currentModelVersion: switched.modelVersion,
+                saved: saved
+            )
+        )
+        #expect(identity.modelId == saved.modelId)
+        #expect(identity.modelVersion == saved.modelVersion)
+
+        let reverted = try #require(draft(
+            modelId: identity.modelId,
+            modelVersion: identity.modelVersion
+        ))
+        #expect(!ProbeDraftComparisonPolicy.hasUnappliedEdits(
+            current: reverted,
+            saved: saved
+        ))
+        #expect(ProbeDraftComparisonPolicy.modelIdentityToRestore(
+            currentModelId: reverted.modelId,
+            currentModelVersion: reverted.modelVersion,
+            saved: saved
+        ) == nil)
+    }
+
+    @MainActor
+    @Test("A meaningful new probe draft is guarded but its pristine defaults are not")
+    func newProbeDraftDirtyState() {
+        let pristine = newDraft()
+        #expect(!ProbeDraftComparisonPolicy.hasMeaningfulNewDraft(
+            current: newDraft(axialRotation: "-0.000"),
+            pristine: pristine
+        ))
+
+        let meaningful = newDraft(depth: "3")
+        #expect(ProbeDraftComparisonPolicy.hasMeaningfulNewDraft(
+            current: meaningful,
+            pristine: pristine
+        ))
+        #expect(ProbeDraftComparisonPolicy.hasMeaningfulNewDraft(
+            current: newDraft(
+                modelId: ProbePlanningContract.neuropixels2StandardFourShankModelId
+            ),
+            pristine: pristine
+        ))
+
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        model.probeDraftSession.setHasUnappliedChanges(
+            ProbeDraftComparisonPolicy.hasMeaningfulNewDraft(
+                current: meaningful,
+                pristine: pristine
+            )
+        )
+        #expect(model.hasPendingPlanChanges)
+        #expect(
+            TerminationPolicy.decision(
+                hasUnsavedChanges: model.hasPendingPlanChanges
+            ) == .requireDiscardConfirmation
+        )
+        model.probeDraftSession.setHasUnappliedChanges(
+            ProbeDraftComparisonPolicy.hasMeaningfulNewDraft(
+                current: pristine,
+                pristine: pristine
+            )
+        )
+        #expect(!model.hasPendingPlanChanges)
+    }
+
+    @MainActor
+    @Test("Unapplied probe edits participate in the app-wide dirty-state guard")
+    func unappliedProbeDraftDirtyState() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        #expect(!model.hasPendingPlanChanges)
+        model.probeDraftSession.setHasUnappliedChanges(true)
+        #expect(model.hasUnappliedProbeDraftChanges)
+        #expect(model.hasPendingPlanChanges)
+        model.probeDraftSession.setHasUnappliedChanges(false)
+        #expect(!model.hasPendingPlanChanges)
+    }
+
+    @MainActor
+    @Test("The sole planning window reuses the app-owned unapplied draft after close")
+    func singleWindowDraftRetention() {
+        #expect(!MainPlanningWindowPolicy.permitsMultipleMainWindows)
+        #expect(MainPlanningWindowPolicy.sceneId == "main-planning-window")
+
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        let firstWindowSession = model.probeDraftSession
+        let context = ProbeDraftContext(
+            projectId: "project-1",
+            planId: "plan-1",
+            planInputSha256: "input-1"
+        )
+        firstWindowSession.name = "Unapplied left V1"
+        firstWindowSession.targetId = "target-1"
+        firstWindowSession.depth = "3.25"
+        firstWindowSession.markSynchronized(with: context)
+        #expect(firstWindowSession.hasUnappliedChanges)
+
+        // Recreating ProjectSidebar after the red window closes receives this
+        // same model-owned object instead of a fresh per-window @State draft.
+        let reopenedWindowSession = model.probeDraftSession
+        #expect(reopenedWindowSession === firstWindowSession)
+        #expect(reopenedWindowSession.name == "Unapplied left V1")
+        #expect(reopenedWindowSession.depth == "3.25")
+        #expect(!ProbeDraftSynchronizationPolicy.shouldReplaceDraft(
+            existingContext: reopenedWindowSession.synchronizedContext,
+            incomingContext: context,
+            hasUnappliedChanges: reopenedWindowSession.hasUnappliedChanges
+        ))
+        #expect(model.hasPendingPlanChanges)
+        #expect(
+            TerminationPolicy.decision(
+                hasUnsavedChanges: model.hasPendingPlanChanges
+            ) == .requireDiscardConfirmation
+        )
+    }
+
+    @MainActor
+    @Test("Only an explicit discard clears the retained probe draft session")
+    func explicitDraftDiscard() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        let session = model.probeDraftSession
+        session.name = "Uncreated probe"
+        session.targetId = "target-1"
+        session.depth = "4"
+        session.pendingExplicitNewModel = ProbeDraftModelIdentity(
+            modelId: ProbePlanningContract.neuropixels2SingleShankModelId,
+            modelVersion: ProbePlanningContract.neuropixels2ModelVersion
+        )
+        session.markSynchronized(with: ProbeDraftContext(
+            projectId: "project-1",
+            planId: nil,
+            planInputSha256: nil
+        ))
+        session.setHasUnappliedChanges(true)
+
+        model.discardProbeDraftSession()
+
+        #expect(session.name.isEmpty)
+        #expect(session.targetId.isEmpty)
+        #expect(session.depth.isEmpty)
+        #expect(session.axialRotation == "0")
+        #expect(session.pendingExplicitNewModel == nil)
+        #expect(session.synchronizedContext == nil)
+        #expect(!session.hasUnappliedChanges)
+        #expect(!model.hasPendingPlanChanges)
+    }
+
+    @MainActor
+    @Test("Model save and open calls cannot bypass an unapplied probe draft")
+    func projectOperationsFailClosedForDraft() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        model.probeDraftSession.name = "Immediate unapplied edit"
+        #expect(model.hasPendingPlanChanges)
+
+        let destination = URL(fileURLWithPath: "/tmp/unreachable.mouseplan")
+        #expect(!(await model.saveProject(to: destination)))
+        #expect(
+            model.projectOperationError
+                == "Apply or revert the probe draft before saving the animal plan."
+        )
+        #expect(!(await model.openProject(at: destination)))
+        #expect(
+            model.projectOperationError
+                == "Discard the probe draft before opening another animal plan."
+        )
+        #expect(model.probeDraftSession.name == "Immediate unapplied edit")
+        #expect(model.hasPendingPlanChanges)
+    }
+
+    @MainActor
+    @Test("A direct reconnect cannot bypass explicit probe-draft discard")
+    func reconnectFailsClosedForDraft() async {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        model.probeDraftSession.name = "Discard on reconnect"
+        #expect(model.hasPendingPlanChanges)
+
+        await model.reconnect()
+
+        #expect(model.probeDraftSession.name == "Discard on reconnect")
+        #expect(model.hasUnappliedProbeDraftChanges)
+        #expect(model.hasPendingPlanChanges)
+        #expect(
+            model.projectOperationError
+                == "Discard the probe draft before reconnecting the planning service."
+        )
+
+        model.discardProbeDraftSession()
+        await model.reconnect()
+
+        #expect(model.probeDraftSession.name.isEmpty)
+        #expect(!model.hasUnappliedProbeDraftChanges)
+    }
+
+    @Test("Context changes replace only clean drafts")
+    func draftContextSynchronization() {
+        let old = ProbeDraftContext(
+            projectId: "project-1",
+            planId: "plan-1",
+            planInputSha256: "input-1"
+        )
+        let updated = ProbeDraftContext(
+            projectId: "project-1",
+            planId: "plan-1",
+            planInputSha256: "input-2"
+        )
+        #expect(!ProbeDraftSynchronizationPolicy.shouldReplaceDraft(
+            existingContext: old,
+            incomingContext: old,
+            hasUnappliedChanges: true
+        ))
+        #expect(!ProbeDraftSynchronizationPolicy.shouldReplaceDraft(
+            existingContext: old,
+            incomingContext: updated,
+            hasUnappliedChanges: true
+        ))
+        #expect(ProbeDraftSynchronizationPolicy.shouldReplaceDraft(
+            existingContext: old,
+            incomingContext: updated,
+            hasUnappliedChanges: false
+        ))
+        #expect(ProbeDraftSynchronizationPolicy.shouldReplaceDraft(
+            existingContext: nil,
+            incomingContext: updated,
+            hasUnappliedChanges: false
+        ))
+    }
+
     @Test("Saved-plan target survives asynchronous project and target loading")
     func savedPlanTargetSynchronization() {
         #expect(ProbeDraftSelectionPolicy.targetId(
@@ -245,6 +554,72 @@ struct ProbeCreationWorkflowTests {
             axialRotation: axialRotation,
             requiresAcknowledgement: requiresAcknowledgement,
             acknowledgementGiven: acknowledgementGiven
+        )
+    }
+
+    private func draft(
+        modelId: String = ProbePlanningContract.neuropixels2SingleShankModelId,
+        modelVersion: String = ProbePlanningContract.neuropixels2ModelVersion,
+        name: String = "NPX2 left V1",
+        targetId: String = "target-1",
+        mode: ProbePlacementMode = .stereotaxicTargetManipulator,
+        entryAP: String = "",
+        entryML: String = "",
+        entryDV: String = "",
+        azimuth: String = "0",
+        elevation: String = "-90",
+        depth: String = "3",
+        axialRotation: String = "0",
+        requiresAcknowledgement: Bool = true,
+        acknowledgementGiven: Bool = true
+    ) -> ProbeEditableDraftSnapshot? {
+        ProbeDraftComparisonPolicy.snapshot(
+            modelId: modelId,
+            modelVersion: modelVersion,
+            name: name,
+            targetId: targetId,
+            mode: mode,
+            entryAP: entryAP,
+            entryML: entryML,
+            entryDV: entryDV,
+            azimuth: azimuth,
+            elevation: elevation,
+            depth: depth,
+            axialRotation: axialRotation,
+            requiresAcknowledgement: requiresAcknowledgement,
+            acknowledgementGiven: acknowledgementGiven
+        )
+    }
+
+    private func newDraft(
+        modelId: String? = ProbePlanningContract.neuropixels2SingleShankModelId,
+        modelVersion: String? = ProbePlanningContract.neuropixels2ModelVersion,
+        name: String = "NPX2 1-shank · V1",
+        targetId: String = "target-1",
+        mode: ProbePlacementMode = .stereotaxicTargetManipulator,
+        entryAP: String = "",
+        entryML: String = "",
+        entryDV: String = "",
+        azimuth: String = "",
+        elevation: String = "",
+        depth: String = "",
+        axialRotation: String = "0",
+        geometryAcknowledged: Bool = false
+    ) -> ProbeNewDraftSnapshot {
+        ProbeDraftComparisonPolicy.newDraftSnapshot(
+            modelId: modelId,
+            modelVersion: modelVersion,
+            name: name,
+            targetId: targetId,
+            mode: mode,
+            entryAP: entryAP,
+            entryML: entryML,
+            entryDV: entryDV,
+            azimuth: azimuth,
+            elevation: elevation,
+            depth: depth,
+            axialRotation: axialRotation,
+            geometryAcknowledged: geometryAcknowledged
         )
     }
 }

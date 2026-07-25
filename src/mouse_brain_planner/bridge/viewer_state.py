@@ -7,8 +7,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
-from pydantic import ValidationError
-
 from mouse_brain_planner.atlas.brainglobe_adapter import AtlasAdapterError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
 from mouse_brain_planner.bridge.atlas_interaction import (
@@ -35,6 +33,7 @@ from mouse_brain_planner.domain.project_models import (
     ViewerRegionSelection,
     ViewerSliceDepths,
     utc_now,
+    validate_viewer_state_semantics,
 )
 from mouse_brain_planner.rendering.slice_renderer import SliceOrientation, SliceRenderer
 
@@ -132,6 +131,7 @@ class ViewerStateBridge:
         region = _region_at(atlas, point)
         updated = _validated_project_update(
             project,
+            viewer_slice_depths=depths,
             viewer_region_selection=ViewerRegionSelection(
                 orientation=orientation.value,
                 index=slice_index,
@@ -388,17 +388,47 @@ def _project_with_slice(
     )
 
 
-def _validated_project_update(project: PlannerProject, **updates: object) -> PlannerProject:
-    payload = project.model_dump(mode="python")
-    payload.update(updates)
-    payload["modified_at"] = utc_now()
+def _validated_project_update(
+    project: PlannerProject,
+    *,
+    viewer_slice_depths: ViewerSliceDepths,
+    viewer_region_selection: ViewerRegionSelection | None,
+    selected_region_id: int | None,
+) -> PlannerProject:
+    """Copy only validated viewer fields while preserving the trusted project graph.
+
+    A project entering a viewer handler has already passed full validation at
+    creation/load or at its last surgery-plan mutation. Re-serializing that
+    unchanged graph here would needlessly reconstruct every persisted trajectory.
+    Save/load, probe mutation, analysis, and export retain their full semantic
+    validation boundaries.
+    """
+
     try:
-        return PlannerProject.model_validate(payload)
-    except ValidationError as error:
+        if selected_region_id is not None and (
+            isinstance(selected_region_id, bool)
+            or not isinstance(selected_region_id, int)
+            or selected_region_id <= 0
+        ):
+            raise ValueError("selected region ID must be a positive integer")
+        validate_viewer_state_semantics(
+            atlas=project.atlas,
+            slice_depths=viewer_slice_depths,
+            region_selection=viewer_region_selection,
+        )
+        return project.model_copy(
+            update={
+                "viewer_slice_depths": viewer_slice_depths,
+                "viewer_region_selection": viewer_region_selection,
+                "selected_region_id": selected_region_id,
+                "modified_at": utc_now(),
+            }
+        )
+    except (TypeError, ValueError) as error:
         raise BridgeError(
             "PROJECT_STATE_INVALID",
             "The viewer mutation would create an invalid project state.",
-            details={"validationErrors": error.error_count()},
+            details={"validationErrors": 1, "reason": str(error)},
         ) from error
 
 

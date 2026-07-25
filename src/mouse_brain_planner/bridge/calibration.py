@@ -12,12 +12,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Final
 from uuid import UUID
 
-import numpy as np
 from pydantic import ValidationError
 
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
@@ -61,6 +60,9 @@ from mouse_brain_planner.domain.transform_models import (
     CoordinateSystemKind,
     LandmarkCorrespondence3D,
     TransformMethod,
+)
+from mouse_brain_planner.surgery.calibration_validation import (
+    validate_atlas_registered_calibration_reproducibility,
 )
 from mouse_brain_planner.surgery.stereotaxy import (
     StereotaxicCalibrationError,
@@ -246,6 +248,7 @@ class CalibrationBridge:
                 atlas_transform=atlas_transform,
                 atlas_metadata_sha256=atlas.metadata_sha256,
             )
+            validate_atlas_registered_calibration_reproducibility(calibration)
             updated = _project_update(
                 project,
                 calibrations=[*project.calibrations, calibration],
@@ -323,7 +326,7 @@ class CalibrationBridge:
         project = self._validated_project(params["projectId"])
         calibration = _find_calibration(project, params["calibrationId"])
         try:
-            _refit_and_compare(calibration)
+            validate_atlas_registered_calibration_reproducibility(calibration)
         except (
             StereotaxicCalibrationError,
             TransformValidationError,
@@ -699,6 +702,47 @@ def _parse_create_input(
         raise BridgeError(
             "CALIBRATION_LATERALITY_MISMATCH",
             "Atlas right-skull ML must be closer to the right origin than left-skull ML.",
+        )
+    atlas_midline_ml_um = atlas.midline_ml_um
+    half_ml_voxel_um = atlas.resolution_um[2] / 2.0
+    floating_tolerance_um = max(1e-9, math.ulp(atlas_midline_ml_um))
+    midline_alignment_tolerance_um = half_ml_voxel_um + floating_tolerance_um
+    off_midline = {
+        label: point.ml_um
+        for label, point in (
+            ("bregma", atlas_points["bregma"]),
+            ("lambdaPoint", atlas_points["lambda"]),
+        )
+        if abs(point.ml_um - atlas_midline_ml_um) > midline_alignment_tolerance_um
+    }
+    if off_midline:
+        raise BridgeError(
+            "CALIBRATION_ATLAS_MIDLINE_MISMATCH",
+            "Atlas bregma and lambda must lie on the atlas midsagittal plane "
+            "(within half one ML voxel). Re-select both landmarks at the atlas midline.",
+            details={
+                "atlasMidlineMlMicrometres": atlas_midline_ml_um,
+                "halfMlVoxelToleranceMicrometres": half_ml_voxel_um,
+                "offMidlineLandmarks": off_midline,
+            },
+        )
+    right_limit_um = atlas_midline_ml_um - half_ml_voxel_um
+    left_limit_um = atlas_midline_ml_um + half_ml_voxel_um
+    if (
+        atlas_points["right-skull"].ml_um > right_limit_um + floating_tolerance_um
+        or atlas_points["left-skull"].ml_um < left_limit_um - floating_tolerance_um
+    ):
+        raise BridgeError(
+            "CALIBRATION_ATLAS_MIDLINE_MISMATCH",
+            "Atlas right-skull and left-skull landmarks must straddle the atlas midline, "
+            "with each landmark at least half one ML voxel from it. "
+            "Re-select the landmarks on their named hemispheres.",
+            details={
+                "atlasMidlineMlMicrometres": atlas_midline_ml_um,
+                "minimumLateralSeparationMicrometres": half_ml_voxel_um,
+                "rightSkullMlMicrometres": atlas_points["right-skull"].ml_um,
+                "leftSkullMlMicrometres": atlas_points["left-skull"].ml_um,
+            },
         )
     atlas_landmarks: list[_AtlasLandmarkInput] = [
         _AtlasLandmarkInput(
@@ -1131,70 +1175,6 @@ def _effective_qc_messages(calibration: AtlasRegisteredCalibration) -> tuple[str
     else:
         messages.append("PASS: atlas landmark RMS residual is below the configured warning limit")
     return tuple(messages)
-
-
-def _refit_and_compare(calibration: AtlasRegisteredCalibration) -> None:
-    skull = calibration.skull_calibration
-    rebuilt_skull = calibrate_skull_landmarks(
-        context=skull.context,
-        profile_id=skull.profile_id,
-        source_frame=skull.source_frame,
-        landmarks=skull.landmarks,
-        dv_reference=skull.dv_reference,
-        dv_reference_description=skull.dv_reference_description,
-        quality_limits=skull.quality_limits,
-        limits_source=skull.qc.limits_source,
-        version=calibration.calibration_version,
-        notes=skull.notes,
-    )
-    _require_same_fit(
-        rebuilt_skull.transform.matrix_row_major,
-        skull.transform.matrix_row_major,
-        "skull transform",
-    )
-    if rebuilt_skull.qc.model_dump(mode="json") != skull.qc.model_dump(mode="json"):
-        raise ValueError("skull calibration QC does not reproduce from stored landmarks")
-    transform = calibration.atlas_transform
-    rebuilt_atlas = fit_anatomical_transform(
-        source_frame=transform.source_frame,
-        destination_frame=transform.destination_frame,
-        landmarks=transform.landmarks,
-        method=transform.method,
-        version=transform.version,
-        affine_distortion_acknowledged=transform.affine_distortion_acknowledged,
-        notes=transform.notes,
-    )
-    _require_same_fit(
-        rebuilt_atlas.matrix_row_major,
-        transform.matrix_row_major,
-        "atlas transform",
-    )
-    if not math.isclose(
-        rebuilt_atlas.rms_residual_um,
-        transform.rms_residual_um,
-        rel_tol=1e-12,
-        abs_tol=1e-8,
-    ) or not math.isclose(
-        rebuilt_atlas.max_residual_um,
-        transform.max_residual_um,
-        rel_tol=1e-12,
-        abs_tol=1e-8,
-    ):
-        raise ValueError("atlas calibration residuals do not reproduce from stored landmarks")
-
-
-def _require_same_fit(
-    actual: Sequence[float],
-    expected: Sequence[float],
-    label: str,
-) -> None:
-    if not np.allclose(
-        np.asarray(actual, dtype=np.float64),
-        np.asarray(expected, dtype=np.float64),
-        rtol=1e-12,
-        atol=1e-8,
-    ):
-        raise ValueError(f"{label} matrix does not reproduce from stored landmarks")
 
 
 def _calibration_digest(calibration: AtlasRegisteredCalibration) -> str:

@@ -18,16 +18,16 @@ release or a validation claim.
 | Capability | Current development behavior |
 | --- | --- |
 | Atlas | BrainGlobe `allen_mouse_25um` package `1.2` only; 10 µm is excluded from this testing phase |
-| Slice navigation | One full-size coronal, sagittal, or horizontal view; each retains an independent depth with buttons, slider, wheel, pan, and zoom |
+| Slice navigation | One full-size coronal, sagittal, or horizontal view; each retains an independent depth with buttons, an editable one-based slice number, slider, wheel, pan, and zoom; the header labels its atlas-native physical coordinate |
 | Region inspection | Complete 840-structure Allen ontology search/browse; clicking replaces one shared selection without changing any slice depth |
 | Dorsal | Atlas surface with the displayed implant site, selected probe AP/ML projection, and display-only major vessels |
 | 3D | Native SceneKit brain mesh with camera control, atlas-region picking, displayed implant site, probes, and major-vessel tubes |
-| Stereotaxy | Required subject identity; signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC and guarded target projection |
-| Probes | NPX2 1-shank or 4-shank only; selected implant site, plan name, azimuth/elevation/depth/roll, and slice/3D overlays |
+| Stereotaxy | Required subject identity; signed AP/ML/DV implant sites from bregma; subject calibration CRUD/QC, AP ordering, atlas-midline/laterality checks, and full persisted-fit reproduction before projection |
+| Probes | NPX2 1-shank or 4-shank only; exact source-pinned model snapshots; selected implant site, plan name, azimuth/elevation/depth/roll, explicit Apply/Revert editing, and slice/3D overlays |
 | Vessels | VesSAP BL6J-no1 diameter-≥30 µm display reference overlaid in all five views; no capillary layer |
 | Surgery plan | Prefilled two-page protocol + selectable Dorsal/Coronal/Sagittal/Horizontal/3D planning pages + one coordinate-matched legacy atlas page |
 | Reference analysis | Unavailable: clearance calls fail closed with `VESSEL_ANALYSIS_UNAVAILABLE`; geometry remains display-only |
-| Persistence | Checksummed `.mouseplan` packages with revisions, provenance, migrations, and backup recovery |
+| Persistence | Schema-8 checksummed `.mouseplan` packages with revisions, provenance, migrations, backup recovery, calibration rederivation, and probe/model reprojection checks |
 
 Population vascular density and subject-image registration remain archived compatibility code and
 persisted data only. Their methods and capabilities are not registered by the primary bridge, they
@@ -46,9 +46,18 @@ Implant sites are entered in millimetres from bregma as named `[AP, ML, DV]` val
 
 For example, `AP -1.25`, `ML -0.70`, `DV -2.40` means 1.25 mm posterior, 0.70 mm left, and
 2.40 mm deep. BrainGlobe arrays use `[AP, DV, ML]` in micrometres, so conversion and projection
-remain centralized in Python. An unprojected entry stays unprojected until an explicit subject
-calibration passes QC; the Allen CCF does not provide one official bregma transform. See
-[Coordinate Systems](COORDINATE_SYSTEMS.md).
+remain centralized in Python. The coordinate shown above an atlas slice is explicitly labelled
+`Atlas AP`, `Atlas ML`, or `Atlas DV`; it is an Allen atlas physical coordinate, not the
+bregma-relative implant value in the sidebar. An unprojected entry stays unprojected until an
+explicit subject calibration passes QC; the Allen CCF does not provide one official bregma
+transform. See [Coordinate conventions](docs/ADR-002-coordinate-conventions.md).
+
+Calibration acceptance is not based on a self-contained record hash. Brain3D reruns both the
+skull-frame calibration and the skull-to-atlas fit from the stored measured landmarks, then
+compares the matrices, landmark correspondences and residuals, skull leveling angles, and skull
+QC. It also requires atlas bregma to remain anterior to lambda, both points to remain on the
+atlas midline within half one ML voxel, and the named lateral landmarks to remain on their
+respective sides.
 
 On Dorsal, Coronal, and Horizontal atlas images, animal right is the screen-left edge and animal
 left is the screen-right edge. Therefore a negative ML target appears on the screen-right,
@@ -59,6 +68,34 @@ New probe creation exposes one direct stereotaxic contract: select an implant si
 millimetres. Older project packages may retain one of the archived multi-mode placement records;
 Brain3D preserves those inputs for compatibility, but does not expose the extra modes when
 creating a new plan.
+
+Edits to an existing probe remain visibly unapplied until **Apply changes** is selected.
+**Revert** restores the last applied values. While that draft differs from the applied plan,
+Brain3D identifies the edits as unapplied, keeps the brain views and PDF bound to the last
+applied geometry, and blocks plan switching, saving, and PDF export so typed values cannot be
+mistaken for the operative overlay.
+
+A partially entered new probe is guarded too. Its automatically prepared defaults remain clean,
+but changing the NPX2 model or entering planning values marks an uncreated draft. Brain3D then
+requires **Create plan** or **Discard draft** before switching plans, saving, or export. Opening
+another project, reconnecting, or quitting requires the draft to be resolved or explicitly
+discarded through the destructive confirmation.
+
+There is one main planning window, and its probe draft is owned by the app-level planner model
+rather than by the sidebar view. Closing that window does not quit the app or clear a draft;
+reopening the same project/plan context restores the same typed values. A real project, plan, or
+saved plan-input change synchronizes the draft only after the dirty-state guard has been
+resolved.
+
+On project validation, Brain3D fully reconstructs planning-algorithm v2/v3 placements from the
+preserved mode, entry (when applicable), angles, depth, roll, probe model, source target, and
+calibration, then compares every physical geometry field. It therefore rejects translated or
+same-target alternate-angle geometry even if its record hash is recomputed. Historical v1
+records lack sufficient preserved inputs for this reconstruction: they remain loadable for
+review only and cannot enter 2D/3D planning overlays, PDF planning pages, or region analysis
+until updated. Vessel-clearance analysis remains unavailable for every plan version. Persistence
+schema 8 versions this fail-closed semantic contract; schema-7 geometry is never guessed or
+silently rewritten during migration.
 
 ## Probe geometry boundary
 
@@ -72,6 +109,13 @@ Quad Base, Neuropixels 1.0, and the synthetic fixture are not returned by the pr
 and cannot appear in the new-plan selector. Their exact definitions remain archived in code only
 for old-project compatibility and test evidence. Exact manufacturer, user-manual,
 electrode-mapping, ProbeTable, and SpikeGLX snapshots and SHA-256 digests are recorded.
+
+When a project is validated, a catalog-owned model snapshot must equal its source-pinned
+definition field for field. This includes identity/version, verification and provenance,
+shank dimensions and offsets, tip geometry, and the complete ordered recording-site table; a
+recomputed plan hash cannot legitimize a modified width, site, or source record. Unknown custom
+identities are retained only on the historical v1 audit path and cannot enter current planning
+geometry or analysis.
 
 All manufacturer models remain deliberately **`source-transcribed-review-pending`**. No
 independent human has reviewed every encoded coordinate against the cited sources or physical
@@ -119,6 +163,9 @@ a disconnected volume is reported instead of opening a chooser on every export. 
 implementation reads both PDFs directly, uses SceneKit for the 3D snapshot, and uses
 PDFKit/Core Graphics for overlays, assembly, and verification. It does not open Word,
 Illustrator, or another converter. Neither supplied PDF is copied into this public repository.
+Each planning page puts the complete AP/ML/DV text on its own fixed coordinate line, separate
+from the bounded subject/target identity. Brain3D verifies that full coordinate text and the
+expected view title on the rendered page and again in the ordered final packet.
 See
 [Surgery-plan export](docs/SURGERY_PLAN_EXPORT.md).
 
@@ -139,6 +186,11 @@ Python 3.12 scientific service
 Swift owns presentation. Python owns scientific coordinate conversion and analysis. Both paths
 reject stale revisions and mismatched source identities. See [Architecture](docs/ARCHITECTURE.md)
 and [ADR-004](docs/ADR-004-swiftui-hybrid-shell.md).
+
+Viewer-only slice and region-pick mutations validate their bounded viewer state and preserve the
+already validated surgery-plan graph, so moving a slice does not reconstruct every trajectory.
+Project create/open/save, calibration and probe mutation, analysis, and PDF export retain the
+full semantic-validation boundary.
 
 Pinpoint is the workflow reference, not an embedded state engine. Its hosted WebGL build does not
 expose a supported bidirectional contract for probe identity, coordinates, atlas/camera state, or

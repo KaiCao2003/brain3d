@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SurgeryPlanExportSheet: View {
     @ObservedObject var model: PlannerViewModel
+    let hasUnappliedProbeEdits: Bool
     @Environment(\.dismiss) private var dismiss
 
     @AppStorage(SurgeryPlanPDFPreferences.protocolTemplatePathKey)
@@ -34,8 +35,12 @@ struct SurgeryPlanExportSheet: View {
     @State private var exportError: String?
     @State private var exportedResult: SurgeryPlanExportResult?
 
-    init(model: PlannerViewModel) {
+    init(
+        model: PlannerViewModel,
+        hasUnappliedProbeEdits: Bool = false
+    ) {
         self.model = model
+        self.hasUnappliedProbeEdits = hasUnappliedProbeEdits
         let defaultTargetId = model.selectedProbePlan?.targetId
             ?? model.implantTargets.first?.targetId
             ?? ""
@@ -380,6 +385,9 @@ struct SurgeryPlanExportSheet: View {
     }
 
     private var blockingReason: String? {
+        guard !hasUnappliedProbeEdits else {
+            return "Apply or revert probe edits before exporting."
+        }
         guard model.backendState?.project != nil else {
             return "Open an animal plan first."
         }

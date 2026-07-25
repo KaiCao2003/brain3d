@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -24,15 +25,26 @@ from mouse_brain_planner.bridge.planning import (
     register_planning_handlers,
 )
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
+from mouse_brain_planner.coordinates.transforms import (
+    fit_anatomical_transform,
+    transform_point,
+)
 from mouse_brain_planner.domain.probe_models import NormalizedProbePlacement
 from mouse_brain_planner.domain.probe_plan_models import (
     LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
+    STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+    ProbePlacementMode,
     ProbePlanRecord,
     probe_plan_input_digest,
 )
 from mouse_brain_planner.domain.project_models import PlannerProject
 from mouse_brain_planner.domain.stereotaxy_models import AtlasRegisteredCalibration
-from mouse_brain_planner.domain.transform_models import AnatomicalTransform, TransformMethod
+from mouse_brain_planner.domain.transform_models import (
+    AnatomicalPoint,
+    AnatomicalTransform,
+    LandmarkCorrespondence3D,
+    TransformMethod,
+)
 from mouse_brain_planner.persistence.project_io import (
     CHECKSUMS_FILENAME,
     PROJECT_FILENAME,
@@ -49,6 +61,7 @@ from mouse_brain_planner.probes.catalog import (
     NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
     NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
 )
+from mouse_brain_planner.surgery.probe_planning import build_calibrated_probe_plan
 
 
 @pytest.mark.parametrize(
@@ -201,6 +214,184 @@ def _create_plan(
         insertionDepthMicrometres=4,
         axialRotationDegrees=0,
         customGeometryAcknowledged=True,
+    )
+
+
+def _translated_rehashed_plan(
+    plan: ProbePlanRecord,
+    *,
+    ap_delta_um: float = 0.25,
+) -> ProbePlanRecord:
+    placement_payload = plan.placement.model_dump(mode="python")
+    for field in ("entry", "target", "tip", "skull_entry", "brain_entry"):
+        raw_point = placement_payload[field]
+        if raw_point is None:
+            continue
+        point = dict(raw_point)
+        point["ap_um"] = float(point["ap_um"]) + ap_delta_um
+        placement_payload[field] = point
+    translated_placement = NormalizedProbePlacement.model_validate(placement_payload)
+    return _plan_with_rehashed_placement(plan, translated_placement)
+
+
+def _plan_with_rehashed_placement(
+    plan: ProbePlanRecord,
+    placement: NormalizedProbePlacement,
+) -> ProbePlanRecord:
+    input_sha256 = probe_plan_input_digest(
+        plan_uuid=plan.plan_uuid,
+        plan_version=plan.plan_version,
+        name=plan.name,
+        source_target=plan.source_target,
+        probe_model=plan.probe_model,
+        manipulator_input=plan.manipulator_input,
+        placement_input=plan.placement_input,
+        placement=placement,
+        calibration_uuid=plan.calibration_uuid,
+        calibration_version=plan.calibration_version,
+        calibration_sha256=plan.calibration_sha256,
+        atlas_metadata_sha256=plan.atlas_metadata_sha256,
+        projection_sha256=plan.projection_sha256,
+        planning_algorithm_version=plan.planning_algorithm_version,
+    )
+    payload = plan.model_dump(mode="python")
+    payload.update(placement=placement, input_sha256=input_sha256)
+    return ProbePlanRecord.model_validate(payload)
+
+
+def _wider_model_rehashed_plan(plan: ProbePlanRecord) -> ProbePlanRecord:
+    shanks = list(plan.probe_model.shanks)
+    shanks[0] = shanks[0].model_copy(update={"width_um": 700})
+    forged_model = plan.probe_model.model_copy(update={"shanks": tuple(shanks)})
+    input_sha256 = probe_plan_input_digest(
+        plan_uuid=plan.plan_uuid,
+        plan_version=plan.plan_version,
+        name=plan.name,
+        source_target=plan.source_target,
+        probe_model=forged_model,
+        manipulator_input=plan.manipulator_input,
+        placement_input=plan.placement_input,
+        placement=plan.placement,
+        calibration_uuid=plan.calibration_uuid,
+        calibration_version=plan.calibration_version,
+        calibration_sha256=plan.calibration_sha256,
+        atlas_metadata_sha256=plan.atlas_metadata_sha256,
+        projection_sha256=plan.projection_sha256,
+        planning_algorithm_version=plan.planning_algorithm_version,
+    )
+    payload = plan.model_dump(mode="python")
+    payload.update(probe_model=forged_model, input_sha256=input_sha256)
+    return ProbePlanRecord.model_validate(payload)
+
+
+def _as_v2_plan(plan: ProbePlanRecord) -> ProbePlanRecord:
+    assert plan.manipulator_input is not None
+    input_sha256 = probe_plan_input_digest(
+        plan_uuid=plan.plan_uuid,
+        plan_version=plan.plan_version,
+        name=plan.name,
+        source_target=plan.source_target,
+        probe_model=plan.probe_model,
+        manipulator_input=plan.manipulator_input,
+        placement=plan.placement,
+        calibration_uuid=plan.calibration_uuid,
+        calibration_version=plan.calibration_version,
+        calibration_sha256=plan.calibration_sha256,
+        atlas_metadata_sha256=plan.atlas_metadata_sha256,
+        projection_sha256=plan.projection_sha256,
+        planning_algorithm_version=STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+    )
+    payload = plan.model_dump(mode="python")
+    payload.update(
+        placement_input=None,
+        planning_algorithm_version=STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+        input_sha256=input_sha256,
+    )
+    return ProbePlanRecord.model_validate(payload)
+
+
+def _as_v1_plan(plan: ProbePlanRecord) -> ProbePlanRecord:
+    assert plan.placement.method.value == "target-plus-angles-depth"
+    placement_payload = plan.placement.model_dump(mode="python")
+    placement_payload.pop("local_lateral_direction")
+    placement_payload.pop("local_normal_direction")
+    placement_payload.pop("model_to_placement_uniform_scale")
+    legacy_placement = NormalizedProbePlacement.model_validate(placement_payload)
+    input_sha256 = probe_plan_input_digest(
+        plan_uuid=plan.plan_uuid,
+        plan_version=plan.plan_version,
+        name=plan.name,
+        source_target=plan.source_target,
+        probe_model=plan.probe_model,
+        placement=legacy_placement,
+        calibration_uuid=plan.calibration_uuid,
+        calibration_version=plan.calibration_version,
+        calibration_sha256=plan.calibration_sha256,
+        atlas_metadata_sha256=plan.atlas_metadata_sha256,
+        projection_sha256=plan.projection_sha256,
+        planning_algorithm_version=LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
+    )
+    payload = plan.model_dump(mode="python")
+    payload.update(
+        placement=legacy_placement,
+        placement_input=None,
+        manipulator_input=None,
+        planning_algorithm_version=LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
+        input_sha256=input_sha256,
+    )
+    return ProbePlanRecord.model_validate(payload)
+
+
+def _same_target_alternate_trajectory_rehashed_plan(
+    project: PlannerProject,
+    plan: ProbePlanRecord,
+) -> ProbePlanRecord:
+    assert project.atlas is not None
+    target = next(
+        item
+        for item in project.unprojected_bregma_targets
+        if item.target_uuid == plan.source_target.target_uuid
+    )
+    calibration = next(
+        item for item in project.calibrations if item.calibration_uuid == plan.calibration_uuid
+    )
+    alternate, _ = build_calibrated_probe_plan(
+        target=target,
+        calibration=calibration,
+        atlas=project.atlas,
+        model=plan.probe_model,
+        name=plan.name,
+        azimuth_deg=45,
+        elevation_deg=-70,
+        insertion_depth_um=4,
+        axial_rotation_deg=plan.placement.axial_rotation_deg,
+        custom_geometry_acknowledged=plan.placement.custom_geometry_acknowledged,
+        placement_mode=ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR,
+    )
+    placement_payload = alternate.placement.model_dump(mode="python")
+    placement_payload.update(
+        placement_uuid=plan.placement.placement_uuid,
+        selected_site_ids=plan.placement.selected_site_ids,
+        visible=plan.placement.visible,
+        display_opacity=plan.placement.display_opacity,
+        notes=plan.placement.notes,
+    )
+    alternate_placement = NormalizedProbePlacement.model_validate(placement_payload)
+    assert alternate_placement.target == plan.placement.target
+    assert alternate_placement.entry != plan.placement.entry
+    return _plan_with_rehashed_placement(plan, alternate_placement)
+
+
+def _rewrite_project_json(package: Path, payload: dict[str, object]) -> None:
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    (package / PROJECT_FILENAME).write_bytes(encoded)
+    checksums_path = package / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[PROJECT_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(
+        json.dumps(checksums, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
     )
 
 
@@ -366,12 +557,26 @@ def _calibration_with_changed_snapshot(
 def _unacknowledged_affine_calibration(
     calibration: AtlasRegisteredCalibration,
 ) -> AtlasRegisteredCalibration:
-    affine = AnatomicalTransform.model_validate(
-        {
-            **calibration.atlas_transform.model_dump(mode="python"),
-            "method": TransformMethod.AFFINE,
-            "affine_distortion_acknowledged": False,
-        }
+    original = calibration.atlas_transform
+    volume_source = AnatomicalPoint(
+        frame_id=original.source_frame.frame_id,
+        ap_um=0,
+        ml_um=0,
+        dv_um=1,
+    )
+    volume_landmark = LandmarkCorrespondence3D(
+        label="affine-volume-control",
+        source=volume_source,
+        destination=transform_point(original, volume_source),
+    )
+    affine = fit_anatomical_transform(
+        source_frame=original.source_frame,
+        destination_frame=original.destination_frame,
+        landmarks=(*original.landmarks, volume_landmark),
+        method=TransformMethod.AFFINE,
+        version=original.version,
+        affine_distortion_acknowledged=False,
+        notes=original.notes,
     )
     return AtlasRegisteredCalibration.model_validate(
         {
@@ -419,6 +624,348 @@ def test_project_rejects_probe_plan_with_missing_or_changed_source_target(
         PlannerProject.model_validate(payload)
 
 
+def test_schema_seven_project_load_rejects_translated_probe_geometry_with_recomputed_self_hash(
+    tmp_path: Path,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    stored = session.project.probe_plans[0]
+    forged = _translated_rehashed_plan(stored)
+    assert forged.input_sha256 != stored.input_sha256
+    assert forged.placement.target != stored.placement.target
+
+    package = save_project(session.project, tmp_path / "translated-rehashed-plan")
+    payload = json.loads((package / PROJECT_FILENAME).read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    payload["probe_plans"] = [forged.model_dump(mode="json")]
+    _rewrite_project_json(package, payload)
+
+    with pytest.raises(
+        ValueError,
+        match="placement target does not match the calibrated source target",
+    ):
+        load_project(package, recover_backup=False)
+
+
+def test_schema_seven_project_load_accepts_exact_canonical_probe_model_snapshot(
+    tmp_path: Path,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    canonical_model = session.project.probe_plans[0].probe_model
+
+    package = save_project(session.project, tmp_path / "canonical-schema-seven-plan")
+    payload = json.loads((package / PROJECT_FILENAME).read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    _rewrite_project_json(package, payload)
+
+    restored = load_project(package, recover_backup=False)
+
+    assert restored.schema_version == 8
+    assert restored.probe_plans[0].probe_model == canonical_model
+
+
+def test_schema_seven_project_load_rejects_wider_probe_model_with_recomputed_self_hash(
+    tmp_path: Path,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    original = session.project.probe_plans[0]
+    forged = _wider_model_rehashed_plan(original)
+    assert forged.probe_model.shanks[0].width_um == 700
+    assert forged.input_sha256 != original.input_sha256
+
+    package = save_project(session.project, tmp_path / "wider-rehashed-schema-seven-plan")
+    payload = json.loads((package / PROJECT_FILENAME).read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    payload["probe_plans"] = [forged.model_dump(mode="json")]
+    _rewrite_project_json(package, payload)
+
+    with pytest.raises(ValueError, match="does not exactly match the source-pinned catalog"):
+        load_project(package, recover_backup=False)
+
+
+def test_region_analysis_rejects_translated_rehashed_geometry_without_mutation() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    forged = _translated_rehashed_plan(session.project.probe_plans[0])
+    session.project.probe_plans[0] = forged
+    revision_before = session.project_revision
+    events_before = tuple(session.project.event_log)
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "probe.region.analyze",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before,
+            planId=str(forged.plan_uuid),
+            expectedPlanInputSha256=forged.input_sha256,
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "placement target does not match" in rejection.value.details["reason"]
+    assert session.project_revision == revision_before
+    assert tuple(session.project.event_log) == events_before
+    assert session.project.probe_region_analyses == []
+
+
+def test_region_analysis_rejects_rehashed_probe_model_geometry_without_mutation() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    forged = _wider_model_rehashed_plan(session.project.probe_plans[0])
+    session.project.probe_plans[0] = forged
+    revision_before = session.project_revision
+    events_before = tuple(session.project.event_log)
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "probe.region.analyze",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before,
+            planId=str(forged.plan_uuid),
+            expectedPlanInputSha256=forged.input_sha256,
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "does not exactly match the source-pinned catalog" in rejection.value.details["reason"]
+    assert session.project_revision == revision_before
+    assert tuple(session.project.event_log) == events_before
+    assert session.project.probe_region_analyses == []
+
+
+@pytest.mark.parametrize("algorithm", ("v2", "v3"))
+def test_schema_seven_project_load_rejects_same_target_alternate_trajectory_with_original_inputs(
+    tmp_path: Path,
+    algorithm: str,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    original = session.project.probe_plans[0]
+    if algorithm == "v2":
+        original = _as_v2_plan(original)
+        valid_payload = session.project.model_dump(mode="python")
+        valid_payload["probe_plans"] = [original.model_dump(mode="python")]
+        valid_project = PlannerProject.model_validate(valid_payload)
+    else:
+        valid_project = session.project
+    forged = _same_target_alternate_trajectory_rehashed_plan(valid_project, original)
+
+    # The old target-only boundary and the record's internal hash both pass:
+    # source target, projected target, projection digest, and raw inputs are unchanged.
+    assert forged.source_target == original.source_target
+    assert forged.placement.target == original.placement.target
+    assert forged.projection_sha256 == original.projection_sha256
+    assert forged.placement_input == original.placement_input
+    assert forged.manipulator_input == original.manipulator_input
+    assert forged.input_sha256 != original.input_sha256
+
+    package = save_project(valid_project, tmp_path / f"alternate-trajectory-{algorithm}")
+    payload = json.loads((package / PROJECT_FILENAME).read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    payload["probe_plans"] = [forged.model_dump(mode="json")]
+    _rewrite_project_json(package, payload)
+
+    with pytest.raises(
+        ValueError,
+        match="placement geometry does not match preserved planning inputs",
+    ):
+        load_project(package, recover_backup=False)
+
+
+def test_region_analysis_rejects_same_target_alternate_trajectory_without_mutation() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    original = session.project.probe_plans[0]
+    forged = _same_target_alternate_trajectory_rehashed_plan(session.project, original)
+    session.project.probe_plans[0] = forged
+    revision_before = session.project_revision
+    events_before = tuple(session.project.event_log)
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "probe.region.analyze",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before,
+            planId=str(forged.plan_uuid),
+            expectedPlanInputSha256=forged.input_sha256,
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "placement geometry does not match" in rejection.value.details["reason"]
+    assert session.project_revision == revision_before
+    assert tuple(session.project.event_log) == events_before
+    assert session.project.probe_region_analyses == []
+
+
+def test_region_export_rejects_same_target_alternate_trajectory_without_mutation() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    created = _create_plan(dispatcher, session, target_id)
+    plan_payload = created["plan"]
+    assert isinstance(plan_payload, dict)
+    assert session.project is not None
+    _call(
+        dispatcher,
+        "probe.region.analyze",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        planId=plan_payload["planId"],
+        expectedPlanInputSha256=plan_payload["inputSha256"],
+    )
+    original = session.project.probe_plans[0]
+    forged = _same_target_alternate_trajectory_rehashed_plan(session.project, original)
+    session.project.probe_plans[0] = forged
+    revision_before = session.project_revision
+    events_before = tuple(session.project.event_log)
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "probe.region.export",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before,
+            planId=str(forged.plan_uuid),
+            expectedPlanInputSha256=forged.input_sha256,
+            format="json",
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "placement geometry does not match" in rejection.value.details["reason"]
+    assert session.project_revision == revision_before
+    assert tuple(session.project.event_log) == events_before
+
+
+def test_region_export_rejects_rehashed_probe_model_geometry_without_mutation() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    created = _create_plan(dispatcher, session, target_id)
+    plan_payload = created["plan"]
+    assert isinstance(plan_payload, dict)
+    assert session.project is not None
+    _call(
+        dispatcher,
+        "probe.region.analyze",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        planId=plan_payload["planId"],
+        expectedPlanInputSha256=plan_payload["inputSha256"],
+    )
+    forged = _wider_model_rehashed_plan(session.project.probe_plans[0])
+    session.project.probe_plans[0] = forged
+    revision_before = session.project_revision
+    events_before = tuple(session.project.event_log)
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "probe.region.export",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=revision_before,
+            planId=str(forged.plan_uuid),
+            expectedPlanInputSha256=forged.input_sha256,
+            format="json",
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "does not exactly match the source-pinned catalog" in rejection.value.details["reason"]
+    assert session.project_revision == revision_before
+    assert tuple(session.project.event_log) == events_before
+
+
+def test_project_rejects_rehashed_forged_target_projection_digest() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    stored = session.project.probe_plans[0]
+    forged_projection_sha256 = "f" * 64
+    assert forged_projection_sha256 != stored.projection_sha256
+    forged_input_sha256 = probe_plan_input_digest(
+        plan_uuid=stored.plan_uuid,
+        plan_version=stored.plan_version,
+        name=stored.name,
+        source_target=stored.source_target,
+        probe_model=stored.probe_model,
+        manipulator_input=stored.manipulator_input,
+        placement_input=stored.placement_input,
+        placement=stored.placement,
+        calibration_uuid=stored.calibration_uuid,
+        calibration_version=stored.calibration_version,
+        calibration_sha256=stored.calibration_sha256,
+        atlas_metadata_sha256=stored.atlas_metadata_sha256,
+        projection_sha256=forged_projection_sha256,
+        planning_algorithm_version=stored.planning_algorithm_version,
+    )
+    plan_payload = stored.model_dump(mode="python")
+    plan_payload.update(
+        projection_sha256=forged_projection_sha256,
+        input_sha256=forged_input_sha256,
+    )
+    forged = ProbePlanRecord.model_validate(plan_payload)
+    project_payload = session.project.model_dump(mode="python")
+    project_payload["probe_plans"] = [forged.model_dump(mode="python")]
+
+    with pytest.raises(
+        ValueError,
+        match="projection digest does not match the calibrated source target",
+    ):
+        PlannerProject.model_validate(project_payload)
+
+
+@pytest.mark.parametrize(
+    ("landmark_label", "canonical_ml_um", "expected"),
+    (
+        (
+            "bregma",
+            -2.0,
+            "bregma and lambda must lie within half one ML voxel",
+        ),
+        (
+            "right-skull",
+            -3.75,
+            "right-skull and left-skull landmarks must lie at least half one ML voxel",
+        ),
+    ),
+)
+def test_schema_seven_project_load_rejects_forged_calibration_atlas_midline_semantics(
+    tmp_path: Path,
+    landmark_label: str,
+    canonical_ml_um: float,
+    expected: str,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    _calibrated_target(dispatcher, session)
+    assert session.project is not None
+    package = save_project(session.project, tmp_path / f"legacy-{landmark_label}")
+    payload = json.loads((package / PROJECT_FILENAME).read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    calibration = payload["calibrations"][0]
+    landmarks = calibration["atlas_transform"]["landmarks"]
+    landmark = next(item for item in landmarks if item["label"] == landmark_label)
+    landmark["destination"]["ml_um"] = canonical_ml_um
+    _rewrite_project_json(package, payload)
+
+    with pytest.raises(ValueError, match=expected):
+        load_project(package, recover_backup=False)
+
+
 def test_schema_six_package_with_deleted_plan_target_reopens_by_restoring_snapshot(
     tmp_path: Path,
 ) -> None:
@@ -445,7 +992,7 @@ def test_schema_six_package_with_deleted_plan_target_reopens_by_restoring_snapsh
 
     reopened = load_project(package, recover_backup=False)
 
-    assert reopened.schema_version == 7
+    assert reopened.schema_version == 8
     assert reopened.unprojected_bregma_targets == [source_target]
     assert reopened.probe_plans[0].source_target == source_target
 
@@ -987,9 +1534,9 @@ def test_np2_bridge_basis_reconstructs_every_scaled_shank_and_site(
     angle = np.deg2rad(30)
     rotation = np.asarray(
         (
-            (np.cos(angle), -np.sin(angle), 0),
-            (np.sin(angle), np.cos(angle), 0),
-            (0, 0, 1),
+            (1, 0, 0),
+            (0, np.cos(angle), -np.sin(angle)),
+            (0, np.sin(angle), np.cos(angle)),
         ),
         dtype=np.float64,
     )
@@ -1063,47 +1610,43 @@ def test_np2_bridge_basis_reconstructs_every_scaled_shank_and_site(
         catalog_model,
         expected_scale=scale,
     )
+    assert session.project is not None
+    v2_plan = _as_v2_plan(session.project.probe_plans[0])
+    v2_payload = session.project.model_dump(mode="python")
+    v2_payload["probe_plans"] = [v2_plan.model_dump(mode="python")]
+    restored_v2 = PlannerProject.model_validate(v2_payload)
+    assert restored_v2.probe_plans == [v2_plan]
 
 
 def test_legacy_null_stored_axes_are_resolved_by_the_plan_detail_contract() -> None:
     dispatcher, session = _probe_dispatcher()
     target_id = _calibrated_target(dispatcher, session)
-    created = _create_plan(dispatcher, session, target_id)
+    assert session.project is not None
+    created = _call(
+        dispatcher,
+        "probe.plan.create",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        targetId=target_id,
+        modelId=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        modelVersion=NEUROPIXELS_2_0_MODEL_VERSION,
+        name="Legacy direct-atlas target-angle test",
+        placementMode="TARGET_ANGLES_DEPTH",
+        azimuthDegrees=0,
+        elevationDegrees=-90,
+        insertionDepthMicrometres=4,
+        axialRotationDegrees=0,
+        customGeometryAcknowledged=True,
+    )
     current_plan = created["plan"]
     assert isinstance(current_plan, dict)
-    assert session.project is not None
     stored = session.project.probe_plans[0]
-    placement_payload = stored.placement.model_dump(mode="python")
-    placement_payload.pop("local_lateral_direction")
-    placement_payload.pop("local_normal_direction")
-    placement_payload.pop("model_to_placement_uniform_scale")
-    legacy_placement = NormalizedProbePlacement.model_validate(placement_payload)
-    legacy_digest = probe_plan_input_digest(
-        plan_uuid=stored.plan_uuid,
-        plan_version=stored.plan_version,
-        name=stored.name,
-        source_target=stored.source_target,
-        probe_model=stored.probe_model,
-        placement=legacy_placement,
-        calibration_uuid=stored.calibration_uuid,
-        calibration_version=stored.calibration_version,
-        calibration_sha256=stored.calibration_sha256,
-        atlas_metadata_sha256=stored.atlas_metadata_sha256,
-        projection_sha256=stored.projection_sha256,
-        planning_algorithm_version=LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
-    )
-    legacy_payload = stored.model_dump(mode="python")
-    legacy_payload.update(
-        placement=legacy_placement,
-        placement_input=None,
-        manipulator_input=None,
-        planning_algorithm_version=LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
-        input_sha256=legacy_digest,
-    )
-    legacy = ProbePlanRecord.model_validate(legacy_payload)
+    legacy = _as_v1_plan(stored)
     assert legacy.placement.local_lateral_direction is None
     assert legacy.placement.local_normal_direction is None
-    session.project.probe_plans[0] = legacy
+    project_payload = session.project.model_dump(mode="python")
+    project_payload["probe_plans"] = [legacy.model_dump(mode="python")]
+    session.project = PlannerProject.model_validate(project_payload)
 
     reopened = _call(
         dispatcher,
@@ -1127,6 +1670,59 @@ def test_legacy_null_stored_axes_are_resolved_by_the_plan_detail_contract() -> N
     assert legacy_bridge_placement["modelToPlacementUniformScale"] == pytest.approx(1)
     assert legacy_plan["shanks"] == current_plan["shanks"]
     assert legacy_plan["recordingSites"] == current_plan["recordingSites"]
+
+    with pytest.raises(BridgeError) as analysis_rejection:
+        _call(
+            dispatcher,
+            "probe.region.analyze",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=session.project_revision,
+            planId=str(legacy.plan_uuid),
+            expectedPlanInputSha256=legacy.input_sha256,
+        )
+    assert analysis_rejection.value.code == "PROBE_PLAN_RECOMPUTE_REQUIRED"
+
+
+def test_legacy_v1_project_rejects_rehashed_foreign_calibration_context() -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    assert session.project is not None
+    _call(
+        dispatcher,
+        "probe.plan.create",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        targetId=target_id,
+        modelId=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        modelVersion=NEUROPIXELS_2_0_MODEL_VERSION,
+        name="Legacy context binding test",
+        placementMode="TARGET_ANGLES_DEPTH",
+        azimuthDegrees=0,
+        elevationDegrees=-90,
+        insertionDepthMicrometres=4,
+        axialRotationDegrees=0,
+        customGeometryAcknowledged=True,
+    )
+    legacy = _as_v1_plan(session.project.probe_plans[0])
+    valid_payload = session.project.model_dump(mode="python")
+    valid_payload["probe_plans"] = [legacy.model_dump(mode="python")]
+    valid_project = PlannerProject.model_validate(valid_payload)
+
+    foreign_context = legacy.placement.context.model_copy(update={"context_uuid": uuid4()})
+    placement_payload = legacy.placement.model_dump(mode="python")
+    placement_payload["context"] = foreign_context
+    foreign_placement = NormalizedProbePlacement.model_validate(placement_payload)
+    forged = _plan_with_rehashed_placement(legacy, foreign_placement)
+    assert forged.placement.context.subject_id == legacy.placement.context.subject_id
+    assert forged.placement.context.context_uuid != legacy.placement.context.context_uuid
+    forged_payload = valid_project.model_dump(mode="python")
+    forged_payload["probe_plans"] = [forged.model_dump(mode="python")]
+
+    with pytest.raises(
+        ValueError,
+        match="animal context does not match the referenced calibration",
+    ):
+        PlannerProject.model_validate(forged_payload)
 
 
 def test_region_export_filename_safely_identifies_non_filename_subject() -> None:
@@ -1259,6 +1855,8 @@ def test_all_explicit_placement_modes_are_product_reachable_and_persist_exact_in
     else:
         assert placement_input["entry"] is None
     assert session.project.probe_plans[0].placement_input is not None
+    restored = PlannerProject.model_validate(session.project.model_dump(mode="python"))
+    assert restored.probe_plans == session.project.probe_plans
 
 
 @pytest.mark.parametrize(

@@ -348,6 +348,7 @@ class ProbePlanningBridge:
         plan = _find_plan(project, params["planId"])
         _require_plan_hash(plan, params["expectedPlanInputSha256"])
         _require_current_probe_geometry(plan)
+        _require_plan_projection_semantics(project, plan)
         atlas = self.get_atlas()
         if project.atlas is None or project.atlas.metadata_sha256 != atlas.metadata.metadata_sha256:
             raise BridgeError(
@@ -855,6 +856,20 @@ def _require_current_probe_geometry(plan: ProbePlanRecord) -> None:
                 "requiredPlanningAlgorithmVersion": PROBE_PLANNING_ALGORITHM_VERSION,
             },
         )
+
+
+def _require_plan_projection_semantics(
+    project: PlannerProject,
+    plan: ProbePlanRecord,
+) -> None:
+    try:
+        project.validate_probe_plan_projection_semantics(plan)
+    except ValueError as error:
+        raise BridgeError(
+            "PROBE_PLAN_PROJECTION_INVALID",
+            "The probe plan target cannot be reproduced from its project target and calibration.",
+            details={"reason": str(error), "exceptionType": type(error).__name__},
+        ) from error
 
 
 def _require_plan_hash(plan: ProbePlanRecord, raw_hash: object) -> None:
@@ -1469,6 +1484,7 @@ def _region_export_content(
                 "permitsFinalExport": False,
             },
         )
+    _require_plan_projection_semantics(project, plan)
     export_format = text_value(raw_format, "format", maximum=10).lower()
     if export_format == "csv":
         content = _region_csv(project, calibration, plan, analysis)

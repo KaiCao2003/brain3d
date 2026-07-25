@@ -70,7 +70,7 @@ def test_schema_one_migrates_explicit_midline_and_previous_renderer_anchor() -> 
 
     assert payload["schema_version"] == 1
     assert "renderer_anchor" not in payload
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert project.atlas is not None
     assert project.atlas.midline_ml_um == 5700.0
     assert project.renderer_anchor is not None
@@ -94,7 +94,7 @@ def test_schema_one_without_atlas_migrates_to_explicit_null_anchor() -> None:
 
     migrated = migrate_project_payload(payload)
 
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert migrated["renderer_anchor"] is None
     assert PlannerProject.model_validate(migrated).renderer_anchor is None
 
@@ -113,7 +113,7 @@ def test_schema_two_migrates_only_exact_empty_vascular_defaults() -> None:
     migrated = migrate_project_payload(payload)
 
     assert payload["schema_version"] == 2
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert migrated["subject_vascular_images"] == []
     assert migrated["dorsal_vascular_registrations"] == []
     assert migrated["subject_vascular_overlays"] == []
@@ -131,7 +131,7 @@ def test_schema_three_migrates_calibration_defaults_without_changing_targets() -
 
     migrated = migrate_project_payload(payload)
 
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert migrated["calibrations"] == []
     assert migrated["active_calibration_uuid"] is None
     assert migrated["unprojected_bregma_targets"] == original_targets
@@ -156,7 +156,7 @@ def test_schema_four_adds_only_empty_probe_state() -> None:
 
     migrated = migrate_project_payload(payload)
 
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert migrated["probe_plans"] == []
     assert migrated["probe_region_analyses"] == []
     assert migrated["calibrations"] == original_calibrations
@@ -172,7 +172,7 @@ def test_schema_five_adds_only_zero_revision_and_empty_vessel_analyses() -> None
 
     migrated = migrate_project_payload(payload)
 
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert migrated["project_revision"] == 0
     assert migrated["probe_vessel_analyses"] == []
     assert migrated["probe_plans"] == original_probe_plans
@@ -194,15 +194,35 @@ def test_schema_five_rejects_unversioned_revision_or_vessel_state(
         migrate_project_payload(payload)
 
 
+@pytest.mark.parametrize("schema_version", [7, 8])
 @pytest.mark.parametrize("missing", ["project_revision", "probe_vessel_analyses"])
-def test_current_schema_rejects_missing_persisted_concurrency_or_analysis_state(
+def test_schema_seven_and_current_reject_missing_persisted_concurrency_or_analysis_state(
+    schema_version: int,
     missing: str,
 ) -> None:
     payload = PlannerProject().model_dump(mode="json")
+    payload["schema_version"] = schema_version
     payload.pop(missing)
 
-    with pytest.raises(UnsupportedProjectSchemaError, match="missing required persisted state"):
+    with pytest.raises(
+        UnsupportedProjectSchemaError,
+        match=rf"schema {schema_version} project is missing required persisted state",
+    ):
         migrate_project_payload(payload)
+
+
+def test_schema_seven_only_versions_semantic_contract_without_rewriting_payload() -> None:
+    payload = PlannerProject(title="Coherent schema seven").model_dump(mode="json")
+    payload["schema_version"] = 7
+    original_event_log = payload["event_log"]
+
+    migrated = migrate_project_payload(payload)
+
+    assert payload["schema_version"] == 7
+    assert migrated == {**payload, "schema_version": 8}
+    assert migrated is not payload
+    assert migrated["event_log"] is not original_event_log
+    assert PlannerProject.model_validate(migrated).title == "Coherent schema seven"
 
 
 def test_schema_six_restores_each_missing_source_target_once_without_mutating_input() -> None:
@@ -218,7 +238,7 @@ def test_schema_six_restores_each_missing_source_target_once_without_mutating_in
 
     assert payload["schema_version"] == 6
     assert payload["unprojected_bregma_targets"] == [retained]
-    assert migrated["schema_version"] == 7
+    assert migrated["schema_version"] == 8
     assert migrated["unprojected_bregma_targets"] == [
         retained,
         first_missing,

@@ -69,12 +69,12 @@ def _exact_atlas() -> _FakeAtlas:
 
 
 def _tiny_graph() -> VesSAPMajorVesselGraph:
-    # Run zero crosses the test probe at [AP,DV,ML] = [4.5,2.0,4.5].
+    # Run zero crosses the test probe at [AP,DV,ML] = [4.5,2.0,5701.0].
     # Run one is distant and proves offsets prevent an artificial connection.
     points = np.array(
         [
-            [4.5, 2.0, 0.0],
-            [4.5, 2.0, 9.0],
+            [4.5, 2.0, 5696.5],
+            [4.5, 2.0, 5705.5],
             [1_000.0, 1_000.0, 1_000.0],
             [1_100.0, 1_000.0, 1_000.0],
         ],
@@ -456,23 +456,79 @@ def test_reference_rejects_every_nonexact_atlas_contract(
 
 
 def _project_with_probe_plan() -> tuple[PlannerProject, int]:
-    from tests.integration.test_bridge_probe_planning import (
-        _calibrated_target,
-        _create_plan,
-        _probe_dispatcher,
+    from tests.integration.test_bridge_calibration import (
+        _atlas_point,
+        _create_params,
+        _set_active,
+        _source_point,
     )
 
-    dispatcher, session = _probe_dispatcher()
-    target_id = _calibrated_target(dispatcher, session)
-    _create_plan(dispatcher, session, target_id)
-    assert session.project is not None
-    assert session.project.atlas is not None
-    exact_metadata = make_allen_metadata_test_double(25).model_copy(
-        update={"metadata_sha256": session.project.atlas.metadata_sha256}
+    from mouse_brain_planner.bridge.planning import register_planning_handlers
+    from mouse_brain_planner.probes.catalog import (
+        NEUROPIXELS_2_0_MODEL_VERSION,
+        NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
     )
-    payload = session.project.model_dump(mode="python")
-    payload["atlas"] = exact_metadata.model_dump(mode="python")
-    return PlannerProject.model_validate(payload), session.project_revision
+
+    dispatcher = _dispatcher_with_atlas(_exact_atlas())
+    session = register_planning_handlers(dispatcher)
+    _call(
+        dispatcher,
+        "project.new",
+        animalResearchOnlyAcknowledged=True,
+        title="Major-vessel probe test",
+        subjectId="mouse-A",
+    )
+    calibration_params = _create_params(session)
+    skull_landmarks = _mapping(calibration_params["skullLandmarks"])
+    skull_landmarks["leftSkull"] = _source_point(0, -25, 0)
+    skull_landmarks["rightSkull"] = _source_point(0, 25, 0)
+    atlas_landmarks = _mapping(calibration_params["atlasLandmarks"])
+    atlas_landmarks.update(
+        bregma=_atlas_point(3.5, 3.5, 5700),
+        lambdaPoint=_atlas_point(5.5, 3.5, 5700),
+        leftSkull=_atlas_point(3.5, 3.5, 5725),
+        rightSkull=_atlas_point(3.5, 3.5, 5675),
+    )
+    created_calibration = _call(
+        dispatcher,
+        "calibration.create",
+        **calibration_params,
+    )
+    calibration = _mapping(created_calibration["calibration"])
+    calibration_id = calibration["calibrationId"]
+    assert isinstance(calibration_id, str)
+    _set_active(dispatcher, session, calibration_id)
+    assert session.project is not None
+    added_target = _call(
+        dispatcher,
+        "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        label="major-vessel test target",
+        apMillimetres=-0.001,
+        mlMillimetres=-0.001,
+        dvMillimetres=-0.001,
+    )
+    target = _mapping(added_target["target"])
+    target_id = target["targetId"]
+    assert isinstance(target_id, str)
+    _call(
+        dispatcher,
+        "probe.plan.create",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        targetId=target_id,
+        modelId=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        modelVersion=NEUROPIXELS_2_0_MODEL_VERSION,
+        name="Vertical NP2 single-shank major-vessel test",
+        azimuthDegrees=0,
+        elevationDegrees=-90,
+        insertionDepthMicrometres=4,
+        axialRotationDegrees=0,
+        customGeometryAcknowledged=True,
+    )
+    assert session.project is not None
+    return session.project, session.project_revision
 
 
 def _analysis_params(
@@ -584,6 +640,48 @@ def test_analysis_requires_both_acknowledgements_before_classifying_conflicts(
     assert provenance["registrationUncertaintyBoundMicrometres"] is None
     assert provenance["tissueDistortionUncertaintyBoundMicrometres"] is None
     assert provenance["uncertaintyBoundsReviewed"] is False
+
+
+def test_analysis_rejects_same_target_rehashed_alternate_probe_before_loading_graph(
+    qualified_test_reference: None,
+) -> None:
+    from tests.integration.test_bridge_probe_planning import (
+        _same_target_alternate_trajectory_rehashed_plan,
+    )
+
+    project, revision = _project_with_probe_plan()
+    assert project.atlas is not None
+    forged = _same_target_alternate_trajectory_rehashed_plan(
+        project,
+        project.probe_plans[0],
+    )
+    project.probe_plans[0] = forged
+    state = _ProjectState(project=project, revision=revision)
+    dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
+    register_major_vessel_handlers(
+        dispatcher,
+        get_project=lambda: state.project,
+        get_revision=lambda: state.revision,
+        replace_project=state.replace,
+        graph_loader=lambda: pytest.fail("forged geometry must be rejected before graph loading"),
+    )
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "vessel.major.reference.analyze",
+            **_analysis_params(
+                state.project,
+                state.revision,
+                profile_confirmed=True,
+                coverage_acknowledged=True,
+            ),
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "placement geometry does not match" in rejection.value.details["reason"]
+    assert state.revision == revision
+    assert state.project.probe_vessel_analyses == []
 
 
 def test_analysis_does_not_overwrite_project_when_revision_changes_during_compute(

@@ -219,6 +219,14 @@ class MajorVesselReferenceBridge:
                 "The vessel analysis request uses an older probe-plan input.",
                 details={"actualPlanInputSha256": plan.input_sha256},
             )
+        try:
+            project.validate_probe_plan_projection_semantics(plan)
+        except ValueError as error:
+            raise BridgeError(
+                "PROBE_PLAN_PROJECTION_INVALID",
+                "The probe plan geometry cannot be reproduced from its preserved inputs.",
+                details={"reason": str(error), "exceptionType": type(error).__name__},
+            ) from error
         required_margin = _distance(
             params["requiredMarginMicrometres"],
             "requiredMarginMicrometres",

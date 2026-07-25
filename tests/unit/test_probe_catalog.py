@@ -29,9 +29,11 @@ from mouse_brain_planner.probes.catalog import (
     NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
     NEUROPIXELS_2_0_USER_MANUAL_ZIP_SHA256,
     PROBE_CATALOG_VERSION,
+    ProbeModelCatalogSnapshotError,
     get_probe_model,
     get_supported_probe_model,
     list_probe_models,
+    validate_probe_model_catalog_snapshot,
 )
 
 
@@ -313,5 +315,50 @@ def test_catalog_resolution_requires_exact_id_and_version(
     expected = get_probe_model(model_id, model_version)
 
     assert get_probe_model(model_id, model_version) is expected
+    validate_probe_model_catalog_snapshot(expected)
     with pytest.raises(KeyError, match="unknown probe model"):
         get_probe_model(model_id, "latest")
+
+
+def test_catalog_snapshot_validation_rejects_geometry_and_provenance_drift() -> None:
+    canonical = get_supported_probe_model(
+        NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        NEUROPIXELS_2_0_MODEL_VERSION,
+    )
+    validate_probe_model_catalog_snapshot(canonical)
+
+    wider_shank = canonical.shanks[0].model_copy(update={"width_um": 700})
+    forged_geometry = canonical.model_copy(update={"shanks": (wider_shank,)})
+    with pytest.raises(ProbeModelCatalogSnapshotError, match="does not exactly match"):
+        validate_probe_model_catalog_snapshot(forged_geometry)
+
+    forged_verification = canonical.verification.model_copy(
+        update={"review_notes": "Self-asserted replacement provenance"}
+    )
+    forged_provenance = canonical.model_copy(update={"verification": forged_verification})
+    with pytest.raises(ProbeModelCatalogSnapshotError, match="does not exactly match"):
+        validate_probe_model_catalog_snapshot(forged_provenance)
+
+
+def test_unknown_probe_identity_is_allowed_only_for_explicit_audit_compatibility() -> None:
+    canonical = get_supported_probe_model(
+        NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        NEUROPIXELS_2_0_MODEL_VERSION,
+    )
+    unknown = canonical.model_copy(
+        update={
+            "model_id": "historical-user-defined-probe",
+            "model_version": "legacy-only",
+        }
+    )
+
+    validate_probe_model_catalog_snapshot(unknown, allow_unknown_identity=True)
+    with pytest.raises(ProbeModelCatalogSnapshotError, match="not in the source-pinned catalog"):
+        validate_probe_model_catalog_snapshot(unknown)
+
+    unknown_catalog_version = canonical.model_copy(update={"model_version": "self-asserted"})
+    with pytest.raises(ProbeModelCatalogSnapshotError, match="unknown catalog version"):
+        validate_probe_model_catalog_snapshot(
+            unknown_catalog_version,
+            allow_unknown_identity=True,
+        )

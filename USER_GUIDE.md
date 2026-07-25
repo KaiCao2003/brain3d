@@ -28,7 +28,9 @@ The mode bar is exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, with on
 - **Dorsal** shows the atlas surface and the selected probe's AP/ML landmarks and shank path;
   recording sites remain in true-depth slice views.
 - **Coronal**, **Sagittal**, and **Horizontal** each keep an independent depth. Use the slider,
-  previous/next buttons, or wheel to move; drag pans and pinch zooms.
+  previous/next buttons, wheel, or enter an exact one-based slice number; drag pans and pinch
+  zooms. The header's `Atlas AP`, `Atlas ML`, or `Atlas DV` value is the Allen atlas physical
+  coordinate in millimetres—not a bregma-relative implant coordinate.
 - **3D** shows a SceneKit brain mesh and planned probe envelopes. Drag/orbit and zoom use native
   camera control; **Reset Camera** restores the overview.
 
@@ -70,6 +72,18 @@ landmarks are AP/ML/DV; BrainGlobe atlas landmarks are AP/DV/ML; the form accept
 converts them to the typed internal micrometre protocol. Calibration residuals and QC limits remain
 explicitly labelled in µm.
 
+Brain3D rejects a calibration unless atlas bregma and lambda lie on the atlas midsagittal plane
+within half one ML voxel and the named right/left skull landmarks straddle that plane on their
+respective sides, each by at least half one ML voxel. Together with the required ordering of
+atlas bregma anterior to lambda, these gates preserve the contract that `AP < 0` projects
+posterior and `ML < 0` projects to animal-left, which is the screen-right `L` side in Dorsal,
+Coronal, and Horizontal views.
+
+On create, validation, and reopen, Brain3D also reruns the skull calibration and atlas fit from
+the stored landmark inputs. The persisted transform matrices, landmark correspondences and
+residuals, leveling angles, and skull QC must reproduce; changing and rehashing a derived
+transform or residual does not make it acceptable.
+
 Inspect residuals and QC messages, then choose **Use for planning** only when the calibration
 permits planning. A failed calibration cannot project a target or create a probe. **Project to
 atlas** creates a provenance-bound projection while preserving the original bregma entry.
@@ -99,10 +113,33 @@ transcription has completed an independent full-table review. Brain3D represents
 sites, not the active acquisition configuration; it does not yet import an IMRO/electrode
 selection.
 
+Persisted catalog models are checked against the exact source-pinned definition, including every
+shank dimension and offset, tip field, ordered recording site, verification field, and source
+record. Editing one of those values and recomputing its surrounding hashes is rejected. An
+unknown custom model can remain only in a historical v1 audit record and cannot enter current
+planning geometry or analysis.
+
 After creating a plan, slice views show only probe geometry that intersects the current slab;
 3D shows the probe envelope with the brain. Older project packages may retain archived
 multi-mode probe records, and Brain3D preserves their inputs for compatibility, but the new-plan
 UI does not expose those extra placement modes or region-export controls.
+
+When editing an existing plan, typed values are not applied silently. Brain3D shows
+**Unapplied probe edits**; the brain views and PDF continue to use the last applied values until
+you choose **Apply changes**. Choose **Revert** to restore those values instead. While edits are
+unapplied, switching probe plans, saving, and PDF export are disabled, and opening another
+project, reconnecting, or quitting requires discard confirmation.
+
+For a new probe, the prepared model/name/target defaults are not treated as work. Once you change
+the model or enter planning values, Brain3D shows **Uncreated probe draft**. Choose **Create
+plan** to apply it or **Discard draft** to return to clean defaults; opening, reconnecting, and
+quitting otherwise require discard confirmation.
+
+Brain3D has one main planning window. The probe draft belongs to the planner session rather than
+to the sidebar, so closing and reopening that window while the app remains running does not erase
+the typed draft. Reopening the same project/plan context preserves it; selecting a genuinely
+different project, plan, or saved plan input resynchronizes only after the dirty-draft guard is
+resolved.
 
 ## Use the major-vessel display reference
 
@@ -158,6 +195,11 @@ and adds a non-destructive identity/coordinate/probe summary in the unused margi
 trajectory geometry is drawn onto the historical plate. The app verifies page identity, size,
 count, and order and performs an atomic write.
 
+On every planning page, the complete signed AP/ML/DV text is printed on a dedicated monospaced
+line below a separately bounded subject/target identity line. Brain3D reopens each rendered page
+to verify its expected view title and exact coordinate text, then checks the same title and
+coordinates at the corresponding position in the assembled packet.
+
 An output is marked **FINAL** only when the saved project, target projection, selected current
 probe plan, and final-export calibration all agree. Otherwise it is visibly marked **DRAFT**.
 FINAL describes those software gates; it does not make the plan biologically validated or safe.
@@ -174,6 +216,20 @@ state. Existing legacy vessel-analysis records may remain preserved for audit, b
 runtime cannot create or refresh them. Project revisions are stored monotonically with
 checksums across save/reopen. The app rejects stale results and source mismatches. Keep the project
 file and exported analyses with their recorded provenance.
+
+Apply or revert an existing probe draft before saving. This prevents a `.mouseplan` from
+silently retaining the last applied geometry while the sidebar displays different typed values.
+During validation and reopen, Brain3D fully reconstructs planning-algorithm v2/v3 placements
+from their preserved mode, entry when applicable, angles, depth, roll, probe model, source
+target, and calibration, then compares every physical geometry field. A translated or
+same-target alternate-angle placement cannot pass by recomputing its record hash. Historical v1
+records lack enough preserved inputs for reconstruction, remain load/review only, and cannot
+enter 2D/3D planning overlays, PDF planning pages, or region analysis until updated.
+Vessel-clearance analysis remains unavailable for every plan version. Catalog-owned probe
+snapshots must match their pinned definitions exactly. A calibration that violates AP ordering
+or atlas midline/laterality—or whose skull/atlas fit, residuals, leveling angles, or QC no
+longer reproduces from its stored landmarks—is also rejected. Schema-7 packages are copied
+forward to schema 8 without inferred geometry or silent repair.
 
 Population density and subject-image registration are preserved only as archived backend paths
 for older work; they are not exposed in the primary UI and are not used as vessel geometry.

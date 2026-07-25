@@ -18,7 +18,9 @@ from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_models import NormalizedProbePlacement, ProbeModelDefinition
 from mouse_brain_planner.domain.probe_plan_models import (
+    LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
     PROBE_PLANNING_ALGORITHM_VERSION,
+    STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
     BregmaRelativeEntryInput,
     ProbeManipulatorInput,
     ProbePlacementInput,
@@ -31,6 +33,9 @@ from mouse_brain_planner.domain.stereotaxy_models import (
     BregmaRelativeTargetMM,
     atlas_registered_calibration_sha256,
 )
+from mouse_brain_planner.domain.surgery_common import UnitDirectionAPMLDV
+from mouse_brain_planner.domain.transform_models import AnatomicalPoint
+from mouse_brain_planner.probes.catalog import validate_probe_model_catalog_snapshot
 from mouse_brain_planner.surgery.stereotaxy import bregma_relative_target_to_point
 from mouse_brain_planner.surgery.trajectory import (
     direction_from_angles,
@@ -42,10 +47,343 @@ from mouse_brain_planner.surgery.trajectory import (
 )
 
 TARGET_PROJECTION_ALGORITHM_VERSION = "bregma-target-through-subject-atlas-calibration-v1"
+PROBE_TARGET_MATCH_ABSOLUTE_TOLERANCE_UM = 1e-6
+PROBE_DIRECTION_MATCH_ABSOLUTE_TOLERANCE = 1e-9
+PROBE_ANGLE_MATCH_ABSOLUTE_TOLERANCE_DEG = 1e-8
+PROBE_SCALE_MATCH_ABSOLUTE_TOLERANCE = 1e-12
 
 
 class ProbePlanningError(ValueError):
     """Raised when a plan would require an invalid or implicit assumption."""
+
+
+def project_bregma_target_through_calibration(
+    *,
+    target: UnprojectedBregmaTarget,
+    calibration: AtlasRegisteredCalibration,
+    atlas: AtlasMetadata,
+) -> tuple[AnatomicalPoint, AnatomicalPoint, BrainGlobePhysicalPoint]:
+    """Reproduce the exact source-target projection stored by a probe plan."""
+
+    if not calibration.permits_planning:
+        raise ProbePlanningError("failed calibration cannot create or validate a probe plan")
+    if calibration.atlas_metadata_sha256 != atlas.metadata_sha256:
+        raise ProbePlanningError("calibration atlas digest does not match the project atlas")
+    destination = calibration.atlas_transform.destination_frame
+    if (destination.atlas_key, destination.atlas_version) != (
+        atlas.atlas_key,
+        atlas.atlas_package_version,
+    ):
+        raise ProbePlanningError("calibration atlas identity does not match the project atlas")
+    context = calibration.skull_calibration.context
+    if context.subject_id is None:
+        raise ProbePlanningError("calibrated probe planning requires an animal subject ID")
+    skull = calibration.skull_calibration
+    calibrated_target = BregmaRelativeTargetMM(
+        context_uuid=context.context_uuid,
+        calibration_uuid=calibration.calibration_uuid,
+        profile_id=calibration.profile_id,
+        stereotaxic_frame_id=skull.stereotaxic_frame.frame_id,
+        ap_mm=target.ap_mm,
+        ml_mm=target.ml_mm,
+        dv_mm=target.dv_mm,
+    )
+    stereotaxic_point = bregma_relative_target_to_point(
+        target=calibrated_target,
+        calibration=skull,
+    )
+    atlas_anatomical_point = transform_point(
+        calibration.atlas_transform,
+        stereotaxic_point,
+    )
+    atlas_physical_point = canonical_anatomical_to_brainglobe_physical(
+        atlas_anatomical_point,
+        atlas,
+    )
+    BrainGlobeAtlasSpace(atlas).physical_to_index(atlas_physical_point)
+    return stereotaxic_point, atlas_anatomical_point, atlas_physical_point
+
+
+def validate_probe_plan_projection_semantics(
+    *,
+    plan: ProbePlanRecord,
+    target: UnprojectedBregmaTarget,
+    calibration: AtlasRegisteredCalibration,
+    atlas: AtlasMetadata,
+) -> None:
+    """Reject a self-rehashed plan that cannot be reproduced from its source inputs."""
+
+    validate_probe_model_catalog_snapshot(
+        plan.probe_model,
+        allow_unknown_identity=(
+            plan.planning_algorithm_version == LEGACY_PROBE_PLANNING_ALGORITHM_VERSION
+        ),
+    )
+    if plan.source_target != target:
+        raise ProbePlanningError(
+            "probe plan source target snapshot does not match the referenced project target"
+        )
+    if plan.calibration_uuid != calibration.calibration_uuid:
+        raise ProbePlanningError("probe plan calibration UUID does not match its reference")
+    if plan.calibration_version != calibration.calibration_version:
+        raise ProbePlanningError("probe plan calibration version does not match its reference")
+    calibration_sha256 = atlas_registered_calibration_sha256(calibration)
+    if plan.calibration_sha256 != calibration_sha256:
+        raise ProbePlanningError("probe plan calibration digest does not match its reference")
+    if plan.atlas_metadata_sha256 != atlas.metadata_sha256:
+        raise ProbePlanningError("probe plan atlas digest does not match the project atlas")
+    if plan.placement.context != calibration.skull_calibration.context:
+        raise ProbePlanningError(
+            "probe plan animal context does not match the referenced calibration"
+        )
+    _, expected_atlas_target, expected_physical_target = project_bregma_target_through_calibration(
+        target=target,
+        calibration=calibration,
+        atlas=atlas,
+    )
+    actual_target = plan.placement.target
+    if actual_target.frame_id != expected_atlas_target.frame_id or any(
+        not math.isclose(
+            actual,
+            expected,
+            rel_tol=0,
+            abs_tol=PROBE_TARGET_MATCH_ABSOLUTE_TOLERANCE_UM,
+        )
+        for actual, expected in zip(
+            actual_target.as_ap_ml_dv(),
+            expected_atlas_target.as_ap_ml_dv(),
+            strict=True,
+        )
+    ):
+        raise ProbePlanningError(
+            "probe plan placement target does not match the calibrated source target"
+        )
+    expected_projection_sha256 = target_projection_digest(
+        target=target,
+        calibration_sha256=calibration_sha256,
+        atlas_point=expected_physical_target,
+    )
+    if plan.projection_sha256 != expected_projection_sha256:
+        raise ProbePlanningError(
+            "probe plan projection digest does not match the calibrated source target"
+        )
+    expected_placement = rederive_probe_plan_placement(
+        plan=plan,
+        target=target,
+        calibration=calibration,
+        atlas=atlas,
+    )
+    if expected_placement is not None:
+        validate_rederived_probe_placement_geometry(
+            actual=plan.placement,
+            expected=expected_placement,
+        )
+
+
+def rederive_probe_plan_placement(
+    *,
+    plan: ProbePlanRecord,
+    target: UnprojectedBregmaTarget,
+    calibration: AtlasRegisteredCalibration,
+    atlas: AtlasMetadata,
+) -> NormalizedProbePlacement | None:
+    """Rebuild current placement geometry from inputs independent of serialized geometry.
+
+    Version-one records predate preserved manipulator/placement inputs. They
+    remain loadable for audit, while analysis continues to require v2 or v3.
+    """
+
+    if plan.planning_algorithm_version == LEGACY_PROBE_PLANNING_ALGORITHM_VERSION:
+        return None
+    if plan.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION:
+        manipulator = plan.manipulator_input
+        if manipulator is None:
+            raise ProbePlanningError("v2 probe plan is missing preserved manipulator inputs")
+        stereotaxic_target, _, _ = project_bregma_target_through_calibration(
+            target=target,
+            calibration=calibration,
+            atlas=atlas,
+        )
+        source_placement = placement_from_stereotaxic_target(
+            calibration=calibration.skull_calibration,
+            model=plan.probe_model,
+            name=plan.name,
+            target=stereotaxic_target,
+            manipulator_azimuth_deg=manipulator.azimuth_deg,
+            manipulator_elevation_deg=manipulator.elevation_deg,
+            insertion_depth_um=manipulator.insertion_depth_um,
+            axial_rotation_deg=manipulator.axial_rotation_deg,
+            custom_geometry_acknowledged=plan.placement.custom_geometry_acknowledged,
+        )
+        return transform_probe_placement_uniform(
+            source_placement,
+            calibration.atlas_transform,
+        )
+    if plan.planning_algorithm_version != PROBE_PLANNING_ALGORITHM_VERSION:
+        raise ProbePlanningError(
+            f"unsupported probe planning algorithm {plan.planning_algorithm_version!r}"
+        )
+    placement_input = plan.placement_input
+    if placement_input is None:
+        raise ProbePlanningError("v3 probe plan is missing preserved placement-mode inputs")
+    entry = placement_input.entry
+    expected_plan, _ = build_calibrated_probe_plan(
+        target=target,
+        calibration=calibration,
+        atlas=atlas,
+        model=plan.probe_model,
+        name=plan.name,
+        azimuth_deg=placement_input.azimuth_deg,
+        elevation_deg=placement_input.elevation_deg,
+        insertion_depth_um=placement_input.insertion_depth_um,
+        axial_rotation_deg=placement_input.axial_rotation_deg,
+        custom_geometry_acknowledged=plan.placement.custom_geometry_acknowledged,
+        placement_mode=placement_input.mode,
+        entry_ap_mm=None if entry is None else entry.ap_mm,
+        entry_ml_mm=None if entry is None else entry.ml_mm,
+        entry_dv_mm=None if entry is None else entry.dv_mm,
+        plan_uuid=plan.plan_uuid,
+        plan_version=plan.plan_version,
+        created_at=plan.created_at,
+    )
+    return expected_plan.placement
+
+
+def validate_rederived_probe_placement_geometry(
+    *,
+    actual: NormalizedProbePlacement,
+    expected: NormalizedProbePlacement,
+) -> None:
+    """Compare every placement field that changes physical probe geometry."""
+
+    mismatches: list[str] = []
+    exact_fields = (
+        ("name", actual.name, expected.name),
+        ("context", actual.context, expected.context),
+        ("probe model ID", actual.probe_model_id, expected.probe_model_id),
+        ("probe model version", actual.probe_model_version, expected.probe_model_version),
+        ("placement method", actual.method, expected.method),
+        ("angle convention", actual.angle_convention, expected.angle_convention),
+    )
+    mismatches.extend(
+        label for label, value, expected_value in exact_fields if value != expected_value
+    )
+
+    mismatches.extend(
+        label
+        for label in ("entry", "target", "tip", "skull_entry", "brain_entry")
+        if not _optional_anatomical_points_match(
+            getattr(actual, label),
+            getattr(expected, label),
+        )
+    )
+    mismatches.extend(
+        label
+        for label in (
+            "inward_direction",
+            "local_lateral_direction",
+            "local_normal_direction",
+        )
+        if not _optional_directions_match(
+            getattr(actual, label),
+            getattr(expected, label),
+        )
+    )
+
+    scalar_fields = (
+        (
+            "insertion depth",
+            actual.insertion_depth_um,
+            expected.insertion_depth_um,
+            PROBE_TARGET_MATCH_ABSOLUTE_TOLERANCE_UM,
+            1e-10,
+        ),
+        (
+            "azimuth",
+            actual.azimuth_deg,
+            expected.azimuth_deg,
+            PROBE_ANGLE_MATCH_ABSOLUTE_TOLERANCE_DEG,
+            0.0,
+        ),
+        (
+            "elevation",
+            actual.elevation_deg,
+            expected.elevation_deg,
+            PROBE_ANGLE_MATCH_ABSOLUTE_TOLERANCE_DEG,
+            0.0,
+        ),
+        (
+            "axial rotation",
+            actual.axial_rotation_deg,
+            expected.axial_rotation_deg,
+            PROBE_ANGLE_MATCH_ABSOLUTE_TOLERANCE_DEG,
+            0.0,
+        ),
+        (
+            "model-to-placement scale",
+            actual.model_to_placement_uniform_scale,
+            expected.model_to_placement_uniform_scale,
+            PROBE_SCALE_MATCH_ABSOLUTE_TOLERANCE,
+            1e-9,
+        ),
+    )
+    mismatches.extend(
+        label
+        for label, value, expected_value, absolute_tolerance, relative_tolerance in scalar_fields
+        if not math.isclose(
+            value,
+            expected_value,
+            rel_tol=relative_tolerance,
+            abs_tol=absolute_tolerance,
+        )
+    )
+    if mismatches:
+        raise ProbePlanningError(
+            "probe plan placement geometry does not match preserved planning inputs: "
+            + ", ".join(mismatches)
+        )
+
+
+def _optional_anatomical_points_match(
+    actual: AnatomicalPoint | None,
+    expected: AnatomicalPoint | None,
+) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return actual.frame_id == expected.frame_id and all(
+        math.isclose(
+            value,
+            expected_value,
+            rel_tol=0,
+            abs_tol=PROBE_TARGET_MATCH_ABSOLUTE_TOLERANCE_UM,
+        )
+        for value, expected_value in zip(
+            actual.as_ap_ml_dv(),
+            expected.as_ap_ml_dv(),
+            strict=True,
+        )
+    )
+
+
+def _optional_directions_match(
+    actual: UnitDirectionAPMLDV | None,
+    expected: UnitDirectionAPMLDV | None,
+) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return actual.frame_id == expected.frame_id and all(
+        math.isclose(
+            value,
+            expected_value,
+            rel_tol=0,
+            abs_tol=PROBE_DIRECTION_MATCH_ABSOLUTE_TOLERANCE,
+        )
+        for value, expected_value in zip(
+            actual.as_ap_ml_dv(),
+            expected.as_ap_ml_dv(),
+            strict=True,
+        )
+    )
 
 
 def build_calibrated_probe_plan(
@@ -75,47 +413,21 @@ def build_calibrated_probe_plan(
     lie outside the atlas and is clipped only during region/vessel analysis.
     """
 
-    if not calibration.permits_planning:
-        raise ProbePlanningError("failed calibration cannot create a probe plan")
-    if calibration.atlas_metadata_sha256 != atlas.metadata_sha256:
-        raise ProbePlanningError("calibration atlas digest does not match the project atlas")
     destination = calibration.atlas_transform.destination_frame
-    if (destination.atlas_key, destination.atlas_version) != (
-        atlas.atlas_key,
-        atlas.atlas_package_version,
-    ):
-        raise ProbePlanningError("calibration atlas identity does not match the project atlas")
     context = calibration.skull_calibration.context
-    if context.subject_id is None:
-        raise ProbePlanningError("calibrated probe planning requires an animal subject ID")
     if not model.permits_verified_device_label and not custom_geometry_acknowledged:
         raise ProbePlanningError(
             "probe geometry without completed independent review requires explicit user "
             "acknowledgment"
         )
     skull = calibration.skull_calibration
-    calibrated_target = BregmaRelativeTargetMM(
-        context_uuid=context.context_uuid,
-        calibration_uuid=calibration.calibration_uuid,
-        profile_id=calibration.profile_id,
-        stereotaxic_frame_id=skull.stereotaxic_frame.frame_id,
-        ap_mm=target.ap_mm,
-        ml_mm=target.ml_mm,
-        dv_mm=target.dv_mm,
+    stereotaxic_point, atlas_anatomical_point, atlas_physical_point = (
+        project_bregma_target_through_calibration(
+            target=target,
+            calibration=calibration,
+            atlas=atlas,
+        )
     )
-    stereotaxic_point = bregma_relative_target_to_point(
-        target=calibrated_target,
-        calibration=skull,
-    )
-    atlas_anatomical_point = transform_point(
-        calibration.atlas_transform,
-        stereotaxic_point,
-    )
-    atlas_physical_point = canonical_anatomical_to_brainglobe_physical(
-        atlas_anatomical_point,
-        atlas,
-    )
-    BrainGlobeAtlasSpace(atlas).physical_to_index(atlas_physical_point)
     entry_values = (entry_ap_mm, entry_ml_mm, entry_dv_mm)
     has_complete_entry = all(value is not None for value in entry_values)
     if any(value is not None for value in entry_values) and not has_complete_entry:

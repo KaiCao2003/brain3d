@@ -335,6 +335,7 @@ final class PlannerViewModel: ObservableObject {
     @Published private(set) var projectOperationError: String?
     @Published private(set) var projectRecoveryNotice: String?
     @Published private(set) var hasUnsavedChanges = false
+    let probeDraftSession = ProbeDraftSession()
     @Published private(set) var populationDensityVisible = false
     @Published private(set) var populationDensityPNG: Data?
     @Published private(set) var populationDensityPreparation: ReferenceDensityPrepareResult?
@@ -430,6 +431,18 @@ final class PlannerViewModel: ObservableObject {
             return "Awaiting explicit animal-only acknowledgement"
         }
         return "No backend project"
+    }
+
+    var hasPendingPlanChanges: Bool {
+        hasUnsavedChanges || hasUnappliedProbeDraftChanges
+    }
+
+    var hasUnappliedProbeDraftChanges: Bool {
+        probeDraftSession.hasUnappliedChanges
+    }
+
+    func discardProbeDraftSession() {
+        probeDraftSession.discard()
     }
 
     var subjectImportStatus: String {
@@ -795,6 +808,11 @@ final class PlannerViewModel: ObservableObject {
     }
 
     func reconnect() async {
+        guard !hasUnappliedProbeDraftChanges else {
+            projectOperationError =
+                "Discard the probe draft before reconnecting the planning service."
+            return
+        }
         viewerMutationWorker?.cancel()
         viewerMutationWorker = nil
         pendingViewerMutation = nil
@@ -3808,6 +3826,11 @@ final class PlannerViewModel: ObservableObject {
 
     func saveProject(to url: URL) async -> Bool {
         projectOperationError = nil
+        guard !hasUnappliedProbeDraftChanges else {
+            projectOperationError =
+                "Apply or revert the probe draft before saving the animal plan."
+            return false
+        }
         guard let bridgeClient,
               canSaveProject,
               let project = backendState?.project
@@ -3849,6 +3872,11 @@ final class PlannerViewModel: ObservableObject {
 
     func openProject(at url: URL) async -> Bool {
         projectOperationError = nil
+        guard !hasUnappliedProbeDraftChanges else {
+            projectOperationError =
+                "Discard the probe draft before opening another animal plan."
+            return false
+        }
         guard let bridgeClient, canOpenProject else {
             projectOperationError = "Open the verified atlas before opening a project."
             return false

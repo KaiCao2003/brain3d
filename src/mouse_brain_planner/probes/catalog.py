@@ -564,6 +564,13 @@ _MODELS_BY_IDENTITY: Final[dict[tuple[str, str], ProbeModelDefinition]] = {
     (model.model_id, model.model_version): model
     for model in (*_SUPPORTED_MODELS, *_ARCHIVED_COMPATIBILITY_MODELS)
 }
+_CATALOG_CONTROLLED_MODEL_IDS: Final[frozenset[str]] = frozenset(
+    model.model_id for model in (*_SUPPORTED_MODELS, *_ARCHIVED_COMPATIBILITY_MODELS)
+)
+
+
+class ProbeModelCatalogSnapshotError(ValueError):
+    """Raised when persisted geometry impersonates or diverges from the pinned catalog."""
 
 
 def list_probe_models() -> tuple[ProbeModelDefinition, ...]:
@@ -599,3 +606,37 @@ def get_probe_model(model_id: str, model_version: str) -> ProbeModelDefinition:
         return _MODELS_BY_IDENTITY[(model_id, model_version)]
     except KeyError as error:
         raise KeyError(f"unknown probe model identity {(model_id, model_version)!r}") from error
+
+
+def validate_probe_model_catalog_snapshot(
+    model: ProbeModelDefinition,
+    *,
+    allow_unknown_identity: bool = False,
+) -> None:
+    """Require an exact, complete match for every catalog-owned model snapshot.
+
+    Equality covers every persisted model field, including source provenance,
+    verification state, shank dimensions and offsets, tip geometry, and the
+    complete ordered recording-site table.  Unknown user-defined identities may
+    be retained only when the caller explicitly selects an audit-only path.
+    Catalog-owned IDs never accept an unrecognized version as a custom model.
+    """
+
+    identity = (model.model_id, model.model_version)
+    canonical = _MODELS_BY_IDENTITY.get(identity)
+    if canonical is None:
+        if model.model_id in _CATALOG_CONTROLLED_MODEL_IDS:
+            raise ProbeModelCatalogSnapshotError(
+                f"probe model {model.model_id!r} uses an unknown catalog version "
+                f"{model.model_version!r}"
+            )
+        if allow_unknown_identity:
+            return
+        raise ProbeModelCatalogSnapshotError(
+            f"probe model identity {identity!r} is not in the source-pinned catalog"
+        )
+    if model != canonical:
+        raise ProbeModelCatalogSnapshotError(
+            f"probe model snapshot {identity!r} does not exactly match the "
+            "source-pinned catalog definition"
+        )

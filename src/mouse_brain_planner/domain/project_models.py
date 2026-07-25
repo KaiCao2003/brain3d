@@ -9,6 +9,9 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mouse_brain_planner.coordinates.anatomical_atlas import (
+    canonical_anatomical_to_brainglobe_physical,
+)
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
@@ -28,6 +31,12 @@ from mouse_brain_planner.domain.vessel_models import (
     SubjectVascularOverlayState,
 )
 from mouse_brain_planner.domain.vessel_plan_models import ProbeVesselAnalysisBundle
+from mouse_brain_planner.surgery.calibration_validation import (
+    validate_atlas_registered_calibration_reproducibility,
+)
+from mouse_brain_planner.surgery.probe_planning import (
+    validate_probe_plan_projection_semantics as validate_plan_projection_semantics,
+)
 from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION, __version__
 
 MAX_PROJECT_EVENTS = 1_000
@@ -62,10 +71,133 @@ class ViewerRegionSelection(BaseModel):
     atlas_point: BrainGlobePhysicalPoint
 
 
+def validate_viewer_state_semantics(
+    *,
+    atlas: AtlasMetadata | None,
+    slice_depths: ViewerSliceDepths | None,
+    region_selection: ViewerRegionSelection | None,
+) -> None:
+    """Validate the viewer-only subset without rebuilding unrelated surgery plans."""
+
+    if atlas is None:
+        if slice_depths is not None or region_selection is not None:
+            raise ValueError("viewer slice state requires atlas metadata")
+        return
+
+    if slice_depths is not None:
+        depth_limits = {
+            "coronal": atlas.shape_voxels[0],
+            "sagittal": atlas.shape_voxels[2],
+            "horizontal": atlas.shape_voxels[1],
+        }
+        for orientation, limit in depth_limits.items():
+            depth = getattr(slice_depths, orientation)
+            if isinstance(depth, bool) or not isinstance(depth, int) or depth < 0 or depth >= limit:
+                raise ValueError(f"{orientation} viewer slice {depth} is outside [0, {limit})")
+
+    if region_selection is None:
+        return
+    if slice_depths is None:
+        raise ValueError("a viewer region selection requires persisted slice depths")
+    if region_selection.atlas_point.atlas_key != atlas.atlas_key or (
+        region_selection.atlas_point.atlas_version != atlas.atlas_package_version
+    ):
+        raise ValueError("viewer region selection atlas identity does not match project")
+    orientation_axes = {
+        "coronal": (0, 1, 2),
+        "sagittal": (2, 1, 0),
+        "horizontal": (1, 0, 2),
+    }
+    if region_selection.orientation not in orientation_axes:
+        raise ValueError("viewer region selection orientation is unsupported")
+    fixed_axis, row_axis, column_axis = orientation_axes[region_selection.orientation]
+    expected_depth = getattr(slice_depths, region_selection.orientation)
+    for label, value in (
+        ("index", region_selection.index),
+        ("row", region_selection.row),
+        ("column", region_selection.column),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"viewer region selection {label} must be nonnegative")
+    if region_selection.index != expected_depth:
+        raise ValueError("viewer region selection does not belong to the persisted slice")
+    if region_selection.row >= atlas.shape_voxels[row_axis] or (
+        region_selection.column >= atlas.shape_voxels[column_axis]
+    ):
+        raise ValueError("viewer region selection pixel is outside the slice image")
+    point_voxel = tuple(
+        math.floor(value / resolution)
+        for value, resolution in zip(
+            region_selection.atlas_point.as_tuple(),
+            atlas.resolution_um,
+            strict=True,
+        )
+    )
+    expected_voxel = [0, 0, 0]
+    expected_voxel[fixed_axis] = region_selection.index
+    expected_voxel[row_axis] = region_selection.row
+    expected_voxel[column_axis] = region_selection.column
+    if point_voxel != tuple(expected_voxel):
+        raise ValueError("viewer region selection point does not match its intrinsic pixel")
+
+
 def utc_now() -> datetime:
     """Return an aware UTC timestamp."""
 
     return datetime.now(UTC)
+
+
+def validate_calibration_atlas_landmark_semantics(
+    calibration: AtlasRegisteredCalibration,
+    atlas: AtlasMetadata,
+) -> None:
+    """Require persisted atlas landmarks to preserve midline and laterality labels."""
+
+    required_labels = ("bregma", "lambda", "left-skull", "right-skull")
+    landmark_points = {}
+    for label in required_labels:
+        matches = tuple(
+            landmark.destination
+            for landmark in calibration.atlas_transform.landmarks
+            if landmark.enabled and landmark.label == label
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                f"calibration atlas transform must contain exactly one enabled {label} landmark"
+            )
+        landmark_points[label] = canonical_anatomical_to_brainglobe_physical(
+            matches[0],
+            atlas,
+        )
+
+    midline_ml_um = atlas.midline_ml_um
+    half_ml_voxel_um = atlas.resolution_um[2] / 2.0
+    floating_tolerance_um = max(1e-9, math.ulp(midline_ml_um))
+    midline_tolerance_um = half_ml_voxel_um + floating_tolerance_um
+    if landmark_points["bregma"].ap_um >= landmark_points["lambda"].ap_um:
+        raise ValueError(
+            "calibration atlas bregma must remain anterior to atlas lambda "
+            "in BrainGlobe ASR coordinates"
+        )
+    if any(
+        abs(landmark_points[label].ml_um - midline_ml_um) > midline_tolerance_um
+        for label in ("bregma", "lambda")
+    ):
+        raise ValueError(
+            "calibration atlas bregma and lambda must lie within half one ML voxel "
+            "of the project atlas midline"
+        )
+
+    right_limit_um = midline_ml_um - half_ml_voxel_um
+    left_limit_um = midline_ml_um + half_ml_voxel_um
+    if (
+        landmark_points["right-skull"].ml_um > right_limit_um + floating_tolerance_um
+        or landmark_points["left-skull"].ml_um < left_limit_um - floating_tolerance_um
+    ):
+        raise ValueError(
+            "calibration atlas right-skull and left-skull landmarks must lie at least "
+            "half one ML voxel into their named hemispheres"
+        )
 
 
 class RegionDisplayState(BaseModel):
@@ -180,6 +312,34 @@ class PlannerProject(BaseModel):
             raise ValueError("project revision must be a nonnegative integer")
         return value
 
+    def validate_probe_plan_projection_semantics(self, plan: ProbePlanRecord) -> None:
+        """Reproduce one persisted plan's target and current-version placement geometry."""
+
+        if self.atlas is None:
+            raise ValueError("probe plan projection validation requires project atlas metadata")
+        target = next(
+            (
+                item
+                for item in self.unprojected_bregma_targets
+                if item.target_uuid == plan.source_target.target_uuid
+            ),
+            None,
+        )
+        if target is None:
+            raise ValueError("probe plan source target is not present in the current project")
+        calibration = next(
+            (item for item in self.calibrations if item.calibration_uuid == plan.calibration_uuid),
+            None,
+        )
+        if calibration is None:
+            raise ValueError("probe plan references an unavailable calibration")
+        validate_plan_projection_semantics(
+            plan=plan,
+            target=target,
+            calibration=calibration,
+            atlas=self.atlas,
+        )
+
     @model_validator(mode="after")
     def validate_atlas_bound_state(self) -> Self:
         """Reject mixed atlas identities and out-of-bounds persisted cursors."""
@@ -223,8 +383,11 @@ class PlannerProject(BaseModel):
                 raise ValueError("a linked atlas cursor requires atlas metadata")
             if self.renderer_anchor is not None:
                 raise ValueError("a renderer anchor requires atlas metadata")
-            if self.viewer_slice_depths is not None or self.viewer_region_selection is not None:
-                raise ValueError("viewer slice state requires atlas metadata")
+            validate_viewer_state_semantics(
+                atlas=self.atlas,
+                slice_depths=self.viewer_slice_depths,
+                region_selection=self.viewer_region_selection,
+            )
             if self.selected_region_id is not None or self.region_display:
                 raise ValueError("atlas region state requires atlas metadata")
             if self.calibrations or self.active_calibration_uuid is not None:
@@ -295,6 +458,8 @@ class PlannerProject(BaseModel):
                 raise ValueError(
                     "calibration animal subject ID does not match the current project subject"
                 )
+            validate_calibration_atlas_landmark_semantics(calibration, self.atlas)
+            validate_atlas_registered_calibration_reproducibility(calibration)
 
         plans_by_id = {item.plan_uuid: item for item in self.probe_plans}
         for plan in self.probe_plans:
@@ -343,6 +508,7 @@ class PlannerProject(BaseModel):
                 plan.placement.custom_geometry_acknowledged
             ):
                 raise ValueError("unverified probe plan geometry requires explicit acknowledgment")
+            self.validate_probe_plan_projection_semantics(plan)
         for bundle in self.probe_region_analyses:
             referenced_plan = plans_by_id.get(bundle.plan_uuid)
             if referenced_plan is None:
@@ -370,56 +536,11 @@ class PlannerProject(BaseModel):
             if (provenance.atlas_key, provenance.atlas_version) != expected_atlas_identity:
                 raise ValueError("vessel analysis atlas identity does not match project atlas")
 
-        if self.viewer_slice_depths is not None:
-            depth_limits = {
-                "coronal": self.atlas.shape_voxels[0],
-                "sagittal": self.atlas.shape_voxels[2],
-                "horizontal": self.atlas.shape_voxels[1],
-            }
-            for orientation, limit in depth_limits.items():
-                depth = getattr(self.viewer_slice_depths, orientation)
-                if depth < 0 or depth >= limit:
-                    raise ValueError(f"{orientation} viewer slice {depth} is outside [0, {limit})")
-
-        if self.viewer_region_selection is not None:
-            if self.viewer_slice_depths is None:
-                raise ValueError("a viewer region selection requires persisted slice depths")
-            selection = self.viewer_region_selection
-            if selection.atlas_point.atlas_key != self.atlas.atlas_key or (
-                selection.atlas_point.atlas_version != self.atlas.atlas_package_version
-            ):
-                raise ValueError("viewer region selection atlas identity does not match project")
-            orientation_axes = {
-                "coronal": (0, 1, 2),
-                "sagittal": (2, 1, 0),
-                "horizontal": (1, 0, 2),
-            }
-            if selection.orientation not in orientation_axes:
-                raise ValueError("viewer region selection orientation is unsupported")
-            fixed_axis, row_axis, column_axis = orientation_axes[selection.orientation]
-            expected_depth = getattr(self.viewer_slice_depths, selection.orientation)
-            if selection.index < 0 or selection.row < 0 or selection.column < 0:
-                raise ValueError("viewer region selection indices must be nonnegative")
-            if selection.index != expected_depth:
-                raise ValueError("viewer region selection does not belong to the persisted slice")
-            if selection.row >= self.atlas.shape_voxels[row_axis] or (
-                selection.column >= self.atlas.shape_voxels[column_axis]
-            ):
-                raise ValueError("viewer region selection pixel is outside the slice image")
-            point_voxel = tuple(
-                math.floor(value / resolution)
-                for value, resolution in zip(
-                    selection.atlas_point.as_tuple(),
-                    self.atlas.resolution_um,
-                    strict=True,
-                )
-            )
-            expected_voxel = [0, 0, 0]
-            expected_voxel[fixed_axis] = selection.index
-            expected_voxel[row_axis] = selection.row
-            expected_voxel[column_axis] = selection.column
-            if point_voxel != tuple(expected_voxel):
-                raise ValueError("viewer region selection point does not match its intrinsic pixel")
+        validate_viewer_state_semantics(
+            atlas=self.atlas,
+            slice_depths=self.viewer_slice_depths,
+            region_selection=self.viewer_region_selection,
+        )
 
         region_ids = [state.structure_id for state in self.region_display]
         if len(region_ids) != len(set(region_ids)):

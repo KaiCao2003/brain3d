@@ -116,6 +116,10 @@ Rules:
    offset.
 5. The coordinate kind (`continuous`, `index`, `index_anchor`, or `voxel_center`) is persisted
    whenever it cannot be inferred from the frame.
+6. A slice header labels its fixed coordinate as atlas-native physical `Atlas AP`, `Atlas ML`,
+   or `Atlas DV` in millimetres. It must not present that value as bregma-relative. The editable
+   user-facing slice number is one-based in `1...N`; it maps explicitly to internal array index
+   `i = number - 1`.
 
 BrainGlobe 2.3.1 converts micron queries with `int(c / resolution)` and does no bounds check.
 For positive finite values this behaves like `floor`, but negative fractions can truncate to
@@ -228,6 +232,24 @@ That model must serialize `projected=false` and `usable_for_navigation=false`. I
 Allen point, renderer point, region, or trajectory. Projected stereotaxic coordinates become
 available only after the user explicitly selects or creates a calibration profile.
 
+A calibration's atlas bregma and lambda landmarks must lie within half one ML voxel of the
+persisted atlas midline. Its named right-skull and left-skull landmarks must straddle that
+midline on their respective BrainGlobe sides, each at least half one ML voxel away. A violation
+is rejected as `CALIBRATION_ATLAS_MIDLINE_MISMATCH` before project mutation. The same invariant
+is revalidated when a persisted project is loaded, so an older or forged calibration cannot
+bypass the create boundary. Together with the existing bregma-anterior-to-lambda AP ordering,
+this binds the calibration to the required presentation semantics: `AP−` is posterior and
+`ML−` is animal-left, which appears screen-right in the reviewed Dorsal, Coronal, and Horizontal
+camera presets.
+
+The persisted calibration is not trusted merely because its own digest is internally
+consistent. Validation regenerates the skull transform through the production landmark
+calibration and regenerates the atlas transform through the production anatomical fit. It
+compares the derived matrices, landmark correspondences and residuals, transform semantics,
+skull leveling angles, and skull QC at a tolerance far below one micrometre. Stored landmark
+UUIDs and calibration/transform UUIDs remain identity fields rather than regenerated geometry.
+Thus a changed and self-rehashed matrix, residual, leveling result, or QC result fails closed.
+
 A calibration profile records at least:
 
 - stable profile ID and schema version;
@@ -239,6 +261,27 @@ A calibration profile records at least:
 - axis order, signs, units, and voxel-anchor policy;
 - atlas identity and content hash to which it applies;
 - uncertainty or validation notes.
+
+Every persisted probe plan is semantically bound to its exact source target and referenced
+calibration, not only to a self-contained record hash. For planning-algorithm v2/v3 records,
+project validation fully reconstructs placement from preserved mode, entry when applicable,
+angles, depth, roll, probe model, target, and calibration; it then compares every physical
+geometry field as well as the target projection digest. Uniformly translated and same-target
+alternate-angle placements therefore fail even with recomputed record hashes. Historical v1
+records do not preserve enough inputs for independent reconstruction; they remain load/review
+only and cannot enter 2D/3D planning overlays, PDF planning pages, or region analysis until
+updated. Vessel-clearance analysis is unavailable for every plan version.
+
+A catalog-owned probe-model snapshot is also compared field for field with the exact pinned
+catalog definition. Identity/version, source provenance, verification state, shank dimensions
+and offsets, tip geometry, and the complete ordered recording-site table are part of that
+semantic boundary. Unknown custom identities may survive only in a historical v1 audit record;
+they are not accepted for current planning geometry or analysis.
+
+Persistence schema 8 versions these fail-closed calibration, model, and trajectory semantics.
+Migration from schema 7 deep-copies the record and advances only the schema number; it does not
+infer, rewrite, or repair scientific geometry. The schema-8 project validator then accepts a
+reproducible record or rejects it with no guessed correction.
 
 The IBL estimate `[ML, AP, DV] = [5739, 5400, 332] µm` is explicitly part of the “IBL Bregma
 and coordinate system.” It may be offered later as a named, opt-in profile, for example
@@ -345,6 +388,7 @@ Tests must exercise the application adapter, not only reproduce BrainGlobe inter
 | Rendering/picking | asymmetric left/right landmarks and camera presets | landmarks render on the anatomically intended sides; normals/winding are correct; picking round-trips to the original BrainGlobe point |
 | External Allen import | asymmetric ASL/ASR golden fixtures | declared transforms produce the expected hemisphere and region; ambiguous XYZ or missing metadata is rejected |
 | Unprojected bregma target | strict decimal AP/ML/DV input, zero values, signs, save/reopen | exact named values and frame survive; AP− is posterior, ML− is left, DV− is deep; projection and navigation remain false |
+| Calibration reproduction and direction | midline bregma/lambda, AP-reversed pair, named lateral pair, shifted axis, same-side pair, half-voxel boundary points, and forged matrices/residuals/QC | valid fits reproduce from stored landmarks and preserve AP−→posterior and ML−→animal-left; reversed, shifted, same-side, too-close, or forged fits fail before use |
 | Stereotaxic profile | explicit user anchor and optional named estimate | selected landmark maps to zero and inverses correctly; no profile is silently selected; profile/atlas mismatch is rejected |
 | Provenance/integrity | saved project with locked identity and hash | exact identity reloads; changed package, source annotation, resolution, transform schema, or hash fails closed |
 

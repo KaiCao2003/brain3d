@@ -187,7 +187,7 @@ def test_current_schema_round_trip_preserves_state_above_retracted_model_limits(
 
     assert (saved / PROJECT_FILENAME).stat().st_size < MAX_PROJECT_JSON_BYTES
     assert (saved / REGIONS_FILENAME).stat().st_size < PROJECT_MEMBER_MAX_BYTES[REGIONS_FILENAME]
-    assert loaded.schema_version == 7
+    assert loaded.schema_version == 8
     assert loaded.user_notes == project.user_notes
     assert loaded.region_display == project.region_display
 
@@ -517,7 +517,7 @@ def test_schema_one_package_load_migrates_midline_and_renderer_anchor(tmp_path: 
 
     migrated = load_project(path)
 
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 8
     assert migrated.atlas is not None
     assert migrated.atlas.midline_ml_um == 5700.0
     assert migrated.renderer_anchor == anchor
@@ -546,7 +546,7 @@ def test_schema_two_package_without_vasculature_member_migrates_to_empty_state(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 8
     assert migrated.subject_vascular_images == []
     assert migrated.dorsal_vascular_registrations == []
     assert migrated.subject_vascular_overlays == []
@@ -598,7 +598,7 @@ def test_schema_three_package_migration_preserves_vascular_target_and_viewer_sta
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 8
     assert migrated.viewer_slice_depths == project.viewer_slice_depths
     assert migrated.unprojected_bregma_targets == project.unprojected_bregma_targets
     assert migrated.subject_vascular_images == project.subject_vascular_images
@@ -607,6 +607,32 @@ def test_schema_three_package_migration_preserves_vascular_target_and_viewer_sta
     assert migrated.reference_vascular_density == project.reference_vascular_density
     assert migrated.calibrations == []
     assert migrated.active_calibration_uuid is None
+
+
+def test_schema_seven_package_load_versions_semantic_contract_without_state_drift(
+    tmp_path: Path,
+) -> None:
+    project = PlannerProject(title="Safe schema seven", subject_id="mouse-v7")
+    package = save_project(project, tmp_path / "schema-seven")
+    project_path = package / PROJECT_FILENAME
+    payload = json.loads(project_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    encoded = (json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode()
+    project_path.write_bytes(encoded)
+    checksums_path = package / CHECKSUMS_FILENAME
+    checksums = json.loads(checksums_path.read_text(encoding="utf-8"))
+    checksums[PROJECT_FILENAME] = hashlib.sha256(encoded).hexdigest()
+    checksums_path.write_text(
+        json.dumps(checksums, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    migrated = load_project(package, recover_backup=False)
+
+    expected = project.model_dump(mode="json")
+    expected["schema_version"] = 8
+    assert migrated.model_dump(mode="json") == expected
 
 
 @pytest.mark.parametrize("legacy_schema", [4, 5])
@@ -644,7 +670,7 @@ def test_schema_four_and_five_packages_preserve_split_vascular_state_and_assets(
 
     migrated = load_project(path, recover_backup=False)
 
-    assert migrated.schema_version == 7
+    assert migrated.schema_version == 8
     assert migrated.subject_vascular_images == project.subject_vascular_images
     assert migrated.dorsal_vascular_registrations == project.dorsal_vascular_registrations
     assert migrated.subject_vascular_overlays == project.subject_vascular_overlays

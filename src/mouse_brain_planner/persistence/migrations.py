@@ -30,9 +30,13 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     every probe plan's immutable source-target snapshot a required project
     target. Legacy schema-5/6 projects could delete that target while retaining
     the plan, so migration restores an unambiguous missing snapshot instead of
-    weakening the current referential-integrity invariant. Earlier projects
-    otherwise default new state to empty without altering legacy AP/ML/DV
-    coordinates.
+    weakening the current referential-integrity invariant. Schema 8 versions
+    the fail-closed calibration and probe semantic-validation contract. Its
+    migration only copies the schema-7 payload and bumps the version: current
+    ``PlannerProject`` validation may then accept coherent state or reject
+    unsafe legacy geometry, but migration never repairs or reinterprets it.
+    Earlier projects otherwise default new state to empty without altering
+    legacy AP/ML/DV coordinates.
     """
 
     version = payload.get("schema_version")
@@ -49,23 +53,33 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
             )
         return payload
     if version == 1:
-        return _migrate_v6_to_v7(
-            _migrate_v5_to_v6(
-                _migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload))))
+        return _migrate_v7_to_v8(
+            _migrate_v6_to_v7(
+                _migrate_v5_to_v6(
+                    _migrate_v4_to_v5(
+                        _migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload)))
+                    )
+                )
             )
         )
     if version == 2:
-        return _migrate_v6_to_v7(
-            _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload))))
+        return _migrate_v7_to_v8(
+            _migrate_v6_to_v7(
+                _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload))))
+            )
         )
     if version == 3:
-        return _migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload))))
+        return _migrate_v7_to_v8(
+            _migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload))))
+        )
     if version == 4:
-        return _migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(payload)))
+        return _migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(payload))))
     if version == 5:
-        return _migrate_v6_to_v7(_migrate_v5_to_v6(payload))
+        return _migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(payload)))
     if version == 6:
-        return _migrate_v6_to_v7(payload)
+        return _migrate_v7_to_v8(_migrate_v6_to_v7(payload))
+    if version == 7:
+        return _migrate_v7_to_v8(payload)
     raise UnsupportedProjectSchemaError(
         f"project schema {version!r} cannot be migrated to {PROJECT_SCHEMA_VERSION}"
     )
@@ -266,6 +280,24 @@ def _migrate_v6_to_v7(payload: dict[str, Any]) -> dict[str, Any]:
         )
     migrated["unprojected_bregma_targets"] = [*raw_targets, *missing_targets]
     migrated["schema_version"] = 7
+    return migrated
+
+
+def _migrate_v7_to_v8(payload: dict[str, Any]) -> dict[str, Any]:
+    """Version the fail-closed persisted semantic-validation contract.
+
+    Do not infer, rewrite, or repair calibration/probe geometry here. The
+    current project model validates the structurally preserved payload and
+    provides the actionable rejection when legacy state is unsafe.
+    """
+
+    missing = {"project_revision", "probe_vessel_analyses"} - set(payload)
+    if missing:
+        raise UnsupportedProjectSchemaError(
+            "schema 7 project is missing required persisted state: " + ", ".join(sorted(missing))
+        )
+    migrated = copy.deepcopy(payload)
+    migrated["schema_version"] = 8
     return migrated
 
 

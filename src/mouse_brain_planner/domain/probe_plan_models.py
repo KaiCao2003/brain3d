@@ -200,7 +200,18 @@ class ProbePlanRecord(BaseModel):
             raise ValueError("probe plan requires an explicit animal subject ID")
         if self.source_target.projected:
             raise ValueError("probe plan source must preserve the original unprojected target")
-        if self.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION:
+        if self.planning_algorithm_version == LEGACY_PROBE_PLANNING_ALGORITHM_VERSION:
+            if self.manipulator_input is not None or self.placement_input is not None:
+                raise ValueError("v1 probe plans cannot contain later-version planning inputs")
+            if self.placement.method is not PlacementMethod.TARGET_ANGLES_DEPTH:
+                raise ValueError("v1 probe plans require direct atlas target-angle placement")
+            if (
+                self.placement.local_lateral_direction is not None
+                or self.placement.local_normal_direction is not None
+                or self.placement.model_to_placement_uniform_scale != 1
+            ):
+                raise ValueError("v1 probe plans require unresolved legacy cross-section geometry")
+        elif self.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION:
             if self.manipulator_input is None:
                 raise ValueError("v2 probe plans require preserved manipulator inputs")
             if self.placement.method.value != "stereotaxic-target-plus-manipulator-angles":

@@ -432,11 +432,21 @@ private struct AtlasSliceWorkspace: View {
                 .font(.headline)
             if let frame {
                 Text(
-                    "\(frame.fixedAxis.rawValue) "
+                    "Atlas \(frame.fixedAxis.rawValue) "
                         + "\((frame.sliceCenterMicrometres / 1000).formatted(.number.precision(.fractionLength(3)))) mm"
                 )
                 .font(.callout.monospacedDigit())
                 .foregroundStyle(.secondary)
+                .help(
+                    "Allen atlas physical coordinate. Implant-site AP/ML/DV values "
+                        + "in the sidebar are bregma-relative."
+                )
+                .accessibilityLabel(
+                    "Allen atlas physical \(frame.fixedAxis.rawValue) coordinate"
+                )
+                .accessibilityValue(
+                    "\((frame.sliceCenterMicrometres / 1000).formatted(.number.precision(.fractionLength(3)))) millimetres"
+                )
                 Spacer()
             } else {
                 Spacer()
@@ -480,9 +490,35 @@ private struct AtlasSliceWorkspace: View {
                 .disabled(requestedIndex >= frame.sliceCount - 1)
                 .accessibilityLabel("Next \(orientation.displayName) slice")
 
-                Text("\(requestedIndex + 1) / \(frame.sliceCount)")
+                HStack(spacing: 4) {
+                    TextField(
+                        "Slice",
+                        value: Binding(
+                            get: { requestedIndex + 1 },
+                            set: {
+                                model.requestViewerSlice(
+                                    orientation,
+                                    index: $0 - 1
+                                )
+                            }
+                        ),
+                        format: .number.grouping(.never)
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
                     .font(.callout.monospacedDigit())
-                    .frame(minWidth: 84, alignment: .trailing)
+                    .frame(width: 56)
+                    .accessibilityLabel(
+                        "\(orientation.displayName) slice number"
+                    )
+                    .accessibilityHint(
+                        "Enter a slice from 1 through \(frame.sliceCount)."
+                    )
+                    Text("/ \(frame.sliceCount)")
+                        .font(.callout.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .frame(minWidth: 96, alignment: .trailing)
             }
             .buttonStyle(.bordered)
             .controlSize(.small)

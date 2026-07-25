@@ -9,14 +9,22 @@ from uuid import uuid4
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from tests.integration.test_bridge_probe_planning import (
+    _calibrated_target,
+    _create_plan,
+    _probe_dispatcher,
+)
 
 from mouse_brain_planner.bridge import viewer_state as viewer_state_module
 from mouse_brain_planner.bridge.atlas_interaction import _source_coordinate_frame
 from mouse_brain_planner.bridge.planning import register_planning_handlers
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
+from mouse_brain_planner.domain import project_models as project_models_module
 from mouse_brain_planner.domain.atlas_models import AtlasAxis, AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
+from mouse_brain_planner.domain.project_models import PlannerProject
+from mouse_brain_planner.persistence.project_io import load_project, save_project
 
 
 @dataclass(slots=True)
@@ -289,6 +297,86 @@ def test_slice_mutations_change_only_one_depth_and_clear_selection() -> None:
         "sagittal": 5,
         "horizontal": 1,
     }
+
+
+def test_viewer_hot_path_skips_probe_rederivation_but_trust_boundaries_keep_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    dispatcher, session = _probe_dispatcher()
+    target_id = _calibrated_target(dispatcher, session)
+    created = _create_plan(dispatcher, session, target_id)
+    plan = created["plan"]
+    assert isinstance(plan, dict)
+    assert session.project is not None
+
+    real_validate = project_models_module.validate_plan_projection_semantics
+    semantic_calls: list[str] = []
+
+    def counted_validate(*args: object, **kwargs: object) -> None:
+        plan_arg = kwargs["plan"]
+        semantic_calls.append(str(plan_arg.plan_uuid))
+        real_validate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        project_models_module,
+        "validate_plan_projection_semantics",
+        counted_validate,
+    )
+
+    viewer_result = _call(
+        dispatcher,
+        "viewer.slice.set",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        orientation="coronal",
+        index=1,
+    )
+    assert viewer_result["status"] == "sliceUpdated"
+    assert semantic_calls == []
+
+    PlannerProject.model_validate(session.project.model_dump(mode="python"))
+    assert semantic_calls == [plan["planId"]]
+
+    package = tmp_path / "viewer-hot-path.mouseplan"
+    save_project(session.project, package)
+    semantic_calls.clear()
+    load_project(package)
+    assert semantic_calls
+    assert set(semantic_calls) == {plan["planId"]}
+
+    semantic_calls.clear()
+    analysis = _call(
+        dispatcher,
+        "probe.region.analyze",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        planId=plan["planId"],
+        expectedPlanInputSha256=plan["inputSha256"],
+    )
+    assert analysis["status"] == "analyzed"
+    assert semantic_calls
+
+    semantic_calls.clear()
+    update = _call(
+        dispatcher,
+        "probe.plan.update",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        planId=plan["planId"],
+        expectedPlanInputSha256=plan["inputSha256"],
+        targetId=target_id,
+        modelId=plan["modelId"],
+        modelVersion=plan["modelVersion"],
+        name="Updated after viewer fast-path regression",
+        azimuthDegrees=0,
+        elevationDegrees=-90,
+        insertionDepthMicrometres=4,
+        axialRotationDegrees=0,
+        customGeometryAcknowledged=True,
+    )
+    assert update["status"] == "updated"
+    assert semantic_calls
 
 
 def test_point_navigation_updates_every_depth_and_render_in_one_revision() -> None:

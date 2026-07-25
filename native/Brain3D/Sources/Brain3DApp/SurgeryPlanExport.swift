@@ -442,6 +442,7 @@ struct SurgeryPlanExportResult: Sendable {
 enum SurgeryPlanExportError: Error, LocalizedError {
     case noProject
     case targetUnavailable
+    case unappliedProbeDraft
     case invalidAnimalRecord(String)
     case vesselsUnavailable
     case viewUnavailable(String)
@@ -461,6 +462,8 @@ enum SurgeryPlanExportError: Error, LocalizedError {
             "Open an animal plan before exporting."
         case .targetUnavailable:
             "Select a stored implant target before exporting."
+        case .unappliedProbeDraft:
+            "Apply or revert the probe draft before exporting the surgery plan."
         case let .invalidAnimalRecord(message):
             "The animal record is not usable: \(message)"
         case .vesselsUnavailable:
@@ -499,6 +502,33 @@ struct SurgeryPlanningViewArtifact: Sendable {
     let minimumVisibleVesselDiameterMicrometres: Double
 }
 
+struct SurgeryPlanProbeDraftIdentity: Equatable, Sendable {
+    let editableRevision: Int
+    let hasUnappliedChanges: Bool
+
+    @MainActor
+    func isCurrent(in model: PlannerViewModel) -> Bool {
+        model.probeDraftSession.editableRevision == editableRevision
+            && model.hasUnappliedProbeDraftChanges == hasUnappliedChanges
+    }
+}
+
+enum SurgeryPlanDraftSafety {
+    @MainActor
+    static func captureCurrent(
+        in model: PlannerViewModel
+    ) throws -> SurgeryPlanProbeDraftIdentity {
+        let identity = SurgeryPlanProbeDraftIdentity(
+            editableRevision: model.probeDraftSession.editableRevision,
+            hasUnappliedChanges: model.hasUnappliedProbeDraftChanges
+        )
+        guard !identity.hasUnappliedChanges else {
+            throw SurgeryPlanExportError.unappliedProbeDraft
+        }
+        return identity
+    }
+}
+
 struct SurgeryPlanModelCapture {
     let project: ProjectBridgeState
     let target: UnprojectedImplantTarget
@@ -514,11 +544,13 @@ struct SurgeryPlanModelCapture {
     let sliceFrames: [SurgeryPlanView: VerifiedAtlasSliceFrame]
     let sceneSnapshot: AnimalSceneSnapshot?
     let hasUnsavedChanges: Bool
+    let probeDraftIdentity: SurgeryPlanProbeDraftIdentity
 
     @MainActor
     func isStillCurrent(in model: PlannerViewModel) -> Bool {
         model.backendState?.project == project
             && model.hasUnsavedChanges == hasUnsavedChanges
+            && probeDraftIdentity.isCurrent(in: model)
             && model.implantTargets.first(where: {
                 $0.targetId == target.targetId
             }) == target
@@ -1067,16 +1099,20 @@ enum SurgeryPlanningPageRenderer {
             font: .systemFont(ofSize: 17, weight: .bold),
             color: prefill.exportClass == .draft ? .systemOrange : .black
         )
-        let planningSummary =
-            "\(prefill.subjectId) · \(prefill.targetLabel) · "
-                + prefill.targetCoordinateText
+        let planningIdentity = fittedPlanningIdentityText(
+            subjectId: prefill.subjectId,
+            targetLabel: prefill.targetLabel,
+            maximumWidth: 716
+        )
         draw(
-            planningSummary,
-            at: CGPoint(x: 38, y: 545),
-            font: fittedPlanningSummaryFont(
-                for: planningSummary,
-                maximumWidth: 716
-            )
+            planningIdentity,
+            at: CGPoint(x: 38, y: 548),
+            font: planningIdentityFont
+        )
+        draw(
+            prefill.targetCoordinateText,
+            at: CGPoint(x: 38, y: 533),
+            font: .monospacedSystemFont(ofSize: 10, weight: .semibold)
         )
         let operatorIdentity = prefill.operatorName
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1084,8 +1120,8 @@ enum SurgeryPlanningPageRenderer {
             operatorIdentity.isEmpty
                 ? artifact.subtitle
                 : "\(artifact.subtitle) · operator \(operatorIdentity)",
-            at: CGPoint(x: 38, y: 528),
-            font: .systemFont(ofSize: 9.5),
+            at: CGPoint(x: 38, y: 518),
+            font: .systemFont(ofSize: 9),
             color: NSColor(calibratedWhite: 0.32, alpha: 1)
         )
 
@@ -1093,7 +1129,7 @@ enum SurgeryPlanningPageRenderer {
         // particular, the full NPX2 four-shank identity legitimately occupies
         // two lines; giving it a single 18-point row caused it to overwrite the
         // vessel disclosure in real exports.
-        let imageBounds = CGRect(x: 38, y: 168, width: 716, height: 346)
+        let imageBounds = CGRect(x: 38, y: 168, width: 716, height: 336)
         NSColor(calibratedWhite: 0.96, alpha: 1).setFill()
         imageBounds.fill()
         image.draw(
@@ -1168,7 +1204,24 @@ enum SurgeryPlanningPageRenderer {
         NSGraphicsContext.restoreGraphicsState()
         context.endPDFPage()
         context.closePDF()
-        return output as Data
+        let data = output as Data
+        let expectedTitle =
+            "\(prefill.exportClass.rawValue) · Surgery planning view — "
+                + artifact.view.rawValue
+        guard let verified = PDFDocument(data: data),
+              verified.pageCount == 1,
+              let verifiedPage = verified.page(at: 0),
+              verifiedPage.bounds(for: .mediaBox).size == mediaBox.size,
+              let verifiedText = verified.string,
+              verifiedText.contains(expectedTitle),
+              verifiedText.contains(prefill.targetCoordinateText)
+        else {
+            throw SurgeryPlanExportError.pdfAssemblyFailed(
+                "\(artifact.view.rawValue) planning page did not retain "
+                    + "its title and full AP/ML/DV coordinates."
+            )
+        }
+        return data
     }
 
     private static func aspectFit(
@@ -1192,26 +1245,33 @@ enum SurgeryPlanningPageRenderer {
         )
     }
 
-    static func fittedPlanningSummaryFont(
-        for text: String,
+    private static var planningIdentityFont: NSFont {
+        .monospacedSystemFont(ofSize: 9.5, weight: .semibold)
+    }
+
+    static func fittedPlanningIdentityText(
+        subjectId: String,
+        targetLabel: String,
         maximumWidth: CGFloat
-    ) -> NSFont {
-        var pointSize: CGFloat = 10.5
-        while pointSize > 8 {
-            let font = NSFont.monospacedSystemFont(
-                ofSize: pointSize,
-                weight: .semibold
-            )
-            let width = NSAttributedString(
-                string: text,
-                attributes: [.font: font]
-            ).size().width
-            if width <= maximumWidth {
-                return font
-            }
-            pointSize -= 0.25
-        }
-        return .monospacedSystemFont(ofSize: 8, weight: .semibold)
+    ) -> String {
+        let identity = [
+            singleLineIdentityComponent(subjectId),
+            singleLineIdentityComponent(targetLabel),
+        ].joined(separator: " · ")
+        return SurgeryProtocolPDFRenderer.textFittedToWidth(
+            identity,
+            maximumWidth: maximumWidth,
+            attributes: [
+                .font: planningIdentityFont,
+                .foregroundColor: NSColor.black,
+            ]
+        )
+    }
+
+    private static func singleLineIdentityComponent(_ text: String) -> String {
+        text.components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 
     private static func draw(
@@ -1782,6 +1842,7 @@ enum SurgeryPlanExporter {
         configuration: SurgeryPlanExportConfiguration,
         outputURL: URL
     ) async throws -> SurgeryPlanExportResult {
+        _ = try SurgeryPlanDraftSafety.captureCurrent(in: model)
         let configuration = try configuration.validated()
         let protocolTemplateData: Data
         do {
@@ -1923,6 +1984,11 @@ enum SurgeryPlanExporter {
                   writtenDocument,
                   planningPageCount: artifacts.count
               ),
+              verifyPlanningPages(
+                  writtenDocument,
+                  artifacts: artifacts,
+                  prefill: prefill
+              ),
               (0 ..< writtenDocument.pageCount).allSatisfy({ index in
                   SurgeryPlanPacketRenderer.auditText(
                       writtenDocument.page(at: index)?.string,
@@ -1980,6 +2046,9 @@ enum SurgeryPlanExporter {
         model: PlannerViewModel,
         configuration: SurgeryPlanExportConfiguration
     ) async throws -> SurgeryPlanModelCapture {
+        let probeDraftIdentity = try SurgeryPlanDraftSafety.captureCurrent(
+            in: model
+        )
         guard let project = model.backendState?.project else {
             throw SurgeryPlanExportError.noProject
         }
@@ -2099,7 +2168,8 @@ enum SurgeryPlanExporter {
                 : nil,
             sliceFrames: sliceFrames,
             sceneSnapshot: sceneSnapshot,
-            hasUnsavedChanges: capturedUnsavedState
+            hasUnsavedChanges: capturedUnsavedState,
+            probeDraftIdentity: probeDraftIdentity
         )
         guard capture.isStillCurrent(in: model) else {
             throw SurgeryPlanExportError.stateChangedDuringExport
@@ -2166,6 +2236,25 @@ enum SurgeryPlanExporter {
             else { return false }
         }
         return document.pageCount == planningPageCount + 3
+    }
+
+    private static func verifyPlanningPages(
+        _ document: PDFDocument,
+        artifacts: [SurgeryPlanningViewArtifact],
+        prefill: SurgeryPlanPrefill
+    ) -> Bool {
+        for (offset, artifact) in artifacts.enumerated() {
+            guard let text = document.page(at: offset + 2)?.string,
+                  text.contains(
+                      "\(prefill.exportClass.rawValue) · "
+                          + "Surgery planning view — \(artifact.view.rawValue)"
+                  ),
+                  text.contains(prefill.targetCoordinateText)
+            else {
+                return false
+            }
+        }
+        return true
     }
 }
 

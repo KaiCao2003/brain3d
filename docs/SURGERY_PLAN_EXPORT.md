@@ -43,6 +43,36 @@ The production probe selector contains only Neuropixels 2.0 single-shank
 must be the current plan for the selected target, projection, calibration, and atlas. NP1, NP2
 Quad Base, and synthetic fixtures are not selectable for a new production plan.
 
+The plan's embedded probe model must exactly equal its source-pinned catalog snapshot, including
+provenance, verification state, all shank/tip fields, and every ordered recording site. A
+modified and self-rehashed model cannot enter a packet. Unknown custom models are retained only
+on the historical v1 audit path and cannot be exported as current planning geometry.
+
+Changing fields for an existing probe does not silently change the applied trajectory. Until
+the user selects **Apply changes**, the views and PDF remain bound to the last applied values.
+The user may instead select **Revert**. Saving and export are blocked while such edits are
+unapplied.
+
+Automatically prepared new-probe defaults are clean. Once the user changes the NPX2 model or
+enters planning values, the uncreated draft must be completed with **Create plan** or cleared
+with **Discard draft** before leaving the current project. An uncreated draft cannot be exported.
+The draft belongs to the app-level planner session in the single main planning window, so closing
+and reopening that window does not erase it. Opening another project, reconnecting, or quitting
+requires the dirty draft to be resolved or explicitly discarded.
+
+Project validation fully reconstructs planning-algorithm v2/v3 placements from their preserved
+mode, entry when applicable, angles, depth, roll, probe model, source target, and calibration,
+then compares every physical geometry field. A translated placement, same-target alternate-angle
+trajectory, or forged projection digest is rejected even if the record hash is recomputed.
+Both persisted calibration fits are also rerun from their landmark inputs; AP ordering,
+midline/laterality, matrices, correspondences, residuals, leveling angles, and skull QC must
+reproduce before projection or export.
+Historical v1 records lack sufficient preserved inputs, remain load/review only, and must be
+recomputed/updated before they can enter 2D/3D planning overlays, PDF planning pages, or region
+analysis. Vessel-clearance analysis remains unavailable for every plan version. Schema 8 makes
+this a versioned persistence contract; schema-7 migration preserves geometry exactly and never
+guesses a repair.
+
 The packet is marked `FINAL` only when the project has a subject, records the animal-research
 acknowledgement, is saved and clean, has a calibration permitted for final export, and has a
 current matching probe plan. Otherwise it is visibly marked `DRAFT`.
@@ -107,18 +137,22 @@ an unreviewed Swift PDF package:
    AP/ML/DV, angle, and
    `DRAFT`/`FINAL` fields to the first protocol page. The overlay is flattened into the page and
    required text and page geometry are rechecked.
-3. Brain3D captures and hashes `MBSC_Figs_with_Layers.pdf`, validates all 132 pages, and selects
+3. Each Brain3D planning page uses a bounded subject/target identity line and a separate
+   monospaced line containing the complete signed AP/ML/DV text. Brain3D reopens the rendered
+   page and verifies its expected view title and exact coordinate text.
+4. Brain3D captures and hashes `MBSC_Figs_with_Layers.pdf`, validates all 132 pages, and selects
    the matching historical atlas page directly from that immutable PDF capture.
-4. Core Graphics redraws the selected atlas page with a non-destructive identity and coordinate
+5. Core Graphics redraws the selected atlas page with a non-destructive identity and coordinate
    summary. Brain3D checks the source hash before writing and verifies the output dimensions,
    figure number, coordinate text, and source-digest stamp.
-5. PDFKit assembles the two protocol pages, the selected planning-view page or pages, and the
+6. PDFKit assembles the two protocol pages, the selected planning-view page or pages, and the
    one atlas page. The source template's page-3 sketch is a placeholder and is replaced rather
    than emitted.
-6. Core Graphics redraws every assembled page with a flattened audit stamp containing the
+7. Core Graphics redraws every assembled page with a flattened audit stamp containing the
    export class, subject, stable target ID, project revision, target label, protocol-template
    digest, vessel digest, and page number. PDFKit then verifies every stamp, page size, page
-   count, and final atlas identity before the packet is atomically written.
+   count, each planning page's ordered view title and exact AP/ML/DV text, and the final atlas
+   identity before the packet is atomically written.
 
 The user-supplied source files are never rewritten. Word, Illustrator, Apple Events automation,
 and document-conversion subprocesses are not used.
@@ -152,8 +186,9 @@ The protocol PDF template and selected historical atlas plate are also SHA-256 h
 print shortened protocol, historical-atlas, and vessel source digests together with project
 revision and coordinates; the in-memory capture retains the full identities for validation.
 Brain3D rechecks the project, target, projection, calibration, selected probe, atlas, vessel
-asset, PDF source hashes, and dirty state before rendering and again before writing. If any
-captured state changes, export fails instead of mixing revisions.
+asset, PDF source hashes, and dirty state before rendering and again before writing. Export
+cannot begin with an unapplied probe draft. If any captured state changes, export fails instead
+of mixing revisions.
 
 ## Source ownership and redistribution
 

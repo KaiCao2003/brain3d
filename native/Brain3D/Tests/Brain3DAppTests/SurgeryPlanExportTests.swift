@@ -350,23 +350,87 @@ struct SurgeryPlanExportTests {
         }
     }
 
-    @Test("Planning-page summary keeps the full coordinate line on page")
-    func planningPageSummaryWidth() {
-        let text =
-            "brain3d-direction-qa-20260724 · "
-                + "AP- posterior / ML- animal-left direction QA · "
-                + "AP -1.000 mm · ML -0.500 mm · DV -1.500 mm"
-        let font = SurgeryPlanningPageRenderer.fittedPlanningSummaryFont(
-            for: text,
-            maximumWidth: 716
+    @MainActor
+    @Test("Maximum identity fields cannot displace planning coordinates")
+    func planningPageMaximumIdentityKeepsCoordinates() throws {
+        let subjectId = String(repeating: "S", count: 200)
+        let targetLabel = String(repeating: "T", count: 80)
+        let prefill = makePrefill(
+            azimuthDegrees: 0,
+            elevationDegrees: -90,
+            subjectId: subjectId,
+            targetLabel: targetLabel
         )
+        let visibleIdentity = SurgeryPlanningPageRenderer
+            .fittedPlanningIdentityText(
+                subjectId: subjectId,
+                targetLabel: targetLabel,
+                maximumWidth: 716
+            )
+        #expect(visibleIdentity.hasSuffix("…"))
+        #expect(!visibleIdentity.contains(subjectId))
+
+        let digest = String(repeating: "a", count: 64)
+        let artifact = SurgeryPlanningViewArtifact(
+            view: .dorsal,
+            pngData: try solidPNG(),
+            subtitle: "Allen atlas dorsal surface projection",
+            vesselAssetSHA256: digest,
+            vesselSegmentCount: 321,
+            vesselScope: "dorsal depth projection",
+            minimumVisibleVesselDiameterMicrometres: 50
+        )
+        let plate = SurgeryAtlasPlate(
+            figure: 105,
+            orientation: .sagittal,
+            fixedCoordinateMillimetres: 0.48,
+            sourceURL: URL(fileURLWithPath: "/tmp/MBSC_Figs_with_Layers.pdf")
+        )
+        let rendered = try SurgeryPlanningPageRenderer.render(
+            artifact: artifact,
+            prefill: prefill,
+            atlasPlate: plate,
+            atlasSourceSHA256: String(repeating: "b", count: 64),
+            protocolSourceSHA256: String(repeating: "c", count: 64),
+            vesselSource: "VesSAP specimen-test, diameter ≥30 µm"
+        )
+        let document = try #require(PDFDocument(data: rendered))
+        let page = try #require(document.page(at: 0))
+        let coordinateSelections = document.findString(
+            prefill.targetCoordinateText,
+            withOptions: []
+        )
+        let coordinateSelection = try #require(coordinateSelections.first)
+        let coordinateBounds = coordinateSelection.bounds(for: page)
+
+        #expect(coordinateSelections.count == 1)
+        #expect(page.string?.contains(prefill.targetCoordinateText) == true)
+        #expect(coordinateBounds.minX >= 37)
+        #expect(coordinateBounds.maxX <= 755)
+        #expect(coordinateBounds.minY >= 520)
+        #expect(coordinateBounds.maxY <= 550)
+    }
+
+    @Test("Planning identity text is deterministically width-bounded")
+    func planningPageIdentityWidth() {
+        let visibleIdentity = SurgeryPlanningPageRenderer
+            .fittedPlanningIdentityText(
+                subjectId: String(repeating: "subject", count: 30),
+                targetLabel: String(repeating: "target", count: 14),
+                maximumWidth: 716
+            )
         let renderedWidth = NSAttributedString(
-            string: text,
-            attributes: [.font: font]
+            string: visibleIdentity,
+            attributes: [
+                .font: NSFont.monospacedSystemFont(
+                    ofSize: 9.5,
+                    weight: .semibold
+                ),
+            ]
         ).size().width
 
         #expect(renderedWidth <= 716)
-        #expect(font.pointSize >= 8)
+        #expect(visibleIdentity.hasSuffix("…"))
     }
 
     @MainActor
@@ -724,6 +788,46 @@ struct SurgeryPlanExportTests {
     }
 
     @MainActor
+    @Test("Direct export capture rejects an unapplied probe draft")
+    func directExportRejectsProbeDraft() {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        model.probeDraftSession.name = "Unapplied left V1"
+
+        do {
+            _ = try SurgeryPlanDraftSafety.captureCurrent(in: model)
+            Issue.record("Expected the direct export boundary to reject the draft.")
+        } catch let error as SurgeryPlanExportError {
+            #expect(
+                error.errorDescription
+                    == "Apply or revert the probe draft before exporting the surgery plan."
+            )
+        } catch {
+            Issue.record("Unexpected export safety error: \(error)")
+        }
+    }
+
+    @MainActor
+    @Test("Any probe draft mutation invalidates an in-flight export identity")
+    func probeDraftMutationInvalidatesCapture() throws {
+        let defaults = UserDefaults(suiteName: UUID().uuidString)!
+        let model = PlannerViewModel(
+            launchConfiguration: nil,
+            preferences: defaults
+        )
+        let captured = try SurgeryPlanDraftSafety.captureCurrent(in: model)
+        #expect(captured.isCurrent(in: model))
+
+        model.probeDraftSession.depth = "3.25"
+
+        #expect(!captured.isCurrent(in: model))
+        #expect(model.hasUnappliedProbeDraftChanges)
+    }
+
+    @MainActor
     @Test("PDF assembly keeps protocol, selected views, then atlas")
     func pdfAssemblyOrder() throws {
         let protocolPDF = try labeledPDF(["protocol-1", "protocol-2"])
@@ -910,6 +1014,16 @@ struct SurgeryPlanExportTests {
         let document = try #require(PDFDocument(data: stamped))
 
         #expect(document.pageCount == 8)
+        for (offset, view) in SurgeryPlanView.allCases.enumerated() {
+            let planningPage = try #require(document.page(at: offset + 2))
+            let text = planningPage.string ?? ""
+            #expect(
+                text.contains(
+                    "FINAL · Surgery planning view — \(view.rawValue)"
+                )
+            )
+            #expect(text.contains(prefill.targetCoordinateText))
+        }
         for index in 0 ..< document.pageCount {
             let page = try #require(document.page(at: index))
             let stamp = SurgeryPlanPacketRenderer.auditStamp(
