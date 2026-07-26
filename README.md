@@ -170,9 +170,10 @@ layer, and appends one coordinate-matched page from the user-owned 132-page
 for sagittal plates; the signed left/right ML value remains explicit in the planning pages. The
 source template's third-page sketch is a placeholder and is replaced, not emitted.
 
-Set the prepared Headplate protocol PDF and `MBSC_Figs_with_Layers.pdf` once in
-**Brain3D → Settings**. Every export reuses those saved locations until they are replaced there;
-a disconnected volume is reported instead of opening a chooser on every export. The
+Set the prepared Headplate protocol PDF once in **Brain3D → Settings**. A lab-local build may
+include the exact reviewed `MBSC_Figs_with_Layers.pdf` inside the app; Brain3D verifies its pinned
+SHA-256 and 132-page identity and uses it automatically. Builds without that user-supplied resource
+retain the saved atlas-location fallback in Settings. The
 implementation reads both PDFs directly, uses SceneKit for the 3D snapshot, and uses
 PDFKit/Core Graphics for overlays, assembly, and verification. It does not open Word,
 Illustrator, or another converter. Neither supplied PDF is copied into this public repository.
@@ -282,10 +283,13 @@ for local qualification but is not notarized and should not be presented as a no
 ready download. Notarization and testing on a separate clean macOS 14 Apple Silicon machine remain
 release-operator gates.
 
-The app contains code and the display-only VesSAP derivative, but not the Allen atlas, user
-protocol PDF, or Mouse Brain atlas PDF. Allen data is still downloaded to the user's application
-cache when requested; the two surgery-packet PDFs remain external user-configured inputs. Public
-distribution must preserve the bundled notices and the VesSAP CC BY-NC 4.0 noncommercial terms.
+The public app contains code and the display-only VesSAP derivative, but not the Allen atlas,
+user protocol PDF, or Mouse Brain atlas PDF. Allen data is still downloaded to the user's
+application cache when requested. An authorized lab-local build can set
+`BRAIN3D_LOCAL_LAB_BUILD=1` together with `BRAIN3D_MBSC_PDF` to include the exact reviewed Mouse
+Brain PDF; that local artifact must not be uploaded or
+redistributed without permission from the source owner. Public distribution must preserve the
+bundled notices and the VesSAP CC BY-NC 4.0 noncommercial terms.
 
 ## Repository map
 

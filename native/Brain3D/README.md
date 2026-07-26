@@ -53,8 +53,9 @@ The fixed packet order is:
 
 The app reads the prepared three-page protocol PDF directly, prefills pages 1–2, and replaces its
 page-3 sketch placeholder with the matched page from the consolidated 132-page
-`MBSC_Figs_with_Layers.pdf`. Configure both PDF locations once in **Brain3D → Settings**; later
-exports reuse those locations until they are replaced there. PDFKit/Core Graphics read the
+`MBSC_Figs_with_Layers.pdf`. Configure the protocol PDF once in **Brain3D → Settings**. A lab-local
+build can include the reviewed atlas PDF and use it automatically; builds without it retain the
+saved atlas-location fallback. PDFKit/Core Graphics read the
 sources directly, merge the packet, and flatten an audit stamp onto every page. The original
 source files are never rewritten. Word, Illustrator, and Apple Events automation are not used.
 
@@ -112,6 +113,19 @@ Apple-Silicon-only standalone build, run from the repository root:
 native/Brain3D/Scripts/build-release-app.sh
 ```
 
+To create a lab-local app that carries the reviewed atlas without copying it into the repository:
+
+```sh
+BRAIN3D_LOCAL_LAB_BUILD=1 \
+  BRAIN3D_MBSC_PDF='/path/to/MBSC_Figs_with_Layers.pdf' \
+  native/Brain3D/Scripts/build-release-app.sh
+```
+
+The explicit local-build gate keeps this resource out of the normal GitHub release archive. The
+builder accepts only the pinned 12,461,500-byte, 132-page source identity. The resulting app
+uses `Contents/Resources/SurgeryAtlas/MBSC_Figs_with_Layers.pdf` automatically. This optional
+artifact is local/user-supplied and is not authorized for public redistribution by Brain3D.
+
 This uses exact uv-managed CPython 3.12.12 and PyInstaller 6.21.0 from the lockfile. It writes
 `dist/Brain3D.app` and `dist/Brain3D-macOS-arm64.zip` below this package unless `OUTPUT_DIR` is set.
 The bundled NDJSON executable is `Contents/Resources/Bridge/brain3d-bridge`; no Python installation,
@@ -129,6 +143,8 @@ builder ad-hoc signs the app. Ad-hoc builds are not notarized. A public release 
 notarization and clean-machine macOS 14 qualification by the release operator. Production SBOM,
 dependency license copies, and build provenance are embedded in `Contents/Resources/Release`.
 
-Downloaded Allen atlas data and the user-selected surgery protocol/atlas PDFs are intentionally
-outside the app. The bundled VesSAP derivative remains CC BY-NC 4.0, so public distribution must
-remain noncommercial and preserve its attribution, license, manifest, and display-only limits.
+Downloaded Allen atlas data and the user-selected surgery protocol PDF are intentionally outside
+the public app. The Mouse Brain atlas is likewise omitted from public builds, although an
+authorized lab-local build may include its pinned user-supplied copy. The bundled VesSAP derivative
+remains CC BY-NC 4.0, so public distribution must remain noncommercial and preserve its
+attribution, license, manifest, and display-only limits.

@@ -1,5 +1,6 @@
 import AppKit
 import Brain3DCore
+import CryptoKit
 import Foundation
 import PDFKit
 import Testing
@@ -125,6 +126,9 @@ struct SurgeryPlanExportTests {
         )
         let document = try #require(PDFDocument(data: rendered))
         let text = document.string ?? ""
+        let normalizedText = text
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
 
         #expect(document.pageCount == 1)
         #expect(text.contains(prefill.targetCoordinateText))
@@ -134,6 +138,41 @@ struct SurgeryPlanExportTests {
         #expect(text.contains("annotation 2222222222…"))
         #expect(text.contains("Urchin@57be3cdc7d62"))
         #expect(text.contains(String(sourceDigest.prefix(16))))
+        #expect(
+            prefill.probeReviewText.map(normalizedText.contains) == true
+        )
+        #expect(
+            prefill.surfaceProvenanceText.map(normalizedText.contains) == true
+        )
+    }
+
+    @MainActor
+    @Test("Atlas identity box compacts a maximum-length provenance revision")
+    func directAtlasPageBoundsLongSurfaceProvenance() throws {
+        let atlasPDF = try makeAtlasPDF()
+        defer { try? FileManager.default.removeItem(at: atlasPDF) }
+        let plate = try #require(
+            SurgeryAtlasCatalog.canonicalPlates(sourceURL: atlasPDF)
+                .first { $0.figure == 39 }
+        )
+        let prefill = makeSurfacePrefill(
+            bregmaSourceRevision: String(repeating: "r", count: 300)
+        )
+        let provenance = try #require(prefill.surfaceProvenanceText)
+        #expect(provenance.contains("…#"))
+        #expect(!provenance.contains(String(repeating: "r", count: 300)))
+
+        let rendered = try SurgeryAtlasPageRenderer.overlay(
+            atlasPDF: Data(contentsOf: atlasPDF),
+            prefill: prefill,
+            plate: plate,
+            atlasSourceSHA256: String(repeating: "a", count: 64)
+        )
+        let document = try #require(PDFDocument(data: rendered))
+        let normalizedText = (document.string ?? "")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        #expect(normalizedText.contains(provenance))
     }
 
     @MainActor
@@ -664,6 +703,261 @@ struct SurgeryPlanExportTests {
     }
 
     @MainActor
+    @Test("Included atlas resolves only with its pinned file identity")
+    func bundledAtlasIdentity() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "Brain3D-BundledAtlas-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let resources = directory.appendingPathComponent(
+            "Resources",
+            isDirectory: true
+        )
+        let surgeryAtlasDirectory = resources.appendingPathComponent(
+            "SurgeryAtlas",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: surgeryAtlasDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let generatedAtlasURL = try makeAtlasPDF()
+        defer { try? FileManager.default.removeItem(at: generatedAtlasURL) }
+        let bundledURL = surgeryAtlasDirectory.appendingPathComponent(
+            "MBSC_Figs_with_Layers.pdf"
+        )
+        try FileManager.default.copyItem(at: generatedAtlasURL, to: bundledURL)
+        let data = try Data(contentsOf: bundledURL)
+        let identity = SurgeryAtlasBundleIdentity(
+            byteCount: data.count,
+            pageCount: 132,
+            sha256: LowercaseHex.encode(SHA256.hash(data: data))
+        )
+
+        let ready = SurgeryAtlasBundle.inspect(
+            resourceURL: resources,
+            identity: identity
+        )
+        #expect(
+            ready == .ready(
+                bundledURL.standardizedFileURL,
+                sha256: identity.sha256
+            )
+        )
+        #expect(
+            SurgeryAtlasBundle.inspect(
+                resourceURL: directory.appendingPathComponent("Missing"),
+                identity: identity
+            ) == .absent
+        )
+
+        let wrongDigest = SurgeryAtlasBundleIdentity(
+            byteCount: data.count,
+            pageCount: 132,
+            sha256: String(repeating: "0", count: 64)
+        )
+        guard case .invalid = SurgeryAtlasBundle.inspect(
+            resourceURL: resources,
+            identity: wrongDigest
+        ) else {
+            Issue.record("A wrong included-atlas digest must fail closed.")
+            return
+        }
+
+        let wrongPageCount = SurgeryAtlasBundleIdentity(
+            byteCount: data.count,
+            pageCount: 131,
+            sha256: identity.sha256
+        )
+        guard case .invalid = SurgeryAtlasBundle.inspect(
+            resourceURL: resources,
+            identity: wrongPageCount
+        ) else {
+            Issue.record("A wrong included-atlas page count must fail closed.")
+            return
+        }
+    }
+
+    @MainActor
+    @Test("Included atlas cannot escape Resources and takes priority over a saved path")
+    func bundledAtlasResolutionPriority() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "Brain3D-BundledAtlasResolution-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let resources = directory.appendingPathComponent(
+            "Resources",
+            isDirectory: true
+        )
+        let surgeryAtlasDirectory = resources.appendingPathComponent(
+            "SurgeryAtlas",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: surgeryAtlasDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let externalAtlasURL = try makeAtlasPDF()
+        defer { try? FileManager.default.removeItem(at: externalAtlasURL) }
+        let data = try Data(contentsOf: externalAtlasURL)
+        let identity = SurgeryAtlasBundleIdentity(
+            byteCount: data.count,
+            pageCount: 132,
+            sha256: LowercaseHex.encode(SHA256.hash(data: data))
+        )
+        let symlink = surgeryAtlasDirectory.appendingPathComponent(
+            "MBSC_Figs_with_Layers.pdf"
+        )
+        try FileManager.default.createSymbolicLink(
+            at: symlink,
+            withDestinationURL: externalAtlasURL
+        )
+        guard case .invalid = SurgeryAtlasBundle.inspect(
+            resourceURL: resources,
+            identity: identity
+        ) else {
+            Issue.record("An included atlas symlink may not escape Resources.")
+            return
+        }
+
+        try FileManager.default.removeItem(at: symlink)
+        try FileManager.default.createSymbolicLink(
+            at: symlink,
+            withDestinationURL: directory.appendingPathComponent(
+                "missing-atlas.pdf"
+            )
+        )
+        guard case .invalid = SurgeryAtlasBundle.inspect(
+            resourceURL: resources,
+            identity: identity
+        ) else {
+            Issue.record("A dangling included-atlas symlink must fail closed.")
+            return
+        }
+
+        let bundledURL = resources.appendingPathComponent(
+            SurgeryAtlasBundle.relativePath
+        )
+        let readyInspection = SurgeryAtlasBundleInspection.ready(
+            bundledURL,
+            sha256: identity.sha256
+        )
+        let bundled = SurgeryPlanPDFPreferences.atlasLocation(
+            savedPath: "/definitely/not/the/saved/atlas.pdf",
+            bundleInspection: readyInspection
+        )
+        #expect(bundled.origin == .bundled)
+        #expect(bundled.url == bundledURL)
+        #expect(bundled.requiredSourceSHA256 == identity.sha256)
+        #expect(bundled.status.isReady)
+
+        let savedDirectory = directory.appendingPathComponent(
+            "Saved",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: savedDirectory,
+            withIntermediateDirectories: true
+        )
+        let savedAtlasURL = savedDirectory.appendingPathComponent(
+            "MBSC_Figs_with_Layers.pdf"
+        )
+        try FileManager.default.copyItem(
+            at: externalAtlasURL,
+            to: savedAtlasURL
+        )
+        let savedFallback = SurgeryPlanPDFPreferences.atlasLocation(
+            savedPath: savedAtlasURL.path,
+            bundleInspection: .absent
+        )
+        #expect(savedFallback.origin == .savedPreference)
+        #expect(savedFallback.url == savedAtlasURL.standardizedFileURL)
+        #expect(savedFallback.requiredSourceSHA256 == nil)
+        #expect(savedFallback.status.isReady)
+
+        let invalidBundled = SurgeryPlanPDFPreferences.atlasLocation(
+            savedPath: savedAtlasURL.path,
+            bundleInspection: .invalid("bad included atlas")
+        )
+        #expect(invalidBundled.origin == .invalidBundle)
+        #expect(invalidBundled.url == nil)
+        #expect(!invalidBundled.status.isReady)
+    }
+
+    @MainActor
+    @Test("Included atlas mutation after resolution is rejected at export capture")
+    func bundledAtlasMutationAfterResolution() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "Brain3D-BundledAtlasMutation-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        let resources = directory.appendingPathComponent(
+            "Resources",
+            isDirectory: true
+        )
+        let surgeryAtlasDirectory = resources.appendingPathComponent(
+            "SurgeryAtlas",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: surgeryAtlasDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let generatedAtlasURL = try makeAtlasPDF()
+        defer { try? FileManager.default.removeItem(at: generatedAtlasURL) }
+        let bundledURL = surgeryAtlasDirectory.appendingPathComponent(
+            "MBSC_Figs_with_Layers.pdf"
+        )
+        try FileManager.default.copyItem(at: generatedAtlasURL, to: bundledURL)
+        let initialData = try Data(contentsOf: bundledURL)
+        let identity = SurgeryAtlasBundleIdentity(
+            byteCount: initialData.count,
+            pageCount: 132,
+            sha256: LowercaseHex.encode(SHA256.hash(data: initialData))
+        )
+        let inspection = SurgeryAtlasBundle.inspect(
+            resourceURL: resources,
+            identity: identity
+        )
+        guard case let .ready(resolvedURL, requiredSHA256) = inspection else {
+            Issue.record("Expected the initial included atlas to resolve.")
+            return
+        }
+
+        let handle = try FileHandle(forWritingTo: resolvedURL)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("\n% changed after resolution\n".utf8))
+        try handle.close()
+
+        let plate = try #require(
+            SurgeryAtlasCatalog.canonicalPlates(sourceURL: resolvedURL)
+                .first { $0.figure == 39 }
+        )
+        let capture = try await SurgeryAtlasPDFSource.shared.capture(plate)
+        #expect(capture.sha256 != requiredSHA256)
+        do {
+            try SurgeryAtlasBundle.validateCapturedSHA256(
+                capture.sha256,
+                requiredSHA256: requiredSHA256
+            )
+            Issue.record("A changed included atlas must fail at export capture.")
+        } catch SurgeryPlanExportError.invalidAtlasSource {
+            // Expected.
+        } catch {
+            Issue.record("Unexpected included-atlas identity error: \(error)")
+        }
+    }
+
+    @MainActor
     @Test("Planning PDF carries auditable vessel identity and animal limitation")
     func planningPDFVesselIdentity() throws {
         let digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -1161,7 +1455,8 @@ struct SurgeryPlanExportTests {
 
     private func makeSurfacePrefill(
         angleDegrees: Double = 20,
-        layoutDegrees: Int = 90
+        layoutDegrees: Int = 90,
+        bregmaSourceRevision: String = "Urchin@57be3cdc7d62"
     ) -> SurgeryPlanPrefill {
         SurgeryPlanPrefill(
             exportClass: .draft,
@@ -1188,14 +1483,14 @@ struct SurgeryPlanExportTests {
             probeLayoutRotationDegrees: layoutDegrees,
             probeVerificationStatus: "source-transcribed-review-pending",
             probeWarning:
-                "Verify the source-traced geometry before animal use.",
+                ProbePlanningContract.sourceTranscribedReviewPendingWarning,
             planInputSHA256: String(repeating: "1", count: 64),
             surfaceAnnotationSHA256: String(repeating: "2", count: 64),
             surfaceDefinitionVersion:
                 ProbePlanningContract.surfaceDefinitionVersion,
             bregmaReferenceId:
                 ProbePlanningContract.surfaceBregmaReferenceId,
-            bregmaSourceRevision: "Urchin@57be3cdc7d62",
+            bregmaSourceRevision: bregmaSourceRevision,
             bregmaSourceSHA256:
                 ProbePlanningContract.surfaceBregmaSourceSHA256,
             draftReason: "test"
@@ -1260,6 +1555,7 @@ struct SurgeryPlanExportTests {
             viewSelection: .sagittal,
             protocolTemplateURL: URL(fileURLWithPath: "/tmp/protocol.pdf"),
             atlasPDFURL: URL(fileURLWithPath: "/tmp/atlas.pdf"),
+            requiredAtlasSourceSHA256: nil,
             atlasOrientation: .sagittal
         )
     }

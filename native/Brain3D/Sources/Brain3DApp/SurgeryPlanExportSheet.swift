@@ -29,6 +29,9 @@ struct SurgeryPlanExportSheet: View {
         state: .missing,
         detail: "Choose this PDF once in Settings."
     )
+    @State private var resolvedAtlasPDFURL: URL?
+    @State private var resolvedAtlasRequiredSHA256: String?
+    @State private var atlasIsBundled = false
     @State private var resolvedAtlasPlate: SurgeryAtlasPlate?
     @State private var atlasResolutionError: String?
     @State private var isExporting = false
@@ -181,7 +184,8 @@ struct SurgeryPlanExportSheet: View {
                     )
                     pdfStatusRow(
                         title: "Mouse Brain atlas PDF",
-                        status: atlasPDFStatus
+                        status: atlasPDFStatus,
+                        readyLabel: atlasIsBundled ? "Included" : "Ready"
                     )
                     SettingsLink {
                         Label("PDF Locations…", systemImage: "gearshape")
@@ -231,9 +235,7 @@ struct SurgeryPlanExportSheet: View {
                                 .foregroundStyle(.secondary)
                             }
                         }
-                    } else if atlasPDFStatus.isReady,
-                              let atlasResolutionError
-                    {
+                    } else if let atlasResolutionError {
                         Label(
                             atlasResolutionError,
                             systemImage: "exclamationmark.triangle"
@@ -478,7 +480,7 @@ struct SurgeryPlanExportSheet: View {
             return "Set the Headplate protocol PDF in Settings."
         }
         guard atlasPDFStatus.isReady else {
-            return "Set MBSC_Figs_with_Layers.pdf in Settings."
+            return atlasPDFStatus.detail
         }
         guard resolvedAtlasPlate != nil else {
             return atlasResolutionError ?? "Resolve a matching atlas plate."
@@ -489,11 +491,12 @@ struct SurgeryPlanExportSheet: View {
     @ViewBuilder
     private func pdfStatusRow(
         title: String,
-        status: SurgeryPlanPDFLocationStatus
+        status: SurgeryPlanPDFLocationStatus,
+        readyLabel: String = "Ready"
     ) -> some View {
         LabeledContent(title) {
             Label(
-                status.shortLabel,
+                status.isReady ? readyLabel : status.shortLabel,
                 systemImage: status.isReady
                     ? "checkmark.circle.fill"
                     : "exclamationmark.circle.fill"
@@ -515,19 +518,27 @@ struct SurgeryPlanExportSheet: View {
 
     private func resolveAtlasPlate() {
         resolvedAtlasPlate = nil
+        resolvedAtlasPDFURL = nil
+        resolvedAtlasRequiredSHA256 = nil
+        atlasIsBundled = false
         atlasResolutionError = nil
-        atlasPDFStatus = SurgeryPlanPDFPreferences.status(
-            for: .mouseBrainAtlas,
-            path: atlasPDFPath
+        let location = SurgeryPlanPDFPreferences.atlasLocation(
+            savedPath: atlasPDFPath
         )
+        atlasPDFStatus = location.status
+        resolvedAtlasPDFURL = location.url
+        resolvedAtlasRequiredSHA256 = location.requiredSourceSHA256
+        atlasIsBundled = location.isBundled
         guard atlasPDFStatus.isReady else {
             atlasResolutionError = atlasPDFStatus.detail
             return
         }
-        guard let coordinates = selectedCoordinates else { return }
+        guard let atlasPDFURL = resolvedAtlasPDFURL,
+              let coordinates = selectedCoordinates
+        else { return }
         do {
             resolvedAtlasPlate = try SurgeryAtlasCatalog.nearestPlate(
-                in: URL(fileURLWithPath: atlasPDFPath),
+                in: atlasPDFURL,
                 orientation: atlasOrientation,
                 apMillimetres: coordinates.ap,
                 mlMillimetres: coordinates.ml
@@ -540,7 +551,9 @@ struct SurgeryPlanExportSheet: View {
     private func beginExport() {
         refreshProtocolPDFStatus()
         resolveAtlasPlate()
-        guard blockingReason == nil else { return }
+        guard blockingReason == nil,
+              let atlasPDFURL = resolvedAtlasPDFURL
+        else { return }
         let panel = NSSavePanel()
         panel.title = "Save Surgery Plan"
         panel.prompt = "Export"
@@ -562,7 +575,8 @@ struct SurgeryPlanExportSheet: View {
             operatorName: operatorName,
             viewSelection: viewSelection,
             protocolTemplateURL: URL(fileURLWithPath: protocolTemplatePath),
-            atlasPDFURL: URL(fileURLWithPath: atlasPDFPath),
+            atlasPDFURL: atlasPDFURL,
+            requiredAtlasSourceSHA256: resolvedAtlasRequiredSHA256,
             atlasOrientation: atlasOrientation
         )
         Task {

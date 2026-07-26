@@ -22,12 +22,13 @@ The exporter requires:
 - the reviewed VesSAP major-vessel layer loaded for the same atlas;
 - the user-prepared, three-page `Headplate Protocol.pdf` (two protocol pages plus its atlas
   sketch placeholder);
-- the user-supplied, 132-page Mouse Brain CD `MBSC_Figs_with_Layers.pdf`.
+- the exact reviewed, 132-page Mouse Brain CD `MBSC_Figs_with_Layers.pdf`, either included in an
+  authorized lab-local app build or selected once in Settings as an external fallback.
 
-Choose both PDFs once in **Brain3D → Settings**. The app saves those locations and every export
-reuses them until they are replaced in Settings. It does not assume a fixed lab-volume path. If a
-saved network volume is disconnected, reconnect it or select the PDF again in Settings; the
-export sheet reports the saved-location status rather than opening two file choosers every time.
+Choose the protocol PDF once in **Brain3D → Settings**. When the atlas is included in the app,
+Brain3D checks its pinned byte count, SHA-256, and page count, shows it as **Included**, and never
+opens an atlas chooser. Builds without it save and reuse one external atlas location instead. A
+disconnected external volume is reported in the export sheet.
 
 ## Implant, probe, and units
 
@@ -207,7 +208,10 @@ mixing revisions.
 
 ## Source ownership and redistribution
 
-The Headplate protocol PDF and Mouse Brain CD `MBSC_Figs_with_Layers.pdf` are user-supplied,
-remain governed by their source-owner terms, and are not redistributed by Brain3D. They are not
-committed to this repository, bundled in the app, or copied into test fixtures. A lab must have
-the rights to use its input documents and to distribute any resulting packet.
+The Headplate protocol PDF and Mouse Brain CD `MBSC_Figs_with_Layers.pdf` are user-supplied and
+remain governed by their source-owner terms. Neither is committed to this repository or copied
+into test fixtures. Brain3D's public builds do not contain them. An authorized lab-local build may
+copy the exact pinned atlas into its app bundle for automatic offline use; Brain3D records that
+artifact as `local-user-supplied`, and it must not be publicly redistributed without source-owner
+permission. A lab must have the rights to use its input documents and to distribute any resulting
+packet.

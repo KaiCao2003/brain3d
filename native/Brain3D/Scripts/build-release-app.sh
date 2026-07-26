@@ -7,9 +7,13 @@ package_root="$(cd "$script_directory/.." && pwd)"
 repository_root="$(cd "$package_root/../.." && pwd)"
 output_root="${OUTPUT_DIR:-$package_root/dist}"
 app_bundle="$output_root/Brain3D.app"
-release_archive="$output_root/Brain3D-macOS-arm64.zip"
+release_archive=""
 bridge_entrypoint="$package_root/Bridge/brain3d_bridge.py"
 codesign_identity="${CODE_SIGN_IDENTITY:-}"
+atlas_pdf_source="${BRAIN3D_MBSC_PDF:-}"
+local_lab_build="${BRAIN3D_LOCAL_LAB_BUILD:-0}"
+atlas_expected_sha256="27b34540d9418bd6e4954f67dc99d342502216cb8d36fcc2e1ddde30671aeef8"
+atlas_relative_path="Contents/Resources/SurgeryAtlas/MBSC_Figs_with_Layers.pdf"
 release_python_version="3.12.12"
 maximum_macos_version="14.0"
 gui_app_pid=""
@@ -19,6 +23,22 @@ fail() {
     echo "release build failed: $*" >&2
     exit 1
 }
+
+case "$local_lab_build" in
+    0)
+        release_archive="$output_root/Brain3D-macOS-arm64.zip"
+        [[ -z "$atlas_pdf_source" ]] \
+            || fail "public release builds cannot include BRAIN3D_MBSC_PDF; set BRAIN3D_LOCAL_LAB_BUILD=1 for a local-only artifact"
+        ;;
+    1)
+        [[ -n "$atlas_pdf_source" ]] \
+            || fail "BRAIN3D_LOCAL_LAB_BUILD=1 requires BRAIN3D_MBSC_PDF"
+        release_archive="$output_root/Brain3D-macOS-arm64-local-atlas.zip"
+        ;;
+    *)
+        fail "BRAIN3D_LOCAL_LAB_BUILD must be 0 or 1"
+        ;;
+esac
 
 [[ "$(uname -m)" == "arm64" ]] || fail "run this builder natively on Apple Silicon"
 command -v uv >/dev/null || fail "uv is required"
@@ -154,10 +174,21 @@ fi
 
 echo "Building the arm64 Swift application..."
 swift_output="$work_root/swift-app"
-ARCHITECTURE=arm64 CONFIGURATION=release OUTPUT_DIR="$swift_output" \
+BRAIN3D_MBSC_PDF="$atlas_pdf_source" \
+    ARCHITECTURE=arm64 CONFIGURATION=release OUTPUT_DIR="$swift_output" \
     "$script_directory/build-app.sh" >/dev/null
 staged_app="$swift_output/Brain3D.app"
 swift_executable="$staged_app/Contents/MacOS/Brain3D"
+staged_atlas="$staged_app/$atlas_relative_path"
+atlas_bundle_sha256=""
+if [[ -n "$atlas_pdf_source" ]]; then
+    [[ -f "$staged_atlas" ]] || fail "Swift app is missing its requested included atlas"
+    atlas_bundle_sha256="$(shasum -a 256 "$staged_atlas" | awk '{print $1}')"
+    [[ "$atlas_bundle_sha256" == "$atlas_expected_sha256" ]] \
+        || fail "included atlas identity changed in the staged app"
+else
+    [[ ! -e "$staged_atlas" ]] || fail "an unrequested atlas leaked into the staged app"
+fi
 while IFS= read -r host_rpath; do
     [[ -n "$host_rpath" ]] || continue
     case "$host_rpath" in
@@ -224,12 +255,20 @@ maximum_bundled_deployment_target="$(
         'import json, sys; print(json.load(sys.stdin)["maximumDeploymentTarget"])' \
         <<<"$macho_inventory"
 )"
-"$release_python" "$script_directory/write-release-metadata.py" \
-    --output "$release_resources/release-build.json" \
-    --repository "$repository_root" \
-    --application-version "$application_version" \
-    --declared-minimum-macos "$maximum_macos_version" \
+release_metadata_arguments=(
+    --output "$release_resources/release-build.json"
+    --repository "$repository_root"
+    --application-version "$application_version"
+    --declared-minimum-macos "$maximum_macos_version"
     --maximum-bundled-deployment-target "$maximum_bundled_deployment_target"
+)
+if [[ -n "$atlas_bundle_sha256" ]]; then
+    release_metadata_arguments+=(
+        --surgery-atlas-sha256 "$atlas_bundle_sha256"
+    )
+fi
+"$release_python" "$script_directory/write-release-metadata.py" \
+    "${release_metadata_arguments[@]}"
 
 echo "Signing the complete application..."
 codesign_arguments=(--force --sign "$codesign_identity")
@@ -263,6 +302,16 @@ top_level_entries="$(find "$verification_root/unzipped" -mindepth 1 -maxdepth 1 
     || fail "unzipped release does not contain exactly one top-level Brain3D.app"
 verification_bridge="$verification_app/Contents/Resources/Bridge/brain3d-bridge"
 [[ -x "$verification_bridge" ]] || fail "unzipped app is missing its bundled bridge"
+verification_atlas="$verification_app/$atlas_relative_path"
+if [[ -n "$atlas_bundle_sha256" ]]; then
+    [[ -f "$verification_atlas" ]] || fail "unzipped app is missing its included atlas"
+    [[ "$(shasum -a 256 "$verification_atlas" | awk '{print $1}')" == \
+        "$atlas_bundle_sha256" ]] \
+        || fail "included atlas identity changed after archive extraction"
+else
+    [[ ! -e "$verification_atlas" ]] \
+        || fail "an unrequested atlas leaked into the release archive"
+fi
 [[ "$repository_root" != *'"'* ]] || fail "repository path cannot be sandbox-escaped"
 sandbox_profile="(version 1) (allow default) (deny file-read* (subpath \"$repository_root\"))"
 smoke_output="$(
@@ -349,10 +398,19 @@ bundle_kib="$(du -sk "$app_bundle" | awk '{print $1}')"
 bundle_sha256="$(shasum -a 256 "$app_bundle/Contents/MacOS/Brain3D" | awk '{print $1}')"
 archive_sha256="$(shasum -a 256 "$release_archive" | awk '{print $1}')"
 echo "Release app: $app_bundle"
-echo "GitHub release archive: $release_archive"
+if [[ "$local_lab_build" == "1" ]]; then
+    echo "Local lab archive (not for public redistribution): $release_archive"
+else
+    echo "GitHub release archive: $release_archive"
+fi
 echo "Bundle size: $bundle_kib KiB"
 echo "Mach-O inventory: $macho_inventory"
 echo "Bundled bridge launched by Swift: Contents/Resources/Bridge/brain3d-bridge"
+if [[ -n "$atlas_bundle_sha256" ]]; then
+    echo "Included local atlas SHA-256: $atlas_bundle_sha256"
+else
+    echo "Included local atlas: none"
+fi
 echo "Swift executable SHA-256: $bundle_sha256"
 echo "Release archive SHA-256: $archive_sha256"
 echo "Code-sign identity: $codesign_identity"

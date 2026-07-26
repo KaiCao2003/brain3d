@@ -27,6 +27,7 @@ def main() -> int:
     parser.add_argument("--application-version", required=True)
     parser.add_argument("--declared-minimum-macos", required=True)
     parser.add_argument("--maximum-bundled-deployment-target", required=True)
+    parser.add_argument("--surgery-atlas-sha256")
     arguments = parser.parse_args()
 
     repository = arguments.repository.resolve()
@@ -41,6 +42,15 @@ def main() -> int:
         "pythonVersion": platform.python_version(),
         "sourceCommit": _command("git", "-C", str(repository), "rev-parse", "HEAD"),
         "sourceWorktreeDirty": bool(source_status),
+        "surgeryAtlas": {
+            "bundled": arguments.surgery_atlas_sha256 is not None,
+            "distributionScope": (
+                "local-user-supplied"
+                if arguments.surgery_atlas_sha256 is not None
+                else "external-user-supplied"
+            ),
+            "sha256": arguments.surgery_atlas_sha256,
+        },
         "swiftVersion": _command("swift", "--version").splitlines()[0],
     }
     arguments.output.parent.mkdir(parents=True, exist_ok=True)

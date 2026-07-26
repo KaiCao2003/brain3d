@@ -488,11 +488,29 @@ struct SurgeryPlanPrefill: Equatable, Sendable {
               let surfaceDefinitionVersion, let bregmaReferenceId,
               let bregmaSourceRevision, let bregmaSourceSHA256
         else { return nil }
-        return "Surface \(surfaceDefinitionVersion) · plan "
+        let definition = Self.compactProvenanceComponent(
+            surfaceDefinitionVersion
+        )
+        let reference = Self.compactProvenanceComponent(bregmaReferenceId)
+        let revision = Self.compactProvenanceComponent(bregmaSourceRevision)
+        return "Surface \(definition) · plan "
             + "\(planInputSHA256.prefix(10))… · annotation "
             + "\(surfaceAnnotationSHA256.prefix(10))… · bregma "
-            + "\(bregmaReferenceId) @ \(bregmaSourceRevision) "
+            + "\(reference) @ \(revision) "
             + "\(bregmaSourceSHA256.prefix(10))…"
+    }
+
+    private static func compactProvenanceComponent(_ value: String) -> String {
+        let singleLine = value
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        let maximumCharacters = 40
+        guard singleLine.count > maximumCharacters else { return singleLine }
+        let digest = LowercaseHex.encode(
+            SHA256.hash(data: Data(singleLine.utf8)).prefix(4)
+        )
+        return String(singleLine.prefix(maximumCharacters - 10))
+            + "…#\(digest)"
     }
 }
 
@@ -507,6 +525,7 @@ struct SurgeryPlanExportConfiguration: Sendable {
     let viewSelection: SurgeryPlanViewSelection
     let protocolTemplateURL: URL
     let atlasPDFURL: URL
+    let requiredAtlasSourceSHA256: String?
     let atlasOrientation: SurgeryAtlasOrientation
 
     func validated() throws -> SurgeryPlanExportConfiguration {
@@ -557,6 +576,7 @@ struct SurgeryPlanExportConfiguration: Sendable {
             viewSelection: viewSelection,
             protocolTemplateURL: protocolTemplateURL,
             atlasPDFURL: atlasPDFURL,
+            requiredAtlasSourceSHA256: requiredAtlasSourceSHA256,
             atlasOrientation: atlasOrientation
         )
     }
@@ -1655,6 +1675,32 @@ enum SurgeryAtlasPageRenderer {
                 "Could not read page \(plate.figure) from the consolidated PDF."
             )
         }
+        let reviewRect = CGRect(x: 50, y: 518, width: 690, height: 13)
+        let reviewFont: NSFont?
+        if let review = prefill.probeReviewText {
+            reviewFont = try fittedSingleLineFont(
+                for: review,
+                baseFont: .systemFont(ofSize: 6.8, weight: .semibold),
+                minimumFontSize: 5.5,
+                maximumWidth: reviewRect.width,
+                field: "probe review"
+            )
+        } else {
+            reviewFont = nil
+        }
+        let provenanceRect = CGRect(x: 50, y: 503, width: 690, height: 13)
+        let provenanceFont: NSFont?
+        if let provenance = prefill.surfaceProvenanceText {
+            provenanceFont = try fittedSingleLineFont(
+                for: provenance,
+                baseFont: .monospacedSystemFont(ofSize: 5.8, weight: .regular),
+                minimumFontSize: 4.8,
+                maximumWidth: provenanceRect.width,
+                field: "surface provenance"
+            )
+        } else {
+            provenanceFont = nil
+        }
         let output = NSMutableData()
         var mediaBox = CGRect(x: 0, y: 0, width: 792, height: 612)
         guard let consumer = CGDataConsumer(data: output as CFMutableData),
@@ -1705,19 +1751,19 @@ enum SurgeryAtlasPageRenderer {
             in: CGRect(x: 50, y: 533, width: 690, height: 13),
             font: .monospacedSystemFont(ofSize: 7.6, weight: .medium)
         )
-        if let review = prefill.probeReviewText {
-            draw(
+        if let review = prefill.probeReviewText, let reviewFont {
+            drawSingleLine(
                 review,
-                in: CGRect(x: 50, y: 518, width: 690, height: 13),
-                font: .systemFont(ofSize: 6.8, weight: .semibold),
+                in: reviewRect,
+                font: reviewFont,
                 color: .systemOrange
             )
         }
-        if let provenance = prefill.surfaceProvenanceText {
-            draw(
+        if let provenance = prefill.surfaceProvenanceText, let provenanceFont {
+            drawSingleLine(
                 provenance,
-                in: CGRect(x: 50, y: 503, width: 690, height: 13),
-                font: .monospacedSystemFont(ofSize: 5.8, weight: .regular),
+                in: provenanceRect,
+                font: provenanceFont,
                 color: NSColor(calibratedWhite: 0.32, alpha: 1)
             )
         }
@@ -1739,12 +1785,12 @@ enum SurgeryAtlasPageRenderer {
               verifiedPage.bounds(for: .mediaBox).size == mediaBox.size,
               data.count > 10_000,
               let verifiedText = verified.string,
-              verifiedText.contains("Figure \(plate.figure)"),
-              verifiedText.contains(plate.coordinateLabel),
-              verifiedText.contains(prefill.targetCoordinateText),
-              verifiedText.contains(prefill.compactProbeText),
-              prefill.probeReviewText.map(verifiedText.contains) ?? true,
-              prefill.surfaceProvenanceText.map(verifiedText.contains) ?? true,
+              contains("Figure \(plate.figure)", in: verifiedText),
+              contains(plate.coordinateLabel, in: verifiedText),
+              contains(prefill.targetCoordinateText, in: verifiedText),
+              contains(prefill.compactProbeText, in: verifiedText),
+              containsIfPresent(prefill.probeReviewText, in: verifiedText),
+              containsIfPresent(prefill.surfaceProvenanceText, in: verifiedText),
               verifiedText.contains(String(atlasSourceSHA256.prefix(16)))
         else {
             throw SurgeryPlanExportError.invalidAtlasPage(
@@ -1764,6 +1810,79 @@ enum SurgeryAtlasPageRenderer {
             string: text,
             attributes: [.font: font, .foregroundColor: color]
         ).draw(in: rect)
+    }
+
+    private static func drawSingleLine(
+        _ text: String,
+        in rect: CGRect,
+        font: NSFont,
+        color: NSColor
+    ) {
+        let attributed = NSAttributedString(
+            string: text,
+            attributes: [.font: font, .foregroundColor: color]
+        )
+        let size = attributed.size()
+        NSGraphicsContext.saveGraphicsState()
+        NSBezierPath(rect: rect).addClip()
+        attributed.draw(
+            at: CGPoint(
+                x: rect.minX,
+                y: rect.midY - size.height / 2
+            )
+        )
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private static func fittedSingleLineFont(
+        for text: String,
+        baseFont: NSFont,
+        minimumFontSize: CGFloat,
+        maximumWidth: CGFloat,
+        field: String
+    ) throws -> NSFont {
+        let measuredWidth = NSAttributedString(
+            string: text,
+            attributes: [.font: baseFont]
+        ).size().width
+        let fittedPointSize = max(
+            minimumFontSize,
+            min(
+                baseFont.pointSize,
+                baseFont.pointSize * (maximumWidth * 0.98)
+                    / max(measuredWidth, 1)
+            )
+        )
+        let fittedFont = NSFontManager.shared.convert(
+            baseFont,
+            toSize: fittedPointSize
+        )
+        let fittedWidth = NSAttributedString(
+            string: text,
+            attributes: [.font: fittedFont]
+        ).size().width
+        guard fittedWidth <= maximumWidth else {
+            throw SurgeryPlanExportError.invalidAtlasPage(
+                "The \(field) text is too wide for the historical-atlas identity box."
+            )
+        }
+        return fittedFont
+    }
+
+    private static func contains(_ expected: String, in actual: String) -> Bool {
+        normalized(actual).contains(normalized(expected))
+    }
+
+    private static func containsIfPresent(
+        _ expected: String?,
+        in actual: String
+    ) -> Bool {
+        expected.map { contains($0, in: actual) } ?? true
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 }
 
@@ -2150,6 +2269,10 @@ enum SurgeryPlanExporter {
         )
         let atlasSource = try await SurgeryAtlasPDFSource.shared.capture(
             atlasPlate
+        )
+        try SurgeryAtlasBundle.validateCapturedSHA256(
+            atlasSource.sha256,
+            requiredSHA256: configuration.requiredAtlasSourceSHA256
         )
 
         var artifacts: [SurgeryPlanningViewArtifact] = []
