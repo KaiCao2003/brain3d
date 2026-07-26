@@ -220,11 +220,14 @@ The CCF is an average of ex-cranio fixed brains and has no single source skull. 
 provide one uniquely correct bregma or lambda for the CCF. Atlas origin, physical center,
 hemisphere midline, and renderer origin are not bregma.
 
-Atlas lookup remains atlas-native. The application first preserves exact AP/ML/DV values entered
-in millimetres from bregma as an unprojected record. Projection occurs only after the user creates
-and activates a named, versioned subject calibration with matched landmarks, transform, units,
-atlas identity, residuals, uncertainty, and declared QC source. No IBL or other estimate is
-applied invisibly.
+The primary v4 workflow explicitly selects a source-pinned Virtual Brain Lab Urchin/Pinpoint
+profile for AP/ML planning in `allen_mouse_25um` v1.2. Its reference identity, source revision,
+source SHA-256, annotation source, and resolved local surface are persisted. AP− is posterior and
+ML− is animal-left. This is a reproducible population-atlas convention, not Allen ground truth
+or an individual-animal registration.
+
+Legacy v1–v3 AP/ML/DV targets and subject calibrations remain preserved with their original
+semantics. No IBL estimate, tilt, scale, or unnamed alternate profile is applied invisibly.
 
 ## Not included in the current build
 

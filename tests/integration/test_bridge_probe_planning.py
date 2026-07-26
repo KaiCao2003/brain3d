@@ -62,6 +62,7 @@ from mouse_brain_planner.probes.catalog import (
     NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
 )
 from mouse_brain_planner.surgery.probe_planning import build_calibrated_probe_plan
+from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(
@@ -665,7 +666,7 @@ def test_schema_seven_project_load_accepts_exact_canonical_probe_model_snapshot(
 
     restored = load_project(package, recover_backup=False)
 
-    assert restored.schema_version == 8
+    assert restored.schema_version == PROJECT_SCHEMA_VERSION
     assert restored.probe_plans[0].probe_model == canonical_model
 
 
@@ -992,7 +993,7 @@ def test_schema_six_package_with_deleted_plan_target_reopens_by_restoring_snapsh
 
     reopened = load_project(package, recover_backup=False)
 
-    assert reopened.schema_version == 8
+    assert reopened.schema_version == PROJECT_SCHEMA_VERSION
     assert reopened.unprojected_bregma_targets == [source_target]
     assert reopened.probe_plans[0].source_target == source_target
 
@@ -1158,7 +1159,7 @@ def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path
     target_id = _calibrated_target(dispatcher, session)
 
     catalog = _call(dispatcher, "probe.catalog.list")
-    assert catalog["catalogVersion"] == "brain3d-probe-catalog-v5"
+    assert catalog["catalogVersion"] == "brain3d-probe-catalog-v6"
     assert catalog["modelCount"] == 2
     catalog_models = catalog["models"]
     assert isinstance(catalog_models, list)
@@ -1166,7 +1167,7 @@ def test_probe_plan_region_analysis_export_update_and_persistence(tmp_path: Path
     assert catalog_models[0]["verificationStatus"] == "source-transcribed-review-pending"
     assert "review pending" in catalog_models[0]["warning"]
     assert catalog_models[1]["modelId"] == NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID
-    assert catalog_models[1]["productCode"] == "NP2013 / NP2014"
+    assert catalog_models[1]["productCode"] == "NP2013"
     assert {
         NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
         NEUROPIXELS_1_0_MODEL_ID,

@@ -16,6 +16,7 @@ from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_plan_models import (
+    ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
     ProbePlacementMode,
     ProbePlanRecord,
     ProbeRegionAnalysisBundle,
@@ -33,6 +34,9 @@ from mouse_brain_planner.domain.vessel_models import (
 from mouse_brain_planner.domain.vessel_plan_models import ProbeVesselAnalysisBundle
 from mouse_brain_planner.surgery.calibration_validation import (
     validate_atlas_registered_calibration_reproducibility,
+)
+from mouse_brain_planner.surgery.probe_planning import (
+    validate_atlas_surface_probe_plan_semantics,
 )
 from mouse_brain_planner.surgery.probe_planning import (
     validate_probe_plan_projection_semantics as validate_plan_projection_semantics,
@@ -317,6 +321,14 @@ class PlannerProject(BaseModel):
 
         if self.atlas is None:
             raise ValueError("probe plan projection validation requires project atlas metadata")
+        if plan.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION:
+            validate_atlas_surface_probe_plan_semantics(
+                plan=plan,
+                atlas=self.atlas,
+            )
+            return
+        if plan.source_target is None:
+            raise ValueError("calibrated probe plan is missing its source target")
         target = next(
             (
                 item
@@ -463,51 +475,75 @@ class PlannerProject(BaseModel):
 
         plans_by_id = {item.plan_uuid: item for item in self.probe_plans}
         for plan in self.probe_plans:
-            referenced_target = targets_by_id.get(plan.source_target.target_uuid)
-            if referenced_target is None:
-                raise ValueError("probe plan source target is not present in the current project")
-            if referenced_target != plan.source_target:
-                raise ValueError(
-                    "probe plan source target snapshot does not match the current project target"
-                )
             if plan.atlas_metadata_sha256 != self.atlas.metadata_sha256:
                 raise ValueError("probe plan atlas metadata digest does not match project atlas")
             if plan.placement.context.subject_id != self.subject_id:
                 raise ValueError("probe plan animal subject ID does not match the project subject")
-            referenced_calibration = calibrations_by_id.get(plan.calibration_uuid)
-            if referenced_calibration is None:
-                raise ValueError("probe plan references an unavailable calibration")
-            if referenced_calibration.calibration_version != plan.calibration_version:
-                raise ValueError(
-                    "probe plan calibration version does not match project calibration"
-                )
-            if plan.calibration_sha256 != atlas_registered_calibration_sha256(
-                referenced_calibration
-            ):
-                raise ValueError("probe plan calibration digest does not match project calibration")
-            if plan.manipulator_input is not None and (
-                plan.manipulator_input.frame_id
-                != referenced_calibration.atlas_transform.source_frame.frame_id
-            ):
-                raise ValueError(
-                    "probe plan manipulator input frame does not match its calibration"
-                )
-            if plan.placement_input is not None and (
-                plan.placement_input.mode is not ProbePlacementMode.ENTRY_AND_TARGET
-            ):
-                expected_angle_frame = (
-                    referenced_calibration.atlas_transform.destination_frame.frame_id
-                    if plan.placement_input.mode is ProbePlacementMode.TARGET_ANGLES_DEPTH
-                    else referenced_calibration.atlas_transform.source_frame.frame_id
-                )
-                if plan.placement_input.angle_frame_id != expected_angle_frame:
+            is_surface_plan = (
+                plan.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION
+            )
+            if is_surface_plan:
+                if plan.source_target is not None:
+                    raise ValueError("atlas-surface probe plan cannot reference a legacy target")
+                if (
+                    plan.calibration_uuid is not None
+                    or plan.calibration_version is not None
+                    or plan.calibration_sha256 is not None
+                ):
+                    raise ValueError("atlas-surface probe plan cannot claim a subject calibration")
+            else:
+                if plan.source_target is None:
+                    raise ValueError("probe plan source target is missing")
+                referenced_target = targets_by_id.get(plan.source_target.target_uuid)
+                if referenced_target is None:
                     raise ValueError(
-                        "probe placement angle frame does not match its calibration mode"
+                        "probe plan source target is not present in the current project"
                     )
-            if not plan.probe_model.permits_verified_device_label and not (
-                plan.placement.custom_geometry_acknowledged
-            ):
-                raise ValueError("unverified probe plan geometry requires explicit acknowledgment")
+                if referenced_target != plan.source_target:
+                    raise ValueError(
+                        "probe plan source target snapshot does not match the current "
+                        "project target"
+                    )
+                if plan.calibration_uuid is None:
+                    raise ValueError("probe plan calibration UUID is missing")
+                referenced_calibration = calibrations_by_id.get(plan.calibration_uuid)
+                if referenced_calibration is None:
+                    raise ValueError("probe plan references an unavailable calibration")
+                if referenced_calibration.calibration_version != plan.calibration_version:
+                    raise ValueError(
+                        "probe plan calibration version does not match project calibration"
+                    )
+                if plan.calibration_sha256 != atlas_registered_calibration_sha256(
+                    referenced_calibration
+                ):
+                    raise ValueError(
+                        "probe plan calibration digest does not match project calibration"
+                    )
+                if plan.manipulator_input is not None and (
+                    plan.manipulator_input.frame_id
+                    != referenced_calibration.atlas_transform.source_frame.frame_id
+                ):
+                    raise ValueError(
+                        "probe plan manipulator input frame does not match its calibration"
+                    )
+                if plan.placement_input is not None and (
+                    plan.placement_input.mode is not ProbePlacementMode.ENTRY_AND_TARGET
+                ):
+                    expected_angle_frame = (
+                        referenced_calibration.atlas_transform.destination_frame.frame_id
+                        if plan.placement_input.mode is ProbePlacementMode.TARGET_ANGLES_DEPTH
+                        else referenced_calibration.atlas_transform.source_frame.frame_id
+                    )
+                    if plan.placement_input.angle_frame_id != expected_angle_frame:
+                        raise ValueError(
+                            "probe placement angle frame does not match its calibration mode"
+                        )
+                if not plan.probe_model.permits_verified_device_label and not (
+                    plan.placement.custom_geometry_acknowledged
+                ):
+                    raise ValueError(
+                        "unverified legacy probe plan geometry requires explicit acknowledgment"
+                    )
             self.validate_probe_plan_projection_semantics(plan)
         for bundle in self.probe_region_analyses:
             referenced_plan = plans_by_id.get(bundle.plan_uuid)

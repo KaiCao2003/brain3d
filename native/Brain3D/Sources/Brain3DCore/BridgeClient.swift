@@ -31,6 +31,8 @@ public enum BridgeTransportError: Error, Equatable, LocalizedError, Sendable {
 }
 
 public struct BridgeLaunchConfiguration: Equatable, Sendable {
+    public static let bundledBridgeRelativePath = "Bridge/brain3d-bridge"
+
     public let executableURL: URL
     public let arguments: [String]
     public let workingDirectoryURL: URL?
@@ -73,11 +75,19 @@ public struct BridgeLaunchConfiguration: Equatable, Sendable {
             isDirectory: true
         ),
         executableURL: URL? = Bundle.main.executableURL,
+        resourceURL: URL? = Bundle.main.resourceURL,
         sourceFileURL: URL = URL(fileURLWithPath: #filePath),
         fileManager: FileManager = .default
     ) -> BridgeLaunchConfiguration? {
         if let configured = fromEnvironment(environment) {
             return configured
+        }
+
+        if let bundled = bundledDefault(
+            resourceURL: resourceURL,
+            fileManager: fileManager
+        ) {
+            return bundled
         }
 
         var seeds = [currentDirectoryURL, sourceFileURL.deletingLastPathComponent()]
@@ -113,6 +123,38 @@ public struct BridgeLaunchConfiguration: Equatable, Sendable {
             }
         }
         return nil
+    }
+
+    public static func bundledDefault(
+        resourceURL: URL? = Bundle.main.resourceURL,
+        fileManager: FileManager = .default
+    ) -> BridgeLaunchConfiguration? {
+        guard let resourceURL, resourceURL.isFileURL else {
+            return nil
+        }
+
+        let resourceRoot = resourceURL.resolvingSymlinksInPath().standardizedFileURL
+        let candidate = resourceRoot
+            .appendingPathComponent(bundledBridgeRelativePath, isDirectory: false)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let rootPath = resourceRoot.path.hasSuffix("/")
+            ? resourceRoot.path
+            : resourceRoot.path + "/"
+        guard candidate.path.hasPrefix(rootPath) else {
+            return nil
+        }
+
+        var isDirectory = ObjCBool(false)
+        guard
+            fileManager.fileExists(atPath: candidate.path, isDirectory: &isDirectory),
+            !isDirectory.boolValue,
+            fileManager.isExecutableFile(atPath: candidate.path)
+        else {
+            return nil
+        }
+
+        return BridgeLaunchConfiguration(executableURL: candidate)
     }
 }
 

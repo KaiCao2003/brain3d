@@ -209,7 +209,7 @@ public final class AtlasMeshLoader: @unchecked Sendable {
                 "The verified atlas mesh could not be read: \(error.localizedDescription)"
             )
         }
-        let actual = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let actual = LowercaseHex.encode(SHA256.hash(data: data))
         guard actual == expected else {
             throw AtlasMeshLoadError.invalid(
                 "Atlas mesh SHA-256 no longer matches its verified descriptor."

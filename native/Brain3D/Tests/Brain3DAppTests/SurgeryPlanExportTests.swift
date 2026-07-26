@@ -21,6 +21,56 @@ struct SurgeryPlanExportTests {
         #expect(SurgeryPlanViewSelection.all.views == SurgeryPlanView.allCases)
     }
 
+    @Test("Surface plan text preserves the four operator inputs")
+    func surfacePlanPrefillText() {
+        let prefill = makeSurfacePrefill()
+
+        #expect(
+            prefill.targetCoordinateText
+                == "AP -1.250 mm · ML +0.800 mm · depth 2.300 mm from local atlas surface"
+        )
+        #expect(prefill.templateAngleText == "A↔P +20.0° (A→P)")
+        #expect(prefill.probeText.contains("depth 2.300 mm from surface"))
+        #expect(prefill.probeText.contains("A↔P +20.0° (A→P)"))
+        #expect(prefill.probeText.contains("layout 90° CW from dorsal"))
+        #expect(!prefill.probeText.contains("Az "))
+        #expect(!prefill.probeText.contains("El "))
+        #expect(!prefill.probeText.contains("Roll "))
+        #expect(
+            prefill.probeReviewText?.contains(
+                "source-transcribed-review-pending"
+            ) == true
+        )
+        #expect(
+            prefill.surfaceProvenanceText?.contains("annotation 2222222222…")
+                == true
+        )
+        #expect(
+            SurgeryPlanSurfaceAnglePresentation.text(0)
+                == "A↔P 0.0° (vertical)"
+        )
+        #expect(
+            SurgeryPlanSurfaceAnglePresentation.text(-20)
+                == "A↔P -20.0° (P→A)"
+        )
+        let audit = SurgeryPlanPacketRenderer.auditStamp(
+            prefill: prefill,
+            pageNumber: 1,
+            pageCount: 4,
+            targetId: "plan-1",
+            vesselAssetSHA256: String(repeating: "3", count: 64),
+            protocolTemplateSHA256: String(repeating: "4", count: 64),
+            atlasSourceSHA256: String(repeating: "5", count: 64)
+        )
+        #expect(audit.contains("PI:1111111111"))
+        #expect(audit.contains("AN:2222222222"))
+        #expect(
+            audit.contains(
+                "BR:\(ProbePlanningContract.surfaceBregmaSourceSHA256.prefix(10))"
+            )
+        )
+    }
+
     @MainActor
     @Test("The consolidated PDF resolves to exactly 132 canonical pages")
     func atlasCatalog() async throws {
@@ -54,6 +104,36 @@ struct SurgeryPlanExportTests {
                 String(snapshot.sha256.prefix(16))
             ) == true
         )
+    }
+
+    @MainActor
+    @Test("Direct atlas page retains coordinates, angle, layout, review, and surface provenance")
+    func directAtlasPageRetainsSurfacePlan() throws {
+        let atlasPDF = try makeAtlasPDF()
+        defer { try? FileManager.default.removeItem(at: atlasPDF) }
+        let plate = try #require(
+            SurgeryAtlasCatalog.canonicalPlates(sourceURL: atlasPDF)
+                .first { $0.figure == 39 }
+        )
+        let prefill = makeSurfacePrefill(angleDegrees: -20, layoutDegrees: 90)
+        let sourceDigest = String(repeating: "a", count: 64)
+        let rendered = try SurgeryAtlasPageRenderer.overlay(
+            atlasPDF: Data(contentsOf: atlasPDF),
+            prefill: prefill,
+            plate: plate,
+            atlasSourceSHA256: sourceDigest
+        )
+        let document = try #require(PDFDocument(data: rendered))
+        let text = document.string ?? ""
+
+        #expect(document.pageCount == 1)
+        #expect(text.contains(prefill.targetCoordinateText))
+        #expect(text.contains("A↔P -20.0° (P→A)"))
+        #expect(text.contains("layout 90° CW"))
+        #expect(text.contains("source-transcribed-review-pending"))
+        #expect(text.contains("annotation 2222222222…"))
+        #expect(text.contains("Urchin@57be3cdc7d62"))
+        #expect(text.contains(String(sourceDigest.prefix(16))))
     }
 
     @MainActor
@@ -788,14 +868,14 @@ struct SurgeryPlanExportTests {
     }
 
     @MainActor
-    @Test("Direct export capture rejects an unapplied probe draft")
+    @Test("Direct export capture rejects an unfinished probe edit")
     func directExportRejectsProbeDraft() {
         let defaults = UserDefaults(suiteName: UUID().uuidString)!
         let model = PlannerViewModel(
             launchConfiguration: nil,
             preferences: defaults
         )
-        model.probeDraftSession.name = "Unapplied left V1"
+        model.probeDraftSession.surfaceAP = "-1.25"
 
         do {
             _ = try SurgeryPlanDraftSafety.captureCurrent(in: model)
@@ -803,7 +883,8 @@ struct SurgeryPlanExportTests {
         } catch let error as SurgeryPlanExportError {
             #expect(
                 error.errorDescription
-                    == "Apply or revert the probe draft before exporting the surgery plan."
+                    == "Finish the numeric edit with Return or leave the field, then wait "
+                    + "for the probe update before exporting the surgery plan."
             )
         } catch {
             Issue.record("Unexpected export safety error: \(error)")
@@ -821,7 +902,7 @@ struct SurgeryPlanExportTests {
         let captured = try SurgeryPlanDraftSafety.captureCurrent(in: model)
         #expect(captured.isCurrent(in: model))
 
-        model.probeDraftSession.depth = "3.25"
+        model.probeDraftSession.surfaceDepthMM = "3.25"
 
         #expect(!captured.isCurrent(in: model))
         #expect(model.hasUnappliedProbeDraftChanges)
@@ -1078,6 +1159,49 @@ struct SurgeryPlanExportTests {
         }
     }
 
+    private func makeSurfacePrefill(
+        angleDegrees: Double = 20,
+        layoutDegrees: Int = 90
+    ) -> SurgeryPlanPrefill {
+        SurgeryPlanPrefill(
+            exportClass: .draft,
+            date: "2026-07-25",
+            projectTitle: "m13 planning",
+            projectRevision: 1,
+            subjectId: "m13",
+            targetLabel: "NP2013",
+            apMillimetres: -1.25,
+            mlMillimetres: 0.8,
+            dvMillimetres: nil,
+            cageId: "",
+            mouseNumber: "",
+            weightGrams: "",
+            operatorName: "",
+            probePlanName: "NP2013",
+            probeModelName: "Neuropixels 2.0 — NP2013 · 4 shanks",
+            insertionDepthMillimetres: 2.3,
+            azimuthDegrees: 180,
+            elevationDegrees: -70,
+            axialRotationDegrees: 180,
+            surfaceDepthMillimetres: 2.3,
+            sagittalAngleDegrees: angleDegrees,
+            probeLayoutRotationDegrees: layoutDegrees,
+            probeVerificationStatus: "source-transcribed-review-pending",
+            probeWarning:
+                "Verify the source-traced geometry before animal use.",
+            planInputSHA256: String(repeating: "1", count: 64),
+            surfaceAnnotationSHA256: String(repeating: "2", count: 64),
+            surfaceDefinitionVersion:
+                ProbePlanningContract.surfaceDefinitionVersion,
+            bregmaReferenceId:
+                ProbePlanningContract.surfaceBregmaReferenceId,
+            bregmaSourceRevision: "Urchin@57be3cdc7d62",
+            bregmaSourceSHA256:
+                ProbePlanningContract.surfaceBregmaSourceSHA256,
+            draftReason: "test"
+        )
+    }
+
     private func makePrefill(
         azimuthDegrees: Double?,
         elevationDegrees: Double?,
@@ -1105,6 +1229,17 @@ struct SurgeryPlanExportTests {
             azimuthDegrees: azimuthDegrees,
             elevationDegrees: elevationDegrees,
             axialRotationDegrees: nil,
+            surfaceDepthMillimetres: nil,
+            sagittalAngleDegrees: nil,
+            probeLayoutRotationDegrees: nil,
+            probeVerificationStatus: nil,
+            probeWarning: nil,
+            planInputSHA256: nil,
+            surfaceAnnotationSHA256: nil,
+            surfaceDefinitionVersion: nil,
+            bregmaReferenceId: nil,
+            bregmaSourceRevision: nil,
+            bregmaSourceSHA256: nil,
             draftReason: "test"
         )
     }
@@ -1138,17 +1273,16 @@ struct SurgeryPlanExportTests {
             plate in
             switch plate.orientation {
             case .coronal:
-                String(
-                    format:
-                        "FIGURE %02d · Bregma %.2f mm · Interaural %.2f mm",
-                    plate.figure,
+                "FIGURE \(zeroPaddedDecimal(plate.figure, width: 2)) · "
+                    + String(
+                    format: "Bregma %.2f mm · Interaural %.2f mm",
                     plate.fixedCoordinateMillimetres,
                     plate.fixedCoordinateMillimetres + 3.80
                 )
             case .sagittal:
-                String(
-                    format: "Figure %d · Lateral %.2f mm",
-                    plate.figure,
+                "Figure \(plate.figure) · "
+                    + String(
+                    format: "Lateral %.2f mm",
                     plate.fixedCoordinateMillimetres
                 )
             }
@@ -1616,5 +1750,10 @@ struct SurgeryPlanExportTests {
 
     private var markerAuthor: String {
         "Brain3D-SurgeryPlanExportTests"
+    }
+
+    private func zeroPaddedDecimal(_ value: Int, width: Int) -> String {
+        let text = String(value)
+        return String(repeating: "0", count: max(0, width - text.count)) + text
     }
 }

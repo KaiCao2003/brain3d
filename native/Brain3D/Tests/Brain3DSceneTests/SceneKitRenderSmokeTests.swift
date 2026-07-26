@@ -2,6 +2,7 @@ import AppKit
 import Brain3DCore
 import CryptoKit
 import Foundation
+@preconcurrency import SceneKit
 import simd
 @testable import Brain3DScene
 import Testing
@@ -413,12 +414,287 @@ struct SceneKitRenderSmokeTests {
         #expect(phase == .ready)
         #expect(highlighted.highlightedRegionMesh?.region?.acronym == "TH")
         #expect(selectedGeometryNode.categoryBitMask == SceneCategory.highlightedRegion.rawValue)
-        #expect(selectedGeometryNode.renderingOrder == -5_000)
+        #expect(selectedGeometryNode.renderingOrder == 0)
         #expect(material.lightingModel == .constant)
-        #expect(abs(material.transparency - 0.82) < 0.0001)
-        #expect(material.readsFromDepthBuffer)
-        #expect(material.writesToDepthBuffer)
+        #expect(abs(material.transparency - 0.94) < 0.0001)
+        #expect(!material.readsFromDepthBuffer)
+        #expect(!material.writesToDepthBuffer)
         #expect(changedPixelCount(before, after) >= 20)
+    }
+
+    @Test("Changing selected region refreshes 3D identity even when geometry is shared")
+    @MainActor
+    func changingSelectedRegionRefreshesSharedGeometry() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let rootMesh = try decodeMeshResult(fixture: fixture)
+        let firstRegionMesh = try decodeRegionMeshResult(fixture: fixture)
+        let secondRegionMesh = try decodeRegionMeshResult(
+            fixture: fixture,
+            region: [
+                "structureId": 385,
+                "acronym": "VISp",
+                "name": "Primary visual area",
+                "parentStructureId": 669,
+                "structureIdPath": [997, 8, 567, 688, 695, 315, 669, 385],
+                "rgb": [8, 133, 140],
+            ]
+        )
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let first = try AnimalSceneSnapshot(
+            projectId: "region-refresh-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: rootMesh,
+            highlightedRegionMesh: firstRegionMesh,
+            selectedProbePlan: nil
+        )
+        let second = try AnimalSceneSnapshot(
+            projectId: "region-refresh-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: rootMesh,
+            highlightedRegionMesh: secondRegionMesh,
+            selectedProbePlan: nil
+        )
+        let view = AtlasInteractiveSCNView(
+            frame: CGRect(x: 0, y: 0, width: 320, height: 240)
+        )
+        let controller = AnimalSceneController(view: view)
+
+        await controller.apply(snapshot: first) { _ in }
+        await controller.apply(snapshot: second) { _ in }
+
+        #expect(first.identity != second.identity)
+        #expect(
+            view.scene?.rootNode.childNode(
+                withName: "allen-region-549",
+                recursively: true
+            ) == nil
+        )
+        let selectedRoot = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "allen-region-385",
+                recursively: true
+            )
+        )
+        let selectedGeometry = try #require(
+            selectedRoot.childNodes(passingTest: { node, _ in
+                node.geometry != nil
+            }).first
+        )
+        let selectedColor = try #require(
+            selectedGeometry.geometry?.firstMaterial?.diffuse.contents as? NSColor
+        ).usingColorSpace(.deviceRGB)
+        let rgb = try #require(selectedColor)
+        #expect(abs(rgb.redComponent - linearSRGBComponent(8)) < 0.01)
+        #expect(abs(rgb.greenComponent - linearSRGBComponent(133)) < 0.01)
+        #expect(abs(rgb.blueComponent - linearSRGBComponent(140)) < 0.01)
+    }
+
+    @Test("A selected cortical layer remains visible with the reviewed cached atlas meshes")
+    @MainActor
+    func selectedCorticalLayerRendersWithReviewedAtlasCache() async throws {
+        let atlasRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                ".brainglobe/allen_mouse_25um_v1.2",
+                isDirectory: true
+            )
+            .standardizedFileURL
+        let rootURL = atlasRoot.appendingPathComponent("meshes/997.obj")
+        let regionURL = atlasRoot.appendingPathComponent("meshes/442.obj")
+        guard FileManager.default.isReadableFile(atPath: rootURL.path),
+              FileManager.default.isReadableFile(atPath: regionURL.path)
+        else { return }
+
+        let rootMesh = try decodeCachedMeshResult(
+            target: "root",
+            region: nil,
+            meshURL: rootURL,
+            atlasRoot: atlasRoot
+        )
+        let selectedRegion: [String: Any] = [
+            "structureId": 442,
+            "acronym": "RSPd1",
+            "name": "Retrosplenial area, dorsal part, layer 1",
+            "parentStructureId": 879,
+            "structureIdPath": [997, 8, 567, 688, 695, 315, 254, 879, 442],
+            "rgb": [26, 166, 152],
+        ]
+        let regionMesh = try decodeCachedMeshResult(
+            target: "region",
+            region: selectedRegion,
+            meshURL: regionURL,
+            atlasRoot: atlasRoot
+        )
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let view = AtlasInteractiveSCNView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480)
+        )
+        let controller = AnimalSceneController(view: view)
+        let rootOnly = try AnimalSceneSnapshot(
+            projectId: "reviewed-cache-region-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: rootMesh,
+            selectedProbePlan: nil
+        )
+        await controller.apply(snapshot: rootOnly) { _ in }
+        let before = try bitmap(
+            from: controller.offscreenSnapshot(size: CGSize(width: 640, height: 480))
+        )
+
+        let highlighted = try AnimalSceneSnapshot(
+            projectId: "reviewed-cache-region-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: rootMesh,
+            highlightedRegionMesh: regionMesh,
+            selectedProbePlan: nil
+        )
+        await controller.apply(snapshot: highlighted) { _ in }
+        let after = try bitmap(
+            from: controller.offscreenSnapshot(size: CGSize(width: 640, height: 480))
+        )
+
+        let regionNode = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "allen-region-442",
+                recursively: true
+            )
+        )
+        let regionGeometryNode = try #require(
+            regionNode.childNodes(passingTest: { node, _ in
+                node.geometry != nil
+            }).first
+        )
+        let regionMaterial = try #require(
+            regionGeometryNode.geometry?.firstMaterial
+        )
+        let rootLayer = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "allen-mouse-root-mesh",
+                recursively: false
+            )
+        )
+        let brainGeometryNode = try #require(
+            rootLayer.childNodes(passingTest: { node, _ in
+                node.geometry != nil
+            }).first
+        )
+        let selectedBrainMaterial = try #require(
+            brainGeometryNode.geometry?.firstMaterial
+        )
+
+        #expect(regionGeometryNode.renderingOrder == 0)
+        #expect(regionMaterial.name == "selected-allen-region")
+        #expect(regionMaterial.lightingModel == .constant)
+        #expect(abs(regionMaterial.transparency - 0.94) < 0.0001)
+        #expect(!regionMaterial.readsFromDepthBuffer)
+        #expect(!regionMaterial.writesToDepthBuffer)
+        #expect(selectedBrainMaterial.fillMode == .lines)
+        #expect(changedPixelCount(before, after) >= 100)
+        #expect(
+            selectedRegionPixelCount(after, rgb: (26, 166, 152)) >= 100
+        )
+
+        await controller.apply(snapshot: rootOnly) { _ in }
+        let restoredBrainMaterial = try #require(
+            brainGeometryNode.geometry?.firstMaterial
+        )
+        #expect(
+            view.scene?.rootNode.childNode(
+                withName: "allen-region-442",
+                recursively: true
+            ) == nil
+        )
+        #expect(restoredBrainMaterial.fillMode == .fill)
+        #expect(abs(restoredBrainMaterial.transparency - 0.36) < 0.0001)
+    }
+
+    @Test("A selected deep TH mesh remains visibly colored inside the reviewed root shell")
+    @MainActor
+    func selectedThalamusRendersWithReviewedAtlasCache() async throws {
+        let atlasRoot = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(
+                ".brainglobe/allen_mouse_25um_v1.2",
+                isDirectory: true
+            )
+            .standardizedFileURL
+        let rootURL = atlasRoot.appendingPathComponent("meshes/997.obj")
+        let regionURL = atlasRoot.appendingPathComponent("meshes/549.obj")
+        guard FileManager.default.isReadableFile(atPath: rootURL.path),
+              FileManager.default.isReadableFile(atPath: regionURL.path)
+        else { return }
+
+        let rootMesh = try decodeCachedMeshResult(
+            target: "root",
+            region: nil,
+            meshURL: rootURL,
+            atlasRoot: atlasRoot
+        )
+        let regionMesh = try decodeCachedMeshResult(
+            target: "region",
+            region: [
+                "structureId": 549,
+                "acronym": "TH",
+                "name": "Thalamus",
+                "parentStructureId": 1129,
+                "structureIdPath": [997, 8, 343, 1129, 549],
+                "rgb": [255, 112, 128],
+            ],
+            meshURL: regionURL,
+            atlasRoot: atlasRoot
+        )
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let snapshot = try AnimalSceneSnapshot(
+            projectId: "reviewed-cache-thalamus-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: rootMesh,
+            highlightedRegionMesh: regionMesh,
+            selectedProbePlan: nil
+        )
+        let view = AtlasInteractiveSCNView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480)
+        )
+        let controller = AnimalSceneController(view: view)
+
+        await controller.apply(snapshot: snapshot) { _ in }
+        let rendered = try bitmap(
+            from: controller.offscreenSnapshot(size: CGSize(width: 640, height: 480))
+        )
+        let thalamusRoot = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "allen-region-549",
+                recursively: true
+            )
+        )
+        let thalamusGeometry = try #require(
+            thalamusRoot.childNodes(passingTest: { node, _ in
+                node.geometry != nil
+            }).first
+        )
+        let material = try #require(
+            thalamusGeometry.geometry?.firstMaterial
+        )
+
+        #expect(thalamusGeometry.geometry?.elements.first?.primitiveCount == 13_170)
+        #expect(material.name == "selected-allen-region")
+        #expect(material.lightingModel == .constant)
+        #expect(abs(material.transparency - 0.94) < 0.0001)
+        #expect(
+            selectedRegionPixelCount(rendered, rgb: (255, 112, 128)) >= 100
+        )
     }
 
     @Test("Whole-brain, region, NP2 four-shank probe, and VesSAP vessels coexist")
@@ -552,6 +828,116 @@ struct SceneKitRenderSmokeTests {
         #expect(visibleVesselPixelCount(compositeBitmap) >= 20)
     }
 
+    @Test("Home camera visibly separates all four NP2013 shanks in both layouts")
+    @MainActor
+    func homeCameraSeparatesFourShankLayouts() async throws {
+        let fixture = try makeFixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let meshResult = try decodeMeshResult(fixture: fixture)
+        let anchor = try decode(
+            AtlasPhysicalPoint.self,
+            object: physicalPoint(ap: 6_600, dv: 4_000, ml: 5_700)
+        )
+        let snapshot = try AnimalSceneSnapshot(
+            projectId: "four-shank-camera-project",
+            projectRevision: 1,
+            rendererAnchor: anchor,
+            meshResult: meshResult,
+            selectedProbePlan: nil
+        )
+        let view = AtlasInteractiveSCNView(
+            frame: CGRect(x: 0, y: 0, width: 640, height: 480)
+        )
+        let controller = AnimalSceneController(view: view)
+        await controller.apply(snapshot: snapshot) { _ in }
+        let probeLayer = try #require(
+            view.scene?.rootNode.childNode(
+                withName: "selected-probe-layer",
+                recursively: false
+            )
+        )
+
+        for layout in [0, 90] {
+            probeLayer.childNodes.forEach { $0.removeFromParentNode() }
+            let layoutShanks = np2013Shanks(layoutRotationDegrees: layout)
+            let probe = try ProbeEnvelopeNodeFactory.makeNode(
+                for: layoutShanks,
+                usableForNavigation: false,
+                transform: snapshot.transform
+            )
+            probeLayer.addChildNode(probe)
+            controller.setCameraHome(for: snapshot, shanks: layoutShanks)
+            _ = controller.offscreenSnapshot(
+                size: CGSize(width: 640, height: 480)
+            )
+
+            let projected = probe.childNodes.map {
+                view.projectPoint($0.worldPosition)
+            }
+            let adjacentDistances = zip(projected, projected.dropFirst()).map {
+                hypot(
+                    Double($1.x - $0.x),
+                    Double($1.y - $0.y)
+                )
+            }
+            #expect(projected.count == 4)
+            #expect(adjacentDistances.count == 3)
+            #expect(
+                adjacentDistances.allSatisfy { $0 > 4 },
+                "Layout \(layout) must show a visible gap between every adjacent shank."
+            )
+
+            var endpointProjections: [SCNVector3] = []
+            for shank in layoutShanks {
+                for point in [shank.renderedProximalEnd, shank.tip] {
+                    let scenePoint = try snapshot.transform.scenePoint(point)
+                    endpointProjections.append(
+                        view.projectPoint(SCNVector3(scenePoint))
+                    )
+                }
+            }
+            let allEndpointsVisible = endpointProjections.allSatisfy {
+                $0.x >= 0 && $0.x <= 640
+                    && $0.y >= 0 && $0.y <= 480
+                    && $0.z >= 0 && $0.z <= 1
+            }
+            #expect(
+                allEndpointsVisible,
+                "The complete 10 mm shanks must fit the default 3D camera."
+            )
+
+            let atlasMinimum = snapshot.meshResult.sourceCoordinateFrame
+                .bounds.minimumInclusiveMicrometres
+            let atlasMaximum = snapshot.meshResult.sourceCoordinateFrame
+                .bounds.maximumExclusiveMicrometres
+            var atlasCornerProjections: [SCNVector3] = []
+            for ap in [atlasMinimum[0], atlasMaximum[0]] {
+                for dv in [atlasMinimum[1], atlasMaximum[1]] {
+                    for ml in [atlasMinimum[2], atlasMaximum[2]] {
+                        let point = try snapshot.transform.scenePoint(
+                            apMicrometres: ap,
+                            dvMicrometres: dv,
+                            mlMicrometres: ml
+                        )
+                        atlasCornerProjections.append(
+                            view.projectPoint(SCNVector3(point))
+                        )
+                    }
+                }
+            }
+            let atlasWidth = try #require(
+                atlasCornerProjections.map(\.x).max()
+            ) - (try #require(atlasCornerProjections.map(\.x).min()))
+            let atlasHeight = try #require(
+                atlasCornerProjections.map(\.y).max()
+            ) - (try #require(atlasCornerProjections.map(\.y).min()))
+            #expect(
+                atlasWidth >= 180 && atlasHeight >= 100,
+                "Framing the external shaft must not reduce the brain to an unusable speck."
+            )
+        }
+    }
+
     @Test("Snapshot requires current vessel geometry before accepting a selected conflict")
     func selectedConflictSnapshotContract() throws {
         let fixture = try makeFixture()
@@ -661,6 +1047,40 @@ struct SceneKitRenderSmokeTests {
         return count
     }
 
+    private func selectedRegionPixelCount(
+        _ bitmap: NSBitmapImageRep,
+        rgb: (red: Int, green: Int, blue: Int)
+    ) -> Int {
+        let expected = (
+            red: CGFloat(rgb.red) / 255,
+            green: CGFloat(rgb.green) / 255,
+            blue: CGFloat(rgb.blue) / 255
+        )
+        var count = 0
+        for y in 0 ..< bitmap.pixelsHigh {
+            for x in 0 ..< bitmap.pixelsWide {
+                guard let color = bitmap.colorAt(x: x, y: y)?
+                    .usingColorSpace(.deviceRGB)
+                else { continue }
+                if abs(color.redComponent - expected.red) < 0.18,
+                   abs(color.greenComponent - expected.green) < 0.18,
+                   abs(color.blueComponent - expected.blue) < 0.18
+                {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    private func linearSRGBComponent(_ byte: Int) -> CGFloat {
+        let value = Double(byte) / 255
+        if value <= 0.04045 {
+            return CGFloat(value / 12.92)
+        }
+        return CGFloat(pow((value + 0.055) / 1.055, 2.4))
+    }
+
     private func changedPixelCount(
         _ baseline: NSBitmapImageRep,
         _ rendered: NSBitmapImageRep
@@ -725,6 +1145,43 @@ struct SceneKitRenderSmokeTests {
         ]
     }
 
+    private func np2013Shanks(
+        layoutRotationDegrees: Int
+    ) -> [ProbePlacedShank] {
+        (0 ..< 4).map { index in
+            let offset = Double(index) * 250
+            let ap = 5_200 + (layoutRotationDegrees == 0 ? offset : 0)
+            let ml = 5_700 - (layoutRotationDegrees == 90 ? offset : 0)
+            let surfaceEntry = ProbePhysicalPoint(
+                apMicrometres: ap,
+                dvMicrometres: 500,
+                mlMicrometres: ml
+            )
+            return ProbePlacedShank(
+                shankId: "shank-\(index)",
+                entry: surfaceEntry,
+                tip: ProbePhysicalPoint(
+                    apMicrometres: ap,
+                    dvMicrometres: 2_800,
+                    mlMicrometres: ml
+                ),
+                widthMicrometres: 70,
+                thicknessMicrometres: 24,
+                conservativeEnvelopeRadiusMicrometres: 37,
+                envelopeDefinition:
+                    "circumscribed-radius-of-rectangular-cross-section",
+                surfaceEntry: surfaceEntry,
+                proximalEnd: ProbePhysicalPoint(
+                    apMicrometres: ap,
+                    dvMicrometres: -7_200,
+                    mlMicrometres: ml,
+                    insideAtlas: false
+                ),
+                totalLengthMicrometres: 10_000
+            )
+        }
+    }
+
     private func makeFixture() throws -> (
         root: URL,
         obj: URL,
@@ -765,7 +1222,7 @@ struct SceneKitRenderSmokeTests {
             """.utf8
         )
         try data.write(to: obj, options: .atomic)
-        let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let sha = LowercaseHex.encode(SHA256.hash(data: data))
         let regionObj = meshes.appendingPathComponent("549.obj")
         let regionData = Data(
             """
@@ -793,9 +1250,7 @@ struct SceneKitRenderSmokeTests {
             """.utf8
         )
         try regionData.write(to: regionObj, options: .atomic)
-        let regionSHA = SHA256.hash(data: regionData)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let regionSHA = LowercaseHex.encode(SHA256.hash(data: regionData))
         return (
             root.standardizedFileURL,
             obj.standardizedFileURL,
@@ -818,7 +1273,7 @@ struct SceneKitRenderSmokeTests {
             regionByteSize: Int
         )
     ) throws -> AtlasMeshResult {
-        try decode(
+        return try decode(
             AtlasMeshResult.self,
             object: [
                 "protocolVersion": 1,
@@ -848,27 +1303,59 @@ struct SceneKitRenderSmokeTests {
             regionObj: URL,
             regionSHA256: String,
             regionByteSize: Int
-        )
+        ),
+        region: [String: Any]? = nil
     ) throws -> AtlasMeshResult {
-        try decode(
+        let resolvedRegion = region ?? [
+            "structureId": 549,
+            "acronym": "TH",
+            "name": "Thalamus",
+            "parentStructureId": 997,
+            "structureIdPath": [997, 549],
+            "rgb": [255, 112, 128],
+        ]
+        return try decode(
             AtlasMeshResult.self,
             object: [
                 "protocolVersion": 1,
                 "target": "region",
-                "region": [
-                    "structureId": 549,
-                    "acronym": "TH",
-                    "name": "Thalamus",
-                    "parentStructureId": 997,
-                    "structureIdPath": [997, 549],
-                    "rgb": [255, 112, 128],
-                ],
+                "region": resolvedRegion,
                 "mesh": [
                     "canonicalPath": fixture.regionObj.path,
                     "atlasRootCanonicalPath": fixture.root.path,
                     "pathUnderAtlasRoot": "meshes/549.obj",
                     "sha256": fixture.regionSHA256,
                     "byteSize": fixture.regionByteSize,
+                    "fileExtension": ".obj",
+                    "contentsIncluded": false,
+                ],
+                "sourceCoordinateFrame": coordinateFrame(),
+                "atlas": atlas(),
+            ]
+        )
+    }
+
+    private func decodeCachedMeshResult(
+        target: String,
+        region: [String: Any]?,
+        meshURL: URL,
+        atlasRoot: URL
+    ) throws -> AtlasMeshResult {
+        let data = try Data(contentsOf: meshURL, options: [.mappedIfSafe])
+        let sha256 = LowercaseHex.encode(SHA256.hash(data: data))
+        return try decode(
+            AtlasMeshResult.self,
+            object: [
+                "protocolVersion": 1,
+                "target": target,
+                "region": region.map { $0 as Any } ?? NSNull(),
+                "mesh": [
+                    "canonicalPath": meshURL.path,
+                    "atlasRootCanonicalPath": atlasRoot.path,
+                    "pathUnderAtlasRoot":
+                        "meshes/\(meshURL.lastPathComponent)",
+                    "sha256": sha256,
+                    "byteSize": data.count,
                     "fileExtension": ".obj",
                     "contentsIncluded": false,
                 ],

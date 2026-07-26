@@ -529,5 +529,5 @@ private func isMajorVesselSHA256(_ value: String) -> Bool {
 }
 
 private extension Digest {
-    var hex: String { map { String(format: "%02x", $0) }.joined() }
+    var hex: String { LowercaseHex.encode(self) }
 }

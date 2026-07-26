@@ -445,21 +445,21 @@ def test_project_creation_requires_animal_only_acknowledgement() -> None:
     assert caught.value.code == "ANIMAL_ONLY_ACKNOWLEDGEMENT_REQUIRED"
 
 
-def test_project_creation_requires_animal_subject_id() -> None:
+def test_project_creation_allows_subjectless_rough_atlas_planning() -> None:
     dispatcher, _ = _dispatcher()
 
-    with pytest.raises(BridgeError) as caught:
-        _call(
-            dispatcher,
-            "project.new",
-            animalResearchOnlyAcknowledged=True,
-        )
+    created = _call(
+        dispatcher,
+        "project.new",
+        animalResearchOnlyAcknowledged=True,
+    )
 
-    assert caught.value.code == "ANIMAL_SUBJECT_ID_REQUIRED"
+    assert created["status"] == "created"
+    assert created["subjectId"] is None
 
 
 @pytest.mark.parametrize("subject_id", [None, "   "])
-def test_project_open_rejects_subjectless_legacy_package(
+def test_project_open_allows_subjectless_rough_atlas_package(
     tmp_path: Path,
     subject_id: str | None,
 ) -> None:
@@ -483,17 +483,11 @@ def test_project_open_rejects_subjectless_legacy_package(
     )
     dispatcher, session = _dispatcher()
 
-    with pytest.raises(BridgeError) as caught:
-        _call(dispatcher, "project.open", path=str(path))
+    opened = _call(dispatcher, "project.open", path=str(path))
 
-    assert caught.value.code == "ANIMAL_SUBJECT_ID_REQUIRED"
-    assert "explicit subject ID" in caught.value.message
-    assert caught.value.details == {
-        "projectOpened": False,
-        "suggestedAction": "Create a new animal plan with an explicit subject ID.",
-    }
-    assert session.project is None
-    assert session.project_revision == 0
+    assert opened["status"] == "opened"
+    assert session.project is not None
+    assert session.project.subject_id == subject_id
 
 
 def test_backend_project_revision_is_authoritative_for_unsaved_changes(

@@ -14,6 +14,10 @@ enum ProbeEnvelopeNodeFactory {
         container.categoryBitMask = SceneCategory.probe.rawValue
         guard let plan else { return container }
         guard plan.hasCurrentPlanningGeometry else { return container }
+        try validateDirectProductShanks(
+            modelId: plan.modelId,
+            shanks: plan.shanks
+        )
 
         return try makeNode(
             for: plan.shanks,
@@ -32,9 +36,9 @@ enum ProbeEnvelopeNodeFactory {
         container.name = "selected-probe-envelope"
         container.categoryBitMask = SceneCategory.probe.rawValue
         for shank in shanks {
-            let entry = try transform.scenePoint(shank.entry)
+            let proximalEnd = try transform.scenePoint(shank.renderedProximalEnd)
             let tip = try transform.scenePoint(shank.tip)
-            let delta = tip - entry
+            let delta = tip - proximalEnd
             let length = simd_length(delta)
             let radius = Float(
                 shank.conservativeEnvelopeRadiusMicrometres
@@ -56,7 +60,7 @@ enum ProbeEnvelopeNodeFactory {
             geometry.materials = [material(usableForNavigation: usableForNavigation)]
             let node = SCNNode(geometry: geometry)
             node.name = "probe-shank-\(shank.shankId)"
-            node.simdPosition = (entry + tip) * 0.5
+            node.simdPosition = (proximalEnd + tip) * 0.5
             node.simdOrientation = orientation(fromYAxisTo: delta / length)
             node.categoryBitMask = SceneCategory.probe.rawValue
             node.renderingOrder = 20
@@ -64,6 +68,48 @@ enum ProbeEnvelopeNodeFactory {
             container.addChildNode(node)
         }
         return container
+    }
+
+    static func expectedShankCount(forDirectModelId modelId: String) -> Int? {
+        switch modelId {
+        case ProbePlanningContract.neuropixels2SingleShankModelId:
+            1
+        case ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            4
+        default:
+            nil
+        }
+    }
+
+    static func validateDirectProductShanks(
+        modelId: String,
+        shanks: [ProbePlacedShank]
+    ) throws {
+        guard let expectedCount = expectedShankCount(forDirectModelId: modelId) else {
+            return
+        }
+        guard shanks.count == expectedCount else {
+            throw AtlasSceneContractError.invalid(
+                "\(modelId) requires exactly \(expectedCount) distinct 3D shank"
+                    + (expectedCount == 1 ? "." : "s.")
+            )
+        }
+
+        let centerlines = shanks.map { shank in
+            [
+                shank.renderedProximalEnd.apMicrometres,
+                shank.renderedProximalEnd.dvMicrometres,
+                shank.renderedProximalEnd.mlMicrometres,
+                shank.tip.apMicrometres,
+                shank.tip.dvMicrometres,
+                shank.tip.mlMicrometres,
+            ]
+        }
+        guard Set(centerlines).count == expectedCount else {
+            throw AtlasSceneContractError.invalid(
+                "\(modelId) contains coincident 3D shank centerlines."
+            )
+        }
     }
 
     private static func orientation(fromYAxisTo direction: SIMD3<Float>) -> simd_quatf {

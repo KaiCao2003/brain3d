@@ -158,9 +158,23 @@ enum SurgeryAtlasCatalog {
         orientation: SurgeryAtlasOrientation,
         target: UnprojectedImplantTarget
     ) throws -> SurgeryAtlasPlate {
+        try nearestPlate(
+            in: atlasPDFURL,
+            orientation: orientation,
+            apMillimetres: target.apMillimetres,
+            mlMillimetres: target.mlMillimetres
+        )
+    }
+
+    static func nearestPlate(
+        in atlasPDFURL: URL,
+        orientation: SurgeryAtlasOrientation,
+        apMillimetres: Double,
+        mlMillimetres: Double
+    ) throws -> SurgeryAtlasPlate {
         let requestedCoordinate = orientation == .coronal
-            ? target.apMillimetres
-            : abs(target.mlMillimetres)
+            ? apMillimetres
+            : abs(mlMillimetres)
         let candidates = try plates(in: atlasPDFURL).filter {
             $0.orientation == orientation
         }
@@ -199,6 +213,19 @@ enum SurgeryAtlasCatalog {
 enum SurgeryPlanExportClass: String, Sendable {
     case draft = "DRAFT"
     case final = "FINAL"
+}
+
+enum SurgeryPlanSurfaceAnglePresentation {
+    static func text(_ angleDegrees: Double, separator: String = " ") -> String {
+        if angleDegrees == 0 {
+            return "A↔P 0.0°\(separator)(vertical)"
+        }
+        return String(
+            format: "A↔P %+.1f°\(separator)(%@)",
+            angleDegrees,
+            angleDegrees > 0 ? "A→P" : "P→A"
+        )
+    }
 }
 
 enum SurgeryPlanReadiness {
@@ -249,15 +276,42 @@ enum SurgeryPlanReadiness {
               plan.provenance.atlasMetadataSha256 == atlas.metadataSha256,
               plan.provenance.projectionSha256
                 == projection.provenance.projectionSha256,
-              plan.sourceTarget.apMillimetres == target.apMillimetres,
-              plan.sourceTarget.mlMillimetres == target.mlMillimetres,
-              plan.sourceTarget.dvMillimetres == target.dvMillimetres,
+              let sourceTarget = plan.sourceTarget,
+              sourceTarget.apMillimetres == target.apMillimetres,
+              sourceTarget.mlMillimetres == target.mlMillimetres,
+              sourceTarget.dvMillimetres == target.dvMillimetres,
               plan.placement.atlasFrame.target.apMicrometres
                 == projection.atlasPoint.apMicrometres,
               plan.placement.atlasFrame.target.dvMicrometres
                 == projection.atlasPoint.dvMicrometres,
               plan.placement.atlasFrame.target.mlMicrometres
                 == projection.atlasPoint.mlMicrometres
+        else { return nil }
+        return plan
+    }
+
+    static func currentSurfaceProbePlan(
+        _ plan: ProbePlanDetail?,
+        atlas: ViewerAtlasIdentity
+    ) -> ProbePlanDetail? {
+        guard let plan,
+              plan.placementMode == .atlasSurfaceAPML,
+              plan.hasCurrentPlanningGeometry,
+              !plan.usableForNavigation,
+              plan.targetId == nil,
+              plan.calibrationId == nil,
+              plan.calibrationVersion == nil,
+              plan.sourceTarget == nil,
+              plan.manipulatorInput == nil,
+              let input = plan.surfaceRelativeInput,
+              input.mode == .atlasSurfaceAPML,
+              input.bregmaReference.atlasIdentifier == atlas.identifier,
+              input.bregmaReference.atlasVersion == atlas.version,
+              input.surfaceEntry.atlasIdentifier == atlas.identifier,
+              input.surfaceEntry.atlasVersion == atlas.version,
+              plan.provenance.atlasMetadataSha256 == atlas.metadataSha256,
+              plan.provenance.planningAlgorithmVersion
+                == ProbePlanningContract.surfacePlanningAlgorithmVersion
         else { return nil }
         return plan
     }
@@ -282,6 +336,23 @@ enum SurgeryPlanReadiness {
         else { return .draft }
         return .final
     }
+
+    static func exportClass(
+        project: ProjectBridgeState,
+        hasUnsavedChanges: Bool,
+        surfaceProbePlan: ProbePlanDetail?
+    ) -> SurgeryPlanExportClass {
+        let subjectId = project.subjectId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard subjectId?.isEmpty == false,
+              project.animalResearchOnlyAcknowledged,
+              !project.requiresSaveAs,
+              !project.isDirty,
+              !hasUnsavedChanges,
+              surfaceProbePlan != nil
+        else { return .draft }
+        return .final
+    }
 }
 
 struct SurgeryPlanPrefill: Equatable, Sendable {
@@ -293,7 +364,7 @@ struct SurgeryPlanPrefill: Equatable, Sendable {
     let targetLabel: String
     let apMillimetres: Double
     let mlMillimetres: Double
-    let dvMillimetres: Double
+    let dvMillimetres: Double?
     let cageId: String
     let mouseNumber: String
     let weightGrams: String
@@ -304,9 +375,25 @@ struct SurgeryPlanPrefill: Equatable, Sendable {
     let azimuthDegrees: Double?
     let elevationDegrees: Double?
     let axialRotationDegrees: Double?
+    let surfaceDepthMillimetres: Double?
+    let sagittalAngleDegrees: Double?
+    let probeLayoutRotationDegrees: Int?
+    let probeVerificationStatus: String?
+    let probeWarning: String?
+    let planInputSHA256: String?
+    let surfaceAnnotationSHA256: String?
+    let surfaceDefinitionVersion: String?
+    let bregmaReferenceId: String?
+    let bregmaSourceRevision: String?
+    let bregmaSourceSHA256: String?
     let draftReason: String?
 
     var templateAngleText: String {
+        if let sagittalAngleDegrees {
+            return SurgeryPlanSurfaceAnglePresentation.text(
+                sagittalAngleDegrees
+            )
+        }
         guard let azimuthDegrees, let elevationDegrees else { return "________" }
         return String(
             format: "Az %+.1f° / El %+.1f°",
@@ -316,7 +403,21 @@ struct SurgeryPlanPrefill: Equatable, Sendable {
     }
 
     var targetCoordinateText: String {
-        String(
+        if let surfaceDepthMillimetres {
+            return String(
+                format:
+                    "AP %+.3f mm · ML %+.3f mm · depth %.3f mm from local atlas surface",
+                apMillimetres,
+                mlMillimetres,
+                surfaceDepthMillimetres
+            )
+        }
+        guard let dvMillimetres else {
+            return String(
+                format: "AP %+.3f mm · ML %+.3f mm", apMillimetres, mlMillimetres
+            )
+        }
+        return String(
             format: "AP %+.3f mm · ML %+.3f mm · DV %+.3f mm",
             apMillimetres,
             mlMillimetres,
@@ -325,6 +426,23 @@ struct SurgeryPlanPrefill: Equatable, Sendable {
     }
 
     var probeText: String {
+        if let probePlanName, let probeModelName,
+           let surfaceDepthMillimetres, let sagittalAngleDegrees,
+           let probeLayoutRotationDegrees
+        {
+            let layout = probeLayoutRotationDegrees == 90
+                ? "90° CW from dorsal"
+                : "sagittal"
+            return "\(probePlanName) · \(probeModelName) · "
+                + String(
+                    format: "depth %.3f mm from surface · ",
+                    surfaceDepthMillimetres
+                )
+                + SurgeryPlanSurfaceAnglePresentation.text(
+                    sagittalAngleDegrees
+                )
+                + " · layout \(layout)"
+        }
         guard let probePlanName, let probeModelName,
               let insertionDepthMillimetres,
               let azimuthDegrees, let elevationDegrees, let axialRotationDegrees
@@ -341,6 +459,40 @@ struct SurgeryPlanPrefill: Equatable, Sendable {
             elevationDegrees,
             axialRotationDegrees
         )
+    }
+
+    var compactProbeText: String {
+        guard let probeModelName, let surfaceDepthMillimetres,
+              let sagittalAngleDegrees, let probeLayoutRotationDegrees
+        else { return probeText }
+        let model = probeModelName.contains("NP2013") ? "NP2013" : "NP2003"
+        let layout = probeLayoutRotationDegrees == 90 ? "90° CW" : "sagittal"
+        return "\(model) · "
+            + String(format: "depth %.3f mm · ", surfaceDepthMillimetres)
+            + SurgeryPlanSurfaceAnglePresentation.text(sagittalAngleDegrees)
+            + " · layout \(layout)"
+    }
+
+    var probeReviewText: String? {
+        guard let probeVerificationStatus else { return nil }
+        let warning = probeWarning?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let warning, !warning.isEmpty {
+            return "Probe geometry: \(probeVerificationStatus) · \(warning)"
+        }
+        return "Probe geometry: \(probeVerificationStatus)"
+    }
+
+    var surfaceProvenanceText: String? {
+        guard let planInputSHA256, let surfaceAnnotationSHA256,
+              let surfaceDefinitionVersion, let bregmaReferenceId,
+              let bregmaSourceRevision, let bregmaSourceSHA256
+        else { return nil }
+        return "Surface \(surfaceDefinitionVersion) · plan "
+            + "\(planInputSHA256.prefix(10))… · annotation "
+            + "\(surfaceAnnotationSHA256.prefix(10))… · bregma "
+            + "\(bregmaReferenceId) @ \(bregmaSourceRevision) "
+            + "\(bregmaSourceSHA256.prefix(10))…"
     }
 }
 
@@ -463,7 +615,8 @@ enum SurgeryPlanExportError: Error, LocalizedError {
         case .targetUnavailable:
             "Select a stored implant target before exporting."
         case .unappliedProbeDraft:
-            "Apply or revert the probe draft before exporting the surgery plan."
+            "Finish the numeric edit with Return or leave the field, then wait "
+                + "for the probe update before exporting the surgery plan."
         case let .invalidAnimalRecord(message):
             "The animal record is not usable: \(message)"
         case .vesselsUnavailable:
@@ -529,11 +682,47 @@ enum SurgeryPlanDraftSafety {
     }
 }
 
+struct SurgeryPlanImplantSite: Equatable, Sendable {
+    let targetId: String
+    let label: String
+    let apMillimetres: Double
+    let mlMillimetres: Double
+    let dvMillimetres: Double?
+    let point: ProbePhysicalPoint
+
+    init(
+        target: UnprojectedImplantTarget,
+        projection: CalibratedTargetProjectionResult
+    ) {
+        targetId = target.targetId
+        label = target.label
+        apMillimetres = target.apMillimetres
+        mlMillimetres = target.mlMillimetres
+        dvMillimetres = target.dvMillimetres
+        point = ProbePhysicalPoint(calibratedTargetProjection: projection)
+    }
+
+    init(surfacePlan plan: ProbePlanDetail) throws {
+        guard let input = plan.surfaceRelativeInput,
+              input.mode == .atlasSurfaceAPML,
+              plan.placementMode == .atlasSurfaceAPML
+        else {
+            throw SurgeryPlanExportError.targetProjectionUnavailable
+        }
+        targetId = plan.planId
+        label = plan.name
+        apMillimetres = input.insertionAPMillimetres
+        mlMillimetres = input.insertionMLMillimetres
+        dvMillimetres = nil
+        point = plan.placement.atlasFrame.entry
+    }
+}
+
 struct SurgeryPlanModelCapture {
     let project: ProjectBridgeState
-    let target: UnprojectedImplantTarget
-    let projection: CalibratedTargetProjectionResult
-    let calibration: CalibrationSummary
+    let target: SurgeryPlanImplantSite
+    let projection: CalibratedTargetProjectionResult?
+    let calibration: CalibrationSummary?
     let probePlan: ProbePlanDetail?
     let selectedPlanIdentity: String?
     let majorVessels: MajorVesselGeometryResult
@@ -542,21 +731,35 @@ struct SurgeryPlanModelCapture {
     let dorsalSurface: AtlasDorsalResult?
     let dorsalPNG: Data?
     let sliceFrames: [SurgeryPlanView: VerifiedAtlasSliceFrame]
+    let selectedRegion: AtlasRegionSummary?
+    let regionOverlayPNGs: [SurgeryPlanView: Data]
     let sceneSnapshot: AnimalSceneSnapshot?
     let hasUnsavedChanges: Bool
     let probeDraftIdentity: SurgeryPlanProbeDraftIdentity
 
     @MainActor
     func isStillCurrent(in model: PlannerViewModel) -> Bool {
-        model.backendState?.project == project
+        let geometryIsCurrent: Bool
+        if let projection, let calibration {
+            geometryIsCurrent = model.implantTargets.contains {
+                $0.targetId == target.targetId
+                    && $0.apMillimetres == target.apMillimetres
+                    && $0.mlMillimetres == target.mlMillimetres
+                    && $0.dvMillimetres == target.dvMillimetres
+            }
+                && model.projection(for: target.targetId) == projection
+                && model.activeCalibration == calibration
+        } else {
+            geometryIsCurrent =
+                model.selectedProbePlan?.planId == target.targetId
+                    && model.selectedProbePlan?.surfaceRelativeInput != nil
+        }
+        return model.backendState?.project == project
             && model.hasUnsavedChanges == hasUnsavedChanges
             && probeDraftIdentity.isCurrent(in: model)
-            && model.implantTargets.first(where: {
-                $0.targetId == target.targetId
-            }) == target
-            && model.projection(for: target.targetId) == projection
-            && model.activeCalibration == calibration
+            && geometryIsCurrent
             && Self.planIdentity(model.selectedProbePlan) == selectedPlanIdentity
+            && model.highlightedAtlasRegion == selectedRegion
             && model.viewerSnapshot?.atlas.metadataSha256 == atlas.metadataSha256
             && model.majorVesselGeometry?.provenance.derivedAssetSha256
                 == majorVessels.provenance.derivedAssetSha256
@@ -570,10 +773,10 @@ struct SurgeryPlanModelCapture {
             plan.planId,
             String(plan.planVersion),
             plan.inputSha256,
-            plan.targetId,
-            plan.provenance.calibrationId,
-            String(plan.provenance.calibrationVersion),
-            plan.provenance.calibrationSha256,
+            plan.targetId ?? "atlas-surface",
+            plan.provenance.calibrationId ?? "no-calibration",
+            plan.provenance.calibrationVersion.map(String.init) ?? "no-version",
+            plan.provenance.calibrationSha256 ?? "no-calibration-digest",
             plan.provenance.projectionSha256,
         ].joined(separator: ":")
     }
@@ -651,6 +854,16 @@ enum SurgeryProtocolPDFRenderer {
         }
         context.closePDF()
         let data = output as Data
+        let requiredCoordinateText: [String] = [
+            String(format: "%+.3f mm", prefill.apMillimetres),
+            String(format: "%+.3f mm", prefill.mlMillimetres),
+        ] + [
+            prefill.surfaceDepthMillimetres.map {
+                String(format: "%.3f mm", $0)
+            } ?? prefill.dvMillimetres.map {
+                String(format: "%+.3f mm", $0)
+            } ?? ""
+        ].filter { !$0.isEmpty }
         guard let verified = PDFDocument(data: data),
               verified.pageCount == SurgeryProtocolPDFTemplate.protocolPageCount,
               let verifiedText = verified.string,
@@ -658,10 +871,8 @@ enum SurgeryProtocolPDFRenderer {
                   prefill.exportClass.rawValue,
                   prefill.date,
                   protocolSubjectLine(prefill.subjectId),
-                  String(format: "%+.3f mm", prefill.apMillimetres),
-                  String(format: "%+.3f mm", prefill.mlMillimetres),
-                  String(format: "%+.3f mm", prefill.dvMillimetres),
-              ].allSatisfy(verifiedText.contains)
+              ].allSatisfy(verifiedText.contains),
+              requiredCoordinateText.allSatisfy(verifiedText.contains)
         else {
             throw SurgeryPlanExportError.invalidProtocolTemplate(
                 "Required date, subject, AP/ML/DV, or export status did not survive PDF prefill."
@@ -699,14 +910,7 @@ enum SurgeryProtocolPDFRenderer {
             maximumWidth: 520
         )
         protocolText(
-            String(
-                format:
-                    "AP %+.3f mm · ML %+.3f mm · DV %+.3f mm · %@",
-                prefill.apMillimetres,
-                prefill.mlMillimetres,
-                prefill.dvMillimetres,
-                compactAngle(prefill)
-            ),
+            "\(prefill.targetCoordinateText) · \(compactAngle(prefill))",
             at: CGPoint(x: 50, y: 674),
             font: .monospacedSystemFont(ofSize: 8, weight: .medium),
             maximumWidth: 520
@@ -826,6 +1030,9 @@ enum SurgeryProtocolPDFRenderer {
     }
 
     private static func compactAngle(_ prefill: SurgeryPlanPrefill) -> String {
+        if let angle = prefill.sagittalAngleDegrees {
+            return SurgeryPlanSurfaceAnglePresentation.text(angle)
+        }
         guard let azimuth = prefill.azimuthDegrees,
               let elevation = prefill.elevationDegrees
         else { return "________" }
@@ -845,7 +1052,7 @@ enum SurgeryPlanningViewRenderer {
             let expectedImplantSite = ImplantSiteSceneMarker(
                 targetId: capture.target.targetId,
                 label: capture.target.label,
-                point: ProbePhysicalPoint(calibratedTargetProjection: capture.projection)
+                point: capture.target.point
             )
             guard let snapshot = capture.sceneSnapshot,
                   let vessels = snapshot.majorVessels,
@@ -923,9 +1130,7 @@ enum SurgeryPlanningViewRenderer {
                 ProbeSliceOverlayGeometry.makeImplantSiteDorsalProjection(
                     targetId: capture.target.targetId,
                     label: capture.target.label,
-                    point: ProbePhysicalPoint(
-                        calibratedTargetProjection: capture.projection
-                    ),
+                    point: capture.target.point,
                     resolution: capture.atlas.resolutionMicrometres,
                     shape: capture.atlas.shapeVoxels
                 )
@@ -965,9 +1170,7 @@ enum SurgeryPlanningViewRenderer {
             let implantSiteOverlay = ProbeSliceOverlayGeometry.makeImplantSite(
                 targetId: capture.target.targetId,
                 label: capture.target.label,
-                point: ProbePhysicalPoint(
-                    calibratedTargetProjection: capture.projection
-                ),
+                point: capture.target.point,
                 orientation: orientation,
                 sliceIndex: frame.index,
                 resolution: capture.atlas.resolutionMicrometres,
@@ -978,14 +1181,16 @@ enum SurgeryPlanningViewRenderer {
                 orientation: orientation,
                 sliceIndex: frame.index
             )
-            subtitle = String(
-                format:
-                    "Target-centred slice %d of %d · %@ %.3f mm in atlas physical space",
-                frame.index + 1,
-                frame.sliceCount,
-                frame.fixedAxis.rawValue,
+            let sliceAnchor = capture.probePlan?.surfaceRelativeInput == nil
+                ? "Target-centred"
+                : "Insertion-site-centred"
+            let slicePosition = String(
+                format: "%.3f",
                 frame.sliceCenterMicrometres / 1_000
             )
+            subtitle = "\(sliceAnchor) slice \(frame.index + 1) "
+                + "of \(frame.sliceCount) · \(frame.fixedAxis.rawValue) "
+                + "\(slicePosition) mm in atlas physical space"
             vesselScope = "target-slice slab"
         }
 
@@ -1018,6 +1223,7 @@ enum SurgeryPlanningViewRenderer {
         )
         canvas.configure(
             imageData: imageData,
+            regionOverlayData: capture.regionOverlayPNGs[requestedView],
             imagePixelWidth: width,
             imagePixelHeight: height,
             viewportIdentity: "surgery-export-\(requestedView.rawValue)",
@@ -1129,7 +1335,7 @@ enum SurgeryPlanningPageRenderer {
         // particular, the full NPX2 four-shank identity legitimately occupies
         // two lines; giving it a single 18-point row caused it to overwrite the
         // vessel disclosure in real exports.
-        let imageBounds = CGRect(x: 38, y: 168, width: 716, height: 336)
+        let imageBounds = CGRect(x: 38, y: 181, width: 716, height: 323)
         NSColor(calibratedWhite: 0.96, alpha: 1).setFill()
         imageBounds.fill()
         image.draw(
@@ -1143,9 +1349,17 @@ enum SurgeryPlanningPageRenderer {
 
         draw(
             prefill.probeText,
-            in: CGRect(x: 38, y: 138, width: 716, height: 25),
+            in: CGRect(x: 38, y: 151, width: 716, height: 25),
             font: .monospacedSystemFont(ofSize: 8.1, weight: .regular)
         )
+        if let review = prefill.probeReviewText {
+            draw(
+                review,
+                in: CGRect(x: 38, y: 136, width: 716, height: 13),
+                font: .systemFont(ofSize: 7.2, weight: .semibold),
+                color: .systemOrange
+            )
+        }
         draw(
             "Major vessels: \(vesselSource) · \(artifact.vesselSegmentCount) "
                 + "\(artifact.vesselScope) segments · display ≥"
@@ -1172,7 +1386,9 @@ enum SurgeryPlanningPageRenderer {
             : String(
                 format: "|ML| %.3f mm (%@)",
                 requested,
-                prefill.mlMillimetres < 0 ? "left, ML−" : "right, ML+"
+                prefill.mlMillimetres < 0
+                    ? "left, ML−"
+                    : "right, ML+"
             )
         draw(
             String(
@@ -1190,7 +1406,9 @@ enum SurgeryPlanningPageRenderer {
             color: NSColor(calibratedWhite: 0.32, alpha: 1)
         )
         draw(
-            "Bregma signs: −AP posterior/back · −ML left · −DV deep/ventral · AP/ML/DV in mm; angles in degrees",
+            prefill.surfaceDepthMillimetres == nil
+                ? "Bregma signs: −AP posterior/back · −ML left · −DV deep/ventral · AP/ML/DV in mm; angles in degrees"
+                : "Bregma signs: +AP anterior / −AP posterior · +ML right / −ML left · depth from local atlas surface · angles in degrees",
             in: CGRect(x: 38, y: 69, width: 716, height: 14),
             font: .systemFont(ofSize: 7.2, weight: .medium),
             color: NSColor(calibratedWhite: 0.32, alpha: 1)
@@ -1316,9 +1534,7 @@ actor SurgeryAtlasPDFSource {
                 error.localizedDescription
             )
         }
-        let sourceSHA256 = SHA256.hash(data: sourceData)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let sourceSHA256 = LowercaseHex.encode(SHA256.hash(data: sourceData))
         guard sourceData.starts(with: Data("%PDF-".utf8)),
               let document = PDFDocument(data: sourceData),
               document.pageCount == 132
@@ -1360,9 +1576,7 @@ actor SurgeryAtlasPDFSource {
         expectedSHA256: String
     ) -> Bool {
         guard let data = try? Data(contentsOf: url) else { return false }
-        let currentSHA256 = SHA256.hash(data: data)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let currentSHA256 = LowercaseHex.encode(SHA256.hash(data: data))
         return currentSHA256 == expectedSHA256
     }
 
@@ -1465,7 +1679,7 @@ enum SurgeryAtlasPageRenderer {
         NSGraphicsContext.current = graphics
 
         let box = NSBezierPath(
-            roundedRect: CGRect(x: 38, y: 514, width: 716, height: 72),
+            roundedRect: CGRect(x: 38, y: 486, width: 716, height: 100),
             xRadius: 8,
             yRadius: 8
         )
@@ -1482,22 +1696,36 @@ enum SurgeryAtlasPageRenderer {
             color: prefill.exportClass == .draft ? .systemOrange : .black
         )
         draw(
-            "\(prefill.targetCoordinateText) · \(prefill.probeText)",
-            in: CGRect(x: 50, y: 543, width: 690, height: 17),
-            font: .monospacedSystemFont(ofSize: 8.2, weight: .medium)
+            prefill.targetCoordinateText,
+            in: CGRect(x: 50, y: 548, width: 690, height: 13),
+            font: .monospacedSystemFont(ofSize: 8.0, weight: .semibold)
         )
         draw(
-            "Historical plate source \(atlasSourceSHA256.prefix(16))… · "
-                + "Bregma convention: Interaural − 3.80 mm for coronal plates",
-            in: CGRect(x: 50, y: 528, width: 690, height: 13),
-            font: .monospacedSystemFont(ofSize: 7.4, weight: .regular),
-            color: NSColor(calibratedWhite: 0.32, alpha: 1)
+            prefill.compactProbeText,
+            in: CGRect(x: 50, y: 533, width: 690, height: 13),
+            font: .monospacedSystemFont(ofSize: 7.6, weight: .medium)
         )
+        if let review = prefill.probeReviewText {
+            draw(
+                review,
+                in: CGRect(x: 50, y: 518, width: 690, height: 13),
+                font: .systemFont(ofSize: 6.8, weight: .semibold),
+                color: .systemOrange
+            )
+        }
+        if let provenance = prefill.surfaceProvenanceText {
+            draw(
+                provenance,
+                in: CGRect(x: 50, y: 503, width: 690, height: 13),
+                font: .monospacedSystemFont(ofSize: 5.8, weight: .regular),
+                color: NSColor(calibratedWhite: 0.32, alpha: 1)
+            )
+        }
         draw(
-            "Trajectory geometry is shown on the preceding Brain3D planning page; "
-                + "no unreviewed geometric mark is drawn onto this historical plate.",
-            in: CGRect(x: 50, y: 516, width: 690, height: 12),
-            font: .systemFont(ofSize: 7.4, weight: .medium),
+            "Historical plate \(atlasSourceSHA256.prefix(16))… · "
+                + "Coronal plate convention: Bregma = Interaural − 3.80 mm",
+            in: CGRect(x: 50, y: 489, width: 690, height: 12),
+            font: .monospacedSystemFont(ofSize: 6.5, weight: .regular),
             color: NSColor(calibratedWhite: 0.32, alpha: 1)
         )
         NSGraphicsContext.restoreGraphicsState()
@@ -1513,6 +1741,10 @@ enum SurgeryAtlasPageRenderer {
               let verifiedText = verified.string,
               verifiedText.contains("Figure \(plate.figure)"),
               verifiedText.contains(plate.coordinateLabel),
+              verifiedText.contains(prefill.targetCoordinateText),
+              verifiedText.contains(prefill.compactProbeText),
+              prefill.probeReviewText.map(verifiedText.contains) ?? true,
+              prefill.surfaceProvenanceText.map(verifiedText.contains) ?? true,
               verifiedText.contains(String(atlasSourceSHA256.prefix(16)))
         else {
             throw SurgeryPlanExportError.invalidAtlasPage(
@@ -1672,16 +1904,27 @@ enum SurgeryPlanPacketRenderer {
     ) -> String {
         let subject = limitedAuditValue(prefill.subjectId, maximumCharacters: 32)
         let stableTargetId = limitedAuditValue(targetId, maximumCharacters: 64)
+        let surfaceIdentity: String
+        if let plan = prefill.planInputSHA256,
+           let annotation = prefill.surfaceAnnotationSHA256,
+           let bregma = prefill.bregmaSourceSHA256
+        {
+            surfaceIdentity = "PI:\(plan.prefix(10)) | "
+                + "AN:\(annotation.prefix(10)) | "
+                + "BR:\(bregma.prefix(10)) | "
+        } else {
+            surfaceIdentity = ""
+        }
         let identity = "Brain3D-\(prefill.exportClass.rawValue) | S:\(subject) | "
             + "TID:\(stableTargetId) | R:\(prefill.projectRevision) | "
             + "V:\(vesselAssetSHA256.prefix(12)) | "
             + "P:\(protocolTemplateSHA256.prefix(12)) | "
             + "A:\(atlasSourceSHA256.prefix(12)) | "
+            + surfaceIdentity
             + "Pg:\(pageNumber)/\(pageCount)"
-        let digest = SHA256.hash(data: Data(identity.utf8))
-            .prefix(8)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let digest = LowercaseHex.encode(
+            SHA256.hash(data: Data(identity.utf8)).prefix(8)
+        )
         return "\(identity) | H:\(digest)"
     }
 
@@ -1864,20 +2107,33 @@ enum SurgeryPlanExporter {
                 error.localizedDescription
             )
         }
-        let protocolTemplateSHA256 = SHA256.hash(data: protocolTemplateData)
-            .map { String(format: "%02x", $0) }
-            .joined()
+        let protocolTemplateSHA256 = LowercaseHex.encode(
+            SHA256.hash(data: protocolTemplateData)
+        )
         let capture = try await captureModel(
             model: model,
             configuration: configuration
         )
-        let exportClass = SurgeryPlanReadiness.exportClass(
-            project: capture.project,
-            hasUnsavedChanges: capture.hasUnsavedChanges,
-            calibration: capture.calibration,
-            projection: capture.projection,
-            probePlan: capture.probePlan
-        )
+        let exportClass: SurgeryPlanExportClass
+        if capture.probePlan?.surfaceRelativeInput != nil {
+            exportClass = SurgeryPlanReadiness.exportClass(
+                project: capture.project,
+                hasUnsavedChanges: capture.hasUnsavedChanges,
+                surfaceProbePlan: capture.probePlan
+            )
+        } else if let calibration = capture.calibration,
+                  let projection = capture.projection
+        {
+            exportClass = SurgeryPlanReadiness.exportClass(
+                project: capture.project,
+                hasUnsavedChanges: capture.hasUnsavedChanges,
+                calibration: calibration,
+                projection: projection,
+                probePlan: capture.probePlan
+            )
+        } else {
+            exportClass = .draft
+        }
         let prefill = makePrefill(
             project: capture.project,
             target: capture.target,
@@ -1889,7 +2145,8 @@ enum SurgeryPlanExporter {
         let atlasPlate = try SurgeryAtlasCatalog.nearestPlate(
             in: configuration.atlasPDFURL,
             orientation: configuration.atlasOrientation,
-            target: capture.target
+            apMillimetres: capture.target.apMillimetres,
+            mlMillimetres: capture.target.mlMillimetres
         )
         let atlasSource = try await SurgeryAtlasPDFSource.shared.capture(
             atlasPlate
@@ -2052,22 +2309,51 @@ enum SurgeryPlanExporter {
         guard let project = model.backendState?.project else {
             throw SurgeryPlanExportError.noProject
         }
-        guard let target = model.implantTargets.first(where: {
-            $0.targetId == configuration.targetId
-        }) else {
-            throw SurgeryPlanExportError.targetUnavailable
-        }
-        guard let atlas = model.viewerSnapshot?.atlas,
-              let calibration = model.activeCalibration,
-              let projection = SurgeryPlanReadiness.currentProjection(
-                  model.projection(for: target.targetId),
-                  project: project,
-                  target: target,
-                  calibration: calibration,
-                  atlas: atlas
-              )
-        else {
+        guard let atlas = model.viewerSnapshot?.atlas else {
             throw SurgeryPlanExportError.targetProjectionUnavailable
+        }
+        let target: SurgeryPlanImplantSite
+        let projection: CalibratedTargetProjectionResult?
+        let calibration: CalibrationSummary?
+        let probePlan: ProbePlanDetail?
+        if let surfacePlan = SurgeryPlanReadiness.currentSurfaceProbePlan(
+            model.selectedProbePlan,
+            atlas: atlas
+        ), surfacePlan.planId == configuration.targetId {
+            target = try SurgeryPlanImplantSite(surfacePlan: surfacePlan)
+            projection = nil
+            calibration = nil
+            probePlan = surfacePlan
+        } else {
+            guard let legacyTarget = model.implantTargets.first(where: {
+                $0.targetId == configuration.targetId
+            }) else {
+                throw SurgeryPlanExportError.targetUnavailable
+            }
+            guard let legacyCalibration = model.activeCalibration,
+                  let legacyProjection = SurgeryPlanReadiness.currentProjection(
+                      model.projection(for: legacyTarget.targetId),
+                      project: project,
+                      target: legacyTarget,
+                      calibration: legacyCalibration,
+                      atlas: atlas
+                  )
+            else {
+                throw SurgeryPlanExportError.targetProjectionUnavailable
+            }
+            target = SurgeryPlanImplantSite(
+                target: legacyTarget,
+                projection: legacyProjection
+            )
+            projection = legacyProjection
+            calibration = legacyCalibration
+            probePlan = SurgeryPlanReadiness.currentProbePlan(
+                model.selectedProbePlan,
+                target: legacyTarget,
+                projection: legacyProjection,
+                calibration: legacyCalibration,
+                atlas: atlas
+            )
         }
         guard let majorVessels = model.majorVesselGeometry,
               majorVessels.segmentCount > 0,
@@ -2080,26 +2366,37 @@ enum SurgeryPlanExporter {
         )
         let minimumVisibleVesselDiameterMicrometres =
             model.minimumVisibleVesselDiameterMicrometres
-        let probePlan = SurgeryPlanReadiness.currentProbePlan(
-            model.selectedProbePlan,
-            target: target,
-            projection: projection,
-            calibration: calibration,
-            atlas: atlas
-        )
         let capturedUnsavedState = model.hasUnsavedChanges
+        let selectedRegion = model.highlightedAtlasRegion
 
+        guard let containingVoxel = target.point.voxelIndex else {
+            throw SurgeryPlanExportError.targetProjectionUnavailable
+        }
         var sliceFrames: [SurgeryPlanView: VerifiedAtlasSliceFrame] = [:]
+        var regionOverlayPNGs: [SurgeryPlanView: Data] = [:]
+        if let selectedRegion,
+           configuration.viewSelection.views.contains(.dorsal)
+        {
+            regionOverlayPNGs[.dorsal] =
+                try await model.surgeryPlanRegionOverlayPNG(
+                    orientation: .dorsal,
+                    index: nil,
+                    selectedRegion: selectedRegion,
+                    expectedProjectId: project.projectId,
+                    expectedProjectRevision: project.revision,
+                    expectedAtlasMetadataSHA256: atlas.metadataSha256
+                )
+        }
         for view in configuration.viewSelection.views {
             guard let orientation = view.sliceOrientation else { continue }
             let index: Int
             switch orientation {
             case .coronal:
-                index = projection.containingVoxelIndex.ap
+                index = containingVoxel.ap
             case .sagittal:
-                index = projection.containingVoxelIndex.ml
+                index = containingVoxel.ml
             case .horizontal:
-                index = projection.containingVoxelIndex.dv
+                index = containingVoxel.dv
             }
             sliceFrames[view] = try await model.surgeryPlanSliceFrame(
                 for: orientation,
@@ -2108,6 +2405,17 @@ enum SurgeryPlanExporter {
                 expectedProjectRevision: project.revision,
                 expectedAtlasMetadataSHA256: atlas.metadataSha256
             )
+            if let selectedRegion {
+                regionOverlayPNGs[view] =
+                    try await model.surgeryPlanRegionOverlayPNG(
+                        orientation: AtlasRegionOverlayOrientation(orientation),
+                        index: index,
+                        selectedRegion: selectedRegion,
+                        expectedProjectId: project.projectId,
+                        expectedProjectRevision: project.revision,
+                        expectedAtlasMetadataSHA256: atlas.metadataSha256
+                    )
+            }
         }
 
         let sceneSnapshot: AnimalSceneSnapshot?
@@ -2115,6 +2423,8 @@ enum SurgeryPlanExporter {
             if model.threeDimensionalSnapshot?.projectId != project.projectId
                 || model.threeDimensionalSnapshot?.projectRevision != project.revision
                 || model.threeDimensionalSnapshot?.meshResult.atlas != atlas
+                || model.threeDimensionalSnapshot?.highlightedRegionMesh?.region
+                    != selectedRegion
             {
                 await model.prepareThreeDimensionalScene()
             }
@@ -2122,6 +2432,7 @@ enum SurgeryPlanExporter {
                   baseScene.projectId == project.projectId,
                   baseScene.projectRevision == project.revision,
                   baseScene.meshResult.atlas == atlas,
+                  baseScene.highlightedRegionMesh?.region == selectedRegion,
                   let rendererAnchor = project.rendererAnchor
             else {
                 throw SurgeryPlanExportError.viewUnavailable(
@@ -2133,12 +2444,12 @@ enum SurgeryPlanExporter {
                 projectRevision: project.revision,
                 rendererAnchor: rendererAnchor,
                 meshResult: baseScene.meshResult,
-                highlightedRegionMesh: nil,
+                highlightedRegionMesh: baseScene.highlightedRegionMesh,
                 selectedProbePlan: probePlan,
                 implantSite: ImplantSiteSceneMarker(
                     targetId: target.targetId,
                     label: target.label,
-                    point: ProbePhysicalPoint(calibratedTargetProjection: projection)
+                    point: target.point
                 ),
                 majorVessels: majorVessels,
                 minimumVisibleVesselDiameterMicrometres:
@@ -2167,6 +2478,8 @@ enum SurgeryPlanExporter {
                 ? model.dorsalSurfacePNG
                 : nil,
             sliceFrames: sliceFrames,
+            selectedRegion: selectedRegion,
+            regionOverlayPNGs: regionOverlayPNGs,
             sceneSnapshot: sceneSnapshot,
             hasUnsavedChanges: capturedUnsavedState,
             probeDraftIdentity: probeDraftIdentity
@@ -2179,7 +2492,7 @@ enum SurgeryPlanExporter {
 
     static func makePrefill(
         project: ProjectBridgeState,
-        target: UnprojectedImplantTarget,
+        target: SurgeryPlanImplantSite,
         targetLabel: String,
         matchingPlan: ProbePlanDetail?,
         exportClass: SurgeryPlanExportClass,
@@ -2191,6 +2504,7 @@ enum SurgeryPlanExporter {
         let normalizedTargetLabel = targetLabel
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let plan = matchingPlan
+        let surfaceInput = plan?.surfaceRelativeInput
         return SurgeryPlanPrefill(
             exportClass: exportClass,
             date: formatter.string(from: configuration.date),
@@ -2215,9 +2529,25 @@ enum SurgeryPlanExporter {
             azimuthDegrees: plan?.placement.azimuthDegrees,
             elevationDegrees: plan?.placement.elevationDegrees,
             axialRotationDegrees: plan?.placement.axialRotationDegrees,
+            surfaceDepthMillimetres: surfaceInput?.surfaceDepthMillimetres,
+            sagittalAngleDegrees: surfaceInput?.sagittalAngleDegrees,
+            probeLayoutRotationDegrees:
+                surfaceInput?.probeLayoutRotationDegrees,
+            probeVerificationStatus: plan?.verificationStatus,
+            probeWarning: plan?.warning,
+            planInputSHA256: plan?.inputSha256,
+            surfaceAnnotationSHA256: surfaceInput?.annotationSha256,
+            surfaceDefinitionVersion:
+                surfaceInput?.surfaceDefinitionVersion,
+            bregmaReferenceId:
+                surfaceInput?.bregmaReference.referenceId,
+            bregmaSourceRevision:
+                surfaceInput?.bregmaReference.sourceRevision,
+            bregmaSourceSHA256:
+                surfaceInput?.bregmaReference.sourceSha256,
             draftReason: exportClass == .final
                 ? nil
-                : "unsaved state or no current final-export calibration/probe"
+                : "unsaved state or no current atlas-surface probe"
         )
     }
 

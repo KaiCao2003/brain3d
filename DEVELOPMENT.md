@@ -118,7 +118,8 @@ Any change involving axes, units, indexing, laterality, transforms, picking, or 
 3. validate finite values and half-open atlas bounds;
 4. distinguish continuous voxel coordinates, discrete indices, corner anchors, and centers;
 5. add asymmetric laterality and forward/inverse golden tests;
-6. reject missing or failed calibration rather than treating atlas origin as bregma; and
+6. require either the exact source-pinned v4 bregma/surface evidence or, for legacy v1–v3,
+   a passing subject calibration; never treat atlas origin as bregma; and
 7. update coordinate/validation documentation with exact evidence and tolerances.
 
 ## Bridge-change checklist

@@ -14,7 +14,7 @@ struct WorkspaceView: View {
 
             Divider()
 
-            Picker("View", selection: $model.workspaceMode) {
+            Picker("View", selection: workspaceModeSelection) {
                 ForEach(WorkspaceMode.allCases, id: \.self) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
@@ -37,6 +37,18 @@ struct WorkspaceView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .navigationTitle(model.workspaceMode.rawValue)
+    }
+
+    private var workspaceModeSelection: Binding<WorkspaceMode> {
+        Binding(
+            get: { model.workspaceMode },
+            set: { requestedMode in
+                ViewUpdateMutationBoundary.perform {
+                    guard model.workspaceMode != requestedMode else { return }
+                    model.workspaceMode = requestedMode
+                }
+            }
+        )
     }
 
     @ViewBuilder
@@ -113,9 +125,12 @@ private struct MajorVesselDisplayControl: View {
     private func commitWhenEditingEnds(_ editing: Bool) {
         isEditing = editing
         guard !editing else { return }
-        model.setMinimumVisibleVesselDiameterMicrometres(
-            pendingDiameterMicrometres
-        )
+        let committedDiameter = pendingDiameterMicrometres
+        ViewUpdateMutationBoundary.perform {
+            model.setMinimumVisibleVesselDiameterMicrometres(
+                committedDiameter
+            )
+        }
     }
 }
 
@@ -284,7 +299,7 @@ private struct AtlasRegionBrowserBar: View {
     private func regionButton(_ region: AtlasRegionSummary) -> some View {
         Button {
             isBrowserPresented = false
-            Task {
+            ViewUpdateMutationBoundary.performAsync {
                 await model.selectAtlasRegion(region)
             }
         } label: {
@@ -322,7 +337,9 @@ private struct AtlasRegionBrowserBar: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Button {
-                model.clearAtlasRegionSelection()
+                ViewUpdateMutationBoundary.perform {
+                    model.clearAtlasRegionSelection()
+                }
             } label: {
                 Image(systemName: "xmark.circle.fill")
             }
@@ -358,6 +375,7 @@ private struct AtlasSliceWorkspace: View {
             ZStack {
                 AtlasSliceCanvas(
                     imageData: frame?.png,
+                    regionOverlayData: model.atlasRegionOverlayPNG(for: orientation),
                     imagePixelWidth: frame?.width ?? 0,
                     imagePixelHeight: frame?.height ?? 0,
                     viewportIdentity: orientation.rawValue,
@@ -368,19 +386,24 @@ private struct AtlasSliceWorkspace: View {
                         for: orientation
                     ),
                     probeOverlay: model.probeSliceOverlay(for: orientation),
-                    interactionHelp: "Click to identify a brain region. Drag to pan, pinch to zoom, and scroll to change slices.",
+                    interactionHelp:
+                        "Click to identify a brain region. Drag to pan, pinch to zoom, and scroll to change slices.",
                     accessibilityLabel: "\(orientation.displayName) atlas slice",
                     accessibilityValue: accessibilityValue,
                     resetGeneration: resetGeneration,
                     onPick: { column, row in
-                        model.pickViewerRegion(
-                            orientation: orientation,
-                            column: column,
-                            row: row
-                        )
+                        ViewUpdateMutationBoundary.perform {
+                            model.pickViewerRegion(
+                                orientation: orientation,
+                                column: column,
+                                row: row
+                            )
+                        }
                     },
                     onSliceStep: { delta in
-                        model.stepViewerSlice(orientation, delta: delta)
+                        ViewUpdateMutationBoundary.perform {
+                            model.stepViewerSlice(orientation, delta: delta)
+                        }
                     }
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -407,7 +430,7 @@ private struct AtlasSliceWorkspace: View {
             .background(Color.black, in: RoundedRectangle(cornerRadius: 9))
 
             sliceControl
-            if case let .failed(message) = model.viewerPhase {
+            if case .failed(let message) = model.viewerPhase {
                 Label(message, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
@@ -474,7 +497,12 @@ private struct AtlasSliceWorkspace: View {
                 Slider(
                     value: Binding(
                         get: { Double(requestedIndex) },
-                        set: { model.requestViewerSlice(orientation, index: Int($0.rounded())) }
+                        set: { requestedValue in
+                            let index = Int(requestedValue.rounded())
+                            ViewUpdateMutationBoundary.perform {
+                                model.requestViewerSlice(orientation, index: index)
+                            }
+                        }
                     ),
                     in: 0 ... Double(frame.sliceCount - 1),
                     step: 1
@@ -495,11 +523,13 @@ private struct AtlasSliceWorkspace: View {
                         "Slice",
                         value: Binding(
                             get: { requestedIndex + 1 },
-                            set: {
-                                model.requestViewerSlice(
-                                    orientation,
-                                    index: $0 - 1
-                                )
+                            set: { requestedSliceNumber in
+                                ViewUpdateMutationBoundary.perform {
+                                    model.requestViewerSlice(
+                                        orientation,
+                                        index: requestedSliceNumber - 1
+                                    )
+                                }
                             }
                         ),
                         format: .number.grouping(.never)
@@ -537,8 +567,12 @@ private struct AtlasSliceWorkspace: View {
 
     private var accessibilityValue: String {
         guard let frame else { return model.viewerPhase.message }
-        let region = canvasSelection?.acronym ?? "no selected region"
-        return "Slice \(frame.index + 1) of \(frame.sliceCount), \(region)"
+        return AtlasCanvasAccessibilityPresentation.sliceValue(
+            sliceNumber: frame.index + 1,
+            sliceCount: frame.sliceCount,
+            activeRegionAcronym: model.highlightedAtlasRegion?.acronym,
+            pointPickAcronym: canvasSelection?.acronym
+        )
     }
 
     private var canvasSelection: AtlasSliceSelection? {
@@ -597,6 +631,7 @@ private struct DorsalAtlasWorkspace: View {
                 ZStack {
                     AtlasSliceCanvas(
                         imageData: model.dorsalSurfacePNG,
+                        regionOverlayData: model.dorsalAtlasRegionOverlayPNG,
                         imagePixelWidth: dorsal.width,
                         imagePixelHeight: dorsal.height,
                         viewportIdentity: "dorsal-atlas-surface",
@@ -605,12 +640,15 @@ private struct DorsalAtlasWorkspace: View {
                         majorVesselOverlay: model.majorVesselDorsalOverlay,
                         majorVesselConflictOverlay: model.majorVesselDorsalConflictOverlay,
                         probeOverlay: model.probeDorsalOverlay,
-                        interactionHelp: "Click to identify the dorsal-most annotated region. Drag to pan and pinch to zoom.",
+                        interactionHelp:
+                            "Click to identify the dorsal-most annotated region. Drag to pan and pinch to zoom.",
                         accessibilityLabel: "Dorsal atlas surface",
                         accessibilityValue: accessibilityValue,
                         resetGeneration: resetGeneration,
                         onPick: { column, row in
-                            model.pickDorsalRegion(column: column, row: row)
+                            ViewUpdateMutationBoundary.perform {
+                                model.pickDorsalRegion(column: column, row: row)
+                            }
                         },
                         onSliceStep: { _ in }
                     )
@@ -661,10 +699,14 @@ private struct DorsalAtlasWorkspace: View {
     }
 
     private var accessibilityValue: String {
-        let region = model.dorsalRegionPick?.region?.acronym ?? "no selected region"
-        let vesselStatus = model.majorVesselLoadError.map { "Unavailable: \($0)" }
+        let vesselStatus =
+            model.majorVesselLoadError.map { "Unavailable: \($0)" }
             ?? model.majorVesselStatus
-        return "\(vesselStatus), \(region)"
+        return AtlasCanvasAccessibilityPresentation.dorsalValue(
+            vesselStatus: vesselStatus,
+            activeRegionAcronym: model.highlightedAtlasRegion?.acronym,
+            pointPickAcronym: canvasSelection?.acronym
+        )
     }
 
     private var canvasSelection: AtlasSliceSelection? {
@@ -709,9 +751,15 @@ private struct ThreeDimensionalWorkspace: View {
                     resetGeneration: resetGeneration,
                     phaseChanged: model.updateThreeDimensionalRenderPhase,
                     rayPicked: { start, end in
-                        model.pickThreeDimensionalRegion(start: start, end: end)
+                        ViewUpdateMutationBoundary.perform {
+                            model.pickThreeDimensionalRegion(start: start, end: end)
+                        }
                     },
-                    blankSelected: model.clearThreeDimensionalRegionSelection
+                    blankSelected: {
+                        ViewUpdateMutationBoundary.perform {
+                            model.clearThreeDimensionalRegionSelection()
+                        }
+                    }
                 )
             } else {
                 unavailableContent
@@ -721,7 +769,7 @@ private struct ThreeDimensionalWorkspace: View {
                 loadingHUD
             } else if case .loadingGeometry = model.threeDimensionalPhase {
                 loadingHUD
-            } else if case let .failed(message) = model.threeDimensionalPhase,
+            } else if case .failed(let message) = model.threeDimensionalPhase,
                       model.threeDimensionalSnapshot != nil
             {
                 ContentUnavailableView(
@@ -800,7 +848,7 @@ private struct ThreeDimensionalWorkspace: View {
             Spacer()
             if model.majorVesselGeometry != nil {
                 Label(
-                    "Vessels \(model.majorVesselDisplayThresholdText) · "
+                    "Vessels \(model.displayedMajorVesselDisplayThresholdText) · "
                         + model.majorVesselVisibleCountText,
                     systemImage: "point.3.connected.trianglepath.dotted"
                 )
@@ -818,6 +866,52 @@ private struct ThreeDimensionalWorkspace: View {
     }
 }
 
+enum AtlasCanvasAccessibilityPresentation {
+    static func sliceValue(
+        sliceNumber: Int,
+        sliceCount: Int,
+        activeRegionAcronym: String?,
+        pointPickAcronym: String?
+    ) -> String {
+        "Slice \(sliceNumber) of \(sliceCount), "
+            + regionStatus(
+                activeRegionAcronym: activeRegionAcronym,
+                pointPickAcronym: pointPickAcronym
+            )
+    }
+
+    static func dorsalValue(
+        vesselStatus: String,
+        activeRegionAcronym: String?,
+        pointPickAcronym: String?
+    ) -> String {
+        "\(vesselStatus), "
+            + regionStatus(
+                activeRegionAcronym: activeRegionAcronym,
+                pointPickAcronym: pointPickAcronym
+            )
+    }
+
+    static func regionStatus(
+        activeRegionAcronym: String?,
+        pointPickAcronym: String?
+    ) -> String {
+        if let activeRegionAcronym {
+            if let pointPickAcronym,
+               pointPickAcronym != activeRegionAcronym
+            {
+                return "selected region \(activeRegionAcronym), "
+                    + "last point pick \(pointPickAcronym)"
+            }
+            return "selected region \(activeRegionAcronym)"
+        }
+        if let pointPickAcronym {
+            return "last point pick \(pointPickAcronym)"
+        }
+        return "no selected region"
+    }
+}
+
 private func atlasRegionColor(_ rgb: [Int]) -> Color {
     guard rgb.count == 3 else { return .secondary }
     return Color(
@@ -827,6 +921,6 @@ private func atlasRegionColor(_ rgb: [Int]) -> Color {
     )
 }
 
-private extension AtlasSliceOrientation {
-    var displayName: String { rawValue.capitalized }
+extension AtlasSliceOrientation {
+    fileprivate var displayName: String { rawValue.capitalized }
 }

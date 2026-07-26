@@ -49,6 +49,7 @@ from mouse_brain_planner.surgery.calibration_validation import (
     validate_atlas_registered_calibration_reproducibility,
 )
 from mouse_brain_planner.surgery.probe_planning import build_calibrated_probe_plan
+from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION
 
 
 def _project_with_plan() -> PlannerProject:
@@ -339,7 +340,7 @@ def test_valid_schema_seven_calibration_fits_migrate_and_reproduce(
     _rewrite_project_json(package, payload)
     restored_package = load_project(package, recover_backup=False)
 
-    assert restored_package.schema_version == 8
+    assert restored_package.schema_version == PROJECT_SCHEMA_VERSION
     assert restored_package.calibrations == session.project.calibrations
 
 

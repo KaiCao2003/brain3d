@@ -237,7 +237,10 @@ public enum ProbeSliceOverlayGeometry {
         let width = Double(shape[.ml])
         let height = Double(shape[.ap])
         let shankProjections = shanks.compactMap { shank -> ProbeShankSliceIntersection? in
-            guard let start = dorsalUnboundedImagePoint(shank.entry, resolution: resolution),
+            guard let start = dorsalUnboundedImagePoint(
+                shank.renderedProximalEnd,
+                resolution: resolution
+            ),
                   let end = dorsalUnboundedImagePoint(shank.tip, resolution: resolution)
             else { return nil }
             let distance = hypot(end.column - start.column, end.row - start.row)
@@ -407,7 +410,8 @@ public enum ProbeSliceOverlayGeometry {
         shape: AtlasASRShape
     ) -> ProbeShankSliceIntersection? {
         let fixedAxis = orientation.fixedAxis
-        let aFixed = shank.entry[fixedAxis]
+        let proximalEnd = shank.renderedProximalEnd
+        let aFixed = proximalEnd[fixedAxis]
         let bFixed = shank.tip[fixedAxis]
         let delta = bFixed - aFixed
         let scale = [1, abs(aFixed), abs(bFixed), abs(plane)].max() ?? 1
@@ -415,7 +419,7 @@ public enum ProbeSliceOverlayGeometry {
         if abs(delta) <= epsilon {
             guard abs(aFixed - plane) <= epsilon,
                   let start = unboundedImagePoint(
-                      shank.entry,
+                      proximalEnd,
                       orientation: orientation,
                       resolution: resolution
                   ),
@@ -440,9 +444,21 @@ public enum ProbeSliceOverlayGeometry {
         let t = (plane - aFixed) / delta
         guard t.isFinite, t >= 0, t <= 1 else { return nil }
         let point = ProbePhysicalPoint(
-            apMicrometres: interpolate(shank.entry.apMicrometres, shank.tip.apMicrometres, t),
-            dvMicrometres: interpolate(shank.entry.dvMicrometres, shank.tip.dvMicrometres, t),
-            mlMicrometres: interpolate(shank.entry.mlMicrometres, shank.tip.mlMicrometres, t)
+            apMicrometres: interpolate(
+                proximalEnd.apMicrometres,
+                shank.tip.apMicrometres,
+                t
+            ),
+            dvMicrometres: interpolate(
+                proximalEnd.dvMicrometres,
+                shank.tip.dvMicrometres,
+                t
+            ),
+            mlMicrometres: interpolate(
+                proximalEnd.mlMicrometres,
+                shank.tip.mlMicrometres,
+                t
+            )
         )
         guard let imagePoint = imagePoint(
             point,

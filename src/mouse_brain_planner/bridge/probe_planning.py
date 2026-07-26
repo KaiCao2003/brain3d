@@ -56,6 +56,7 @@ from mouse_brain_planner.domain.probe_models import (
     ProbeVerificationStatus,
 )
 from mouse_brain_planner.domain.probe_plan_models import (
+    ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
     PROBE_PLANNING_ALGORITHM_VERSION,
     STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
     ProbePlacementMode,
@@ -76,7 +77,9 @@ from mouse_brain_planner.probes.catalog import (
 )
 from mouse_brain_planner.surgery.probe_planning import (
     ProbePlanningError,
+    build_atlas_surface_probe_plan,
     build_calibrated_probe_plan,
+    validate_atlas_surface_probe_plan_semantics,
 )
 from mouse_brain_planner.surgery.trajectory import (
     ProbePlacementError,
@@ -119,6 +122,7 @@ class ProbePlanningBridge:
         self.dispatcher.register("probe.region.export.confirm", self.region_export_confirm)
         self.dispatcher.declare_capability("probeCatalog")
         self.dispatcher.declare_capability("calibratedProbePlanning")
+        self.dispatcher.declare_capability("atlasSurfaceProbePlanning")
         self.dispatcher.declare_capability("exactProbeRegionTraversal")
 
     def catalog_list(self, params: Mapping[str, object]) -> JsonObject:
@@ -187,12 +191,7 @@ class ProbePlanningBridge:
         }
 
     def plan_create(self, params: Mapping[str, object]) -> JsonObject:
-        required = _PLAN_COMMON_INPUT_FIELDS | {
-            "protocolVersion",
-            "projectId",
-            "expectedProjectRevision",
-        }
-        validate_params(params, required=required, optional=_PLAN_MODE_INPUT_FIELDS)
+        _validate_plan_mutation_params(params, updating=False)
         require_protocol(params)
         project = self._validated_mutation_project(params)
         if len(project.probe_plans) >= MAX_PROBE_PLANS:
@@ -214,14 +213,7 @@ class ProbePlanningBridge:
         )
 
     def plan_update(self, params: Mapping[str, object]) -> JsonObject:
-        required = _PLAN_COMMON_INPUT_FIELDS | {
-            "protocolVersion",
-            "projectId",
-            "expectedProjectRevision",
-            "planId",
-            "expectedPlanInputSha256",
-        }
-        validate_params(params, required=required, optional=_PLAN_MODE_INPUT_FIELDS)
+        _validate_plan_mutation_params(params, updating=True)
         require_protocol(params)
         project = self._validated_mutation_project(params)
         existing = _find_plan(project, params["planId"])
@@ -364,6 +356,13 @@ class ProbePlanningBridge:
         try:
             annotation = np.asarray(atlas.annotation)
             annotation_sha256 = self._annotation_digest(annotation, atlas.metadata)
+            if plan.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION:
+                validate_atlas_surface_probe_plan_semantics(
+                    plan=plan,
+                    atlas=atlas.metadata,
+                    annotation=annotation,
+                    annotation_sha256=annotation_sha256,
+                )
             analysis = analyze_probe_plan_regions(
                 plan=plan,
                 annotation=annotation,
@@ -547,7 +546,48 @@ class ProbePlanningBridge:
                 "PROJECT_ID_MISMATCH",
                 "The probe request does not belong to the current project.",
             )
+        self._validate_loaded_surface_geometry(project)
         return project
+
+    def _validate_loaded_surface_geometry(self, project: PlannerProject) -> None:
+        surface_plans = tuple(
+            plan
+            for plan in project.probe_plans
+            if (plan.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION)
+        )
+        if not surface_plans:
+            return
+        loaded_atlas = self.get_atlas()
+        if (
+            project.atlas is None
+            or loaded_atlas.metadata.metadata_sha256 != project.atlas.metadata_sha256
+        ):
+            raise BridgeError(
+                "ATLAS_IDENTITY_MISMATCH",
+                "The loaded annotation does not match the project atlas-surface plan.",
+            )
+        annotation = np.asarray(loaded_atlas.annotation)
+        try:
+            for plan in surface_plans:
+                input_data = plan.surface_relative_input
+                if input_data is None:  # guarded by the record model
+                    raise ProbePlanningError(
+                        "atlas-surface plan is missing preserved direct inputs"
+                    )
+                validate_atlas_surface_probe_plan_semantics(
+                    plan=plan,
+                    atlas=loaded_atlas.metadata,
+                    annotation=annotation,
+                    # Re-resolving the AP/ML column catches forged surface DV
+                    # without hashing the full immutable volume on every list/get.
+                    annotation_sha256=input_data.annotation_sha256,
+                )
+        except (ProbePlacementError, ProbePlanningError, ValidationError, ValueError) as error:
+            raise BridgeError(
+                "PROBE_PLAN_SURFACE_INVALID",
+                "The persisted probe surface cannot be reproduced from the loaded annotation.",
+                details={"reason": str(error), "exceptionType": type(error).__name__},
+            ) from error
 
     def _validated_mutation_project(self, params: Mapping[str, object]) -> PlannerProject:
         project = self._validated_project(params["projectId"])
@@ -572,6 +612,94 @@ class ProbePlanningBridge:
     ) -> ProbePlanRecord:
         if project.atlas is None:
             raise BridgeError("ATLAS_NOT_OPEN", "A project atlas is required for probe planning.")
+        model = _catalog_model(params)
+        placement_mode = _placement_mode(params)
+        if placement_mode is ProbePlacementMode.ATLAS_SURFACE_AP_ML:
+            loaded_atlas = self.get_atlas()
+            if loaded_atlas.metadata.metadata_sha256 != project.atlas.metadata_sha256:
+                raise BridgeError(
+                    "ATLAS_IDENTITY_MISMATCH",
+                    "The loaded annotation does not match the project atlas.",
+                )
+            annotation_source = loaded_atlas.metadata.source_annotation
+            if annotation_source is None or not annotation_source.strip():
+                raise BridgeError(
+                    "ATLAS_ANNOTATION_PROVENANCE_MISSING",
+                    "Direct surface planning requires a source-versioned annotation.",
+                )
+            annotation = np.asarray(loaded_atlas.annotation)
+            annotation_sha256 = self._annotation_digest(annotation, loaded_atlas.metadata)
+            existing_context = None
+            if plan_uuid is not None:
+                existing = next(
+                    (item for item in project.probe_plans if item.plan_uuid == plan_uuid),
+                    None,
+                )
+                if (
+                    existing is not None
+                    and existing.planning_algorithm_version
+                    == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION
+                ):
+                    existing_context = existing.placement.context
+            raw_name = params.get("name")
+            name = None if raw_name is None else text_value(raw_name, "name", maximum=200)
+            layout_rotation = finite_number(
+                params["probeLayoutRotationDegrees"],
+                "probeLayoutRotationDegrees",
+                minimum=0,
+                maximum=90,
+            )
+            if layout_rotation not in {0.0, 90.0}:
+                raise BridgeError(
+                    "INVALID_PARAMS",
+                    "probeLayoutRotationDegrees must be exactly 0 or 90.",
+                )
+            try:
+                plan, _ = build_atlas_surface_probe_plan(
+                    annotation=annotation,
+                    annotation_sha256=annotation_sha256,
+                    annotation_source=annotation_source,
+                    atlas=project.atlas,
+                    model=model,
+                    insertion_ap_mm=finite_number(
+                        params["insertionAPMillimetres"],
+                        "insertionAPMillimetres",
+                    ),
+                    insertion_ml_mm=finite_number(
+                        params["insertionMLMillimetres"],
+                        "insertionMLMillimetres",
+                    ),
+                    surface_depth_mm=finite_number(
+                        params["surfaceDepthMillimetres"],
+                        "surfaceDepthMillimetres",
+                        minimum=0,
+                        minimum_inclusive=False,
+                    ),
+                    sagittal_angle_deg=_strict_sagittal_angle(params["sagittalAngleDegrees"]),
+                    probe_layout_rotation_deg=int(layout_rotation),
+                    subject_id=project.subject_id,
+                    name=name,
+                    context=existing_context,
+                    plan_uuid=plan_uuid,
+                    plan_version=plan_version,
+                    created_at=created_at,
+                )
+            except (
+                AnatomicalAtlasConversionError,
+                AtlasIdentityError,
+                CoordinateBoundsError,
+                CoordinateFrameError,
+                ProbePlacementError,
+                ProbePlanningError,
+                ValidationError,
+                ValueError,
+            ) as error:
+                raise BridgeError(
+                    "PLACEMENT_INVALID",
+                    "The atlas-surface probe placement was rejected.",
+                    details={"reason": str(error), "exceptionType": type(error).__name__},
+                ) from error
+            return plan
         if project.active_calibration_uuid is None:
             raise BridgeError(
                 "CALIBRATION_REQUIRED",
@@ -593,8 +721,6 @@ class ProbePlanningBridge:
                 "IMPLANT_TARGET_NOT_FOUND",
                 "The requested bregma target is not in the current project.",
             )
-        model = _catalog_model(params)
-        placement_mode = _placement_mode(params)
         try:
             plan, _ = build_calibrated_probe_plan(
                 target=target,
@@ -703,7 +829,7 @@ class ProbePlanningBridge:
         }
 
 
-_PLAN_COMMON_INPUT_FIELDS: Final[set[str]] = {
+_PLAN_LEGACY_COMMON_INPUT_FIELDS: Final[set[str]] = {
     "targetId",
     "modelId",
     "modelVersion",
@@ -712,7 +838,7 @@ _PLAN_COMMON_INPUT_FIELDS: Final[set[str]] = {
     "customGeometryAcknowledged",
 }
 
-_PLAN_MODE_INPUT_FIELDS: Final[set[str]] = {
+_PLAN_LEGACY_MODE_INPUT_FIELDS: Final[set[str]] = {
     "placementMode",
     "entryAPMillimetres",
     "entryMLMillimetres",
@@ -721,6 +847,46 @@ _PLAN_MODE_INPUT_FIELDS: Final[set[str]] = {
     "elevationDegrees",
     "insertionDepthMicrometres",
 }
+
+_PLAN_SURFACE_INPUT_FIELDS: Final[set[str]] = {
+    "placementMode",
+    "modelId",
+    "modelVersion",
+    "insertionAPMillimetres",
+    "insertionMLMillimetres",
+    "surfaceDepthMillimetres",
+    "sagittalAngleDegrees",
+    "probeLayoutRotationDegrees",
+}
+
+
+def _validate_plan_mutation_params(
+    params: Mapping[str, object],
+    *,
+    updating: bool,
+) -> None:
+    """Apply one strict field shape for v4 and preserve the legacy shape."""
+
+    mutation_envelope = {
+        "protocolVersion",
+        "projectId",
+        "expectedProjectRevision",
+    }
+    if updating:
+        mutation_envelope |= {"planId", "expectedPlanInputSha256"}
+    raw_mode = params.get("placementMode")
+    if raw_mode == ProbePlacementMode.ATLAS_SURFACE_AP_ML.value:
+        validate_params(
+            params,
+            required=mutation_envelope | _PLAN_SURFACE_INPUT_FIELDS,
+            optional={"name"},
+        )
+        return
+    validate_params(
+        params,
+        required=mutation_envelope | _PLAN_LEGACY_COMMON_INPUT_FIELDS,
+        optional=_PLAN_LEGACY_MODE_INPUT_FIELDS,
+    )
 
 
 def register_probe_planning_handlers(
@@ -753,7 +919,7 @@ def _placement_mode(params: Mapping[str, object]) -> ProbePlacementMode:
     except ValueError as error:
         raise BridgeError(
             "INVALID_PARAMS",
-            "placementMode must be one of the four explicit supported modes.",
+            "placementMode must be one of the explicit supported modes.",
             details={
                 "received": value,
                 "supported": [mode.value for mode in ProbePlacementMode],
@@ -779,6 +945,21 @@ def _optional_finite_number(
         maximum=maximum,
         minimum_inclusive=minimum_inclusive,
     )
+
+
+def _strict_sagittal_angle(value: object) -> float:
+    angle = finite_number(
+        value,
+        "sagittalAngleDegrees",
+        minimum=-90,
+        maximum=90,
+    )
+    if not -90 < angle < 90:
+        raise BridgeError(
+            "INVALID_PARAMS",
+            "sagittalAngleDegrees must be strictly between -90 and 90.",
+        )
+    return angle
 
 
 def _catalog_model(params: Mapping[str, object]) -> ProbeModelDefinition:
@@ -845,6 +1026,7 @@ def _require_current_probe_geometry(plan: ProbePlanRecord) -> None:
     if plan.planning_algorithm_version not in {
         STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
         PROBE_PLANNING_ALGORITHM_VERSION,
+        ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
     }:
         raise BridgeError(
             "PROBE_PLAN_RECOMPUTE_REQUIRED",
@@ -963,7 +1145,7 @@ def _model_warning(model: ProbeModelDefinition) -> str | None:
     if model.verification.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING:
         return (
             "Source-transcribed manufacturer geometry — independent transcription review "
-            "pending; explicit acknowledgement required"
+            "pending; verify the source-traced geometry before animal use"
         )
     return "Generic software-test geometry — not a verified Neuropixels device profile"
 
@@ -972,27 +1154,35 @@ def _plan_summary(
     plan: ProbePlanRecord,
     analysis: ProbeRegionAnalysisBundle | None,
 ) -> JsonObject:
+    source_target = plan.source_target
     return {
         "planId": str(plan.plan_uuid),
         "planVersion": plan.plan_version,
         "name": plan.name,
-        "targetId": str(plan.source_target.target_uuid),
-        "targetLabel": plan.source_target.label,
+        "targetId": None if source_target is None else str(source_target.target_uuid),
+        "targetLabel": None if source_target is None else source_target.label,
         "modelId": plan.probe_model.model_id,
         "modelVersion": plan.probe_model.model_version,
         "modelDisplayName": plan.probe_model.display_name,
         "verificationStatus": plan.probe_model.verification.status.value,
         "placementMode": (
-            plan.placement_input.mode.value
-            if plan.placement_input is not None
+            ProbePlacementMode.ATLAS_SURFACE_AP_ML.value
+            if plan.surface_relative_input is not None
             else (
-                ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR.value
-                if plan.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION
-                else ProbePlacementMode.TARGET_ANGLES_DEPTH.value
+                plan.placement_input.mode.value
+                if plan.placement_input is not None
+                else (
+                    ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR.value
+                    if (
+                        plan.planning_algorithm_version
+                        == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION
+                    )
+                    else ProbePlacementMode.TARGET_ANGLES_DEPTH.value
+                )
             )
         ),
         "inputSha256": plan.input_sha256,
-        "calibrationId": str(plan.calibration_uuid),
+        "calibrationId": (None if plan.calibration_uuid is None else str(plan.calibration_uuid)),
         "calibrationVersion": plan.calibration_version,
         "regionAnalysisAvailable": analysis is not None,
         "regionAnalysisSha256": None if analysis is None else analysis.analysis_sha256,
@@ -1009,15 +1199,19 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
     direction_frame_id = plan.placement.entry.frame_id
     return {
         **_plan_summary(plan, None),
-        "sourceTarget": {
-            "frameId": plan.source_target.frame_id,
-            "origin": plan.source_target.origin,
-            "componentOrder": list(plan.source_target.component_order),
-            "units": plan.source_target.units,
-            "apMillimetres": plan.source_target.ap_mm,
-            "mlMillimetres": plan.source_target.ml_mm,
-            "dvMillimetres": plan.source_target.dv_mm,
-        },
+        "sourceTarget": (
+            None
+            if plan.source_target is None
+            else {
+                "frameId": plan.source_target.frame_id,
+                "origin": plan.source_target.origin,
+                "componentOrder": list(plan.source_target.component_order),
+                "units": plan.source_target.units,
+                "apMillimetres": plan.source_target.ap_mm,
+                "mlMillimetres": plan.source_target.ml_mm,
+                "dvMillimetres": plan.source_target.dv_mm,
+            }
+        ),
         "manipulatorInput": (
             None
             if plan.manipulator_input is None
@@ -1031,6 +1225,7 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
             }
         ),
         "placementInput": _placement_input_payload(plan),
+        "surfaceRelativeInput": _surface_relative_input_payload(plan),
         "placement": {
             "placementId": str(plan.placement.placement_uuid),
             "method": plan.placement.method.value,
@@ -1084,7 +1279,9 @@ def _plan_detail(plan: ProbePlanRecord, atlas: AtlasMetadata | None) -> JsonObje
         "shanks": [_shank_payload(shank, atlas) for shank in shanks],
         "recordingSites": [_site_payload(site, atlas) for site in sites],
         "provenance": {
-            "calibrationId": str(plan.calibration_uuid),
+            "calibrationId": (
+                None if plan.calibration_uuid is None else str(plan.calibration_uuid)
+            ),
             "calibrationVersion": plan.calibration_version,
             "calibrationSha256": plan.calibration_sha256,
             "atlasMetadataSha256": plan.atlas_metadata_sha256,
@@ -1161,6 +1358,59 @@ def _placement_input_payload(plan: ProbePlanRecord) -> JsonObject | None:
     }
 
 
+def _surface_relative_input_payload(plan: ProbePlanRecord) -> JsonObject | None:
+    input_data = plan.surface_relative_input
+    if input_data is None:
+        return None
+    reference = input_data.bregma_reference
+    surface = input_data.surface_entry_physical
+    return {
+        "mode": input_data.mode,
+        "bregmaReference": {
+            "referenceId": reference.reference_id,
+            "atlasIdentifier": reference.atlas_key,
+            "atlasVersion": reference.atlas_version,
+            "frameId": reference.frame_id,
+            "componentOrder": list(reference.component_order),
+            "units": reference.units,
+            "apMicrometres": reference.ap_um,
+            "dvMicrometres": reference.dv_um,
+            "mlMicrometres": reference.ml_um,
+            "sourceTitle": reference.source_title,
+            "sourceUrl": reference.source_url,
+            "sourceRevision": reference.source_revision,
+            "sourceSha256": reference.source_sha256,
+            "retrievedOn": reference.retrieved_on.isoformat(),
+            "limitation": reference.limitation,
+        },
+        "insertionAPMillimetres": input_data.insertion_ap_mm,
+        "insertionMLMillimetres": input_data.insertion_ml_mm,
+        "surfaceDepthMillimetres": input_data.surface_depth_mm,
+        "sagittalAngleDegrees": input_data.sagittal_angle_deg,
+        "probeLayoutRotationDegrees": input_data.probe_layout_rotation_deg,
+        "surfaceEntry": {
+            "atlasIdentifier": surface.atlas_key,
+            "atlasVersion": surface.atlas_version,
+            "frameId": surface.frame_id,
+            "componentOrder": ["AP", "DV", "ML"],
+            "units": "micrometre",
+            "apMicrometres": surface.ap_um,
+            "dvMicrometres": surface.dv_um,
+            "mlMicrometres": surface.ml_um,
+        },
+        "surfaceDVIndex": input_data.surface_dv_index,
+        "surfaceDVResolutionMicrometres": input_data.surface_dv_resolution_um,
+        "annotationSource": input_data.annotation_source,
+        "annotationSha256": input_data.annotation_sha256,
+        "surfaceDefinitionVersion": input_data.surface_definition_version,
+        "apSignConvention": input_data.ap_sign_convention,
+        "mlSignConvention": input_data.ml_sign_convention,
+        "depthConvention": input_data.depth_convention,
+        "angleConvention": input_data.angle_convention,
+        "layoutConvention": input_data.layout_convention,
+    }
+
+
 def _physical_payload(point: AnatomicalPoint, atlas: AtlasMetadata) -> JsonObject:
     physical = canonical_anatomical_to_brainglobe_physical(
         point,
@@ -1187,8 +1437,14 @@ def _physical_payload(point: AnatomicalPoint, atlas: AtlasMetadata) -> JsonObjec
 def _shank_payload(shank: PlacedProbeShank, atlas: AtlasMetadata) -> JsonObject:
     return {
         "shankId": shank.shank_id,
+        # ``entry`` is retained as the implanted-path start for protocol
+        # compatibility.  The explicit role and proximal endpoint prevent 2-D
+        # and 3-D consumers from treating insertion depth as physical length.
         "entry": _physical_payload(shank.entry, atlas),
+        "surfaceEntry": _physical_payload(shank.entry, atlas),
         "tip": _physical_payload(shank.tip, atlas),
+        "proximalEnd": _physical_payload(shank.proximal_end, atlas),
+        "totalLengthMicrometres": shank.length_um,
         "widthMicrometres": shank.width_um,
         "thicknessMicrometres": shank.thickness_um,
         "conservativeEnvelopeRadiusMicrometres": shank.conservative_envelope_radius_um,
@@ -1326,18 +1582,57 @@ def _safe_subject_filename_component(subject_id: str | None, *, fallback_seed: s
 
 def _region_csv(
     project: PlannerProject,
-    calibration: AtlasRegisteredCalibration,
+    calibration: AtlasRegisteredCalibration | None,
     plan: ProbePlanRecord,
     bundle: ProbeRegionAnalysisBundle,
 ) -> str:
     if project.atlas is None:
         raise BridgeError("ATLAS_NOT_OPEN", "Probe-region export requires project atlas metadata.")
-    transform = calibration.atlas_transform
-    transform_matrix = json.dumps(
-        list(transform.matrix_row_major),
-        separators=(",", ":"),
-        allow_nan=False,
-    )
+    if calibration is None:
+        surface_input = plan.surface_relative_input
+        if surface_input is None:
+            raise BridgeError(
+                "CALIBRATION_REQUIRED",
+                "Legacy probe-region export requires its exact calibration.",
+            )
+        transform_matrix = json.dumps(
+            [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        calibration_columns: list[object] = [
+            "",
+            "",
+            "",
+            f"atlas-surface:{surface_input.bregma_reference.reference_id}",
+            1,
+            "direct-atlas-reference",
+            "BRAINGLOBE_PHYSICAL_ASR_UM",
+            plan.placement.entry.frame_id,
+            transform_matrix,
+            "",
+            "",
+        ]
+    else:
+        transform = calibration.atlas_transform
+        transform_matrix = json.dumps(
+            list(transform.matrix_row_major),
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        calibration_columns = [
+            str(calibration.calibration_uuid),
+            calibration.calibration_version,
+            plan.calibration_sha256 or "",
+            str(transform.transform_uuid),
+            transform.version,
+            transform.method.value,
+            transform.source_frame.frame_id,
+            transform.destination_frame.frame_id,
+            transform_matrix,
+            transform.rms_residual_um,
+            transform.max_residual_um,
+        ]
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(
@@ -1393,17 +1688,7 @@ def _region_csv(
         project.atlas.atlas_package_version,
         project.atlas.metadata_sha256,
         project.coordinate_convention,
-        str(calibration.calibration_uuid),
-        calibration.calibration_version,
-        plan.calibration_sha256,
-        str(transform.transform_uuid),
-        transform.version,
-        transform.method.value,
-        transform.source_frame.frame_id,
-        transform.destination_frame.frame_id,
-        transform_matrix,
-        transform.rms_residual_um,
-        transform.max_residual_um,
+        *calibration_columns,
     ]
     for analysis in bundle.shank_analyses:
         for segment in analysis.segments:
@@ -1457,33 +1742,42 @@ def _region_export_content(
 
     if project.atlas is None:
         raise BridgeError("ATLAS_NOT_OPEN", "Probe-region export requires project atlas metadata.")
-    calibration = _find_calibration(project, plan.calibration_uuid)
-    actual_calibration_sha256 = atlas_registered_calibration_sha256(calibration)
-    if plan.calibration_sha256 != actual_calibration_sha256:
-        raise BridgeError(
-            "CALIBRATION_DIGEST_MISMATCH",
-            "The probe plan no longer matches its exact animal calibration snapshot.",
-            details={
-                "actualCalibrationSha256": actual_calibration_sha256,
-                "planCalibrationSha256": plan.calibration_sha256,
-            },
-        )
-    if not calibration.permits_final_export:
-        raise BridgeError(
-            "CALIBRATION_FINAL_EXPORT_BLOCKED",
-            "The exact animal calibration referenced by this probe plan does not permit "
-            "final export.",
-            details={
-                "calibrationId": str(calibration.calibration_uuid),
-                "calibrationSha256": actual_calibration_sha256,
-                "quality": calibration.effective_quality.value,
-                "transformMethod": calibration.atlas_transform.method.value,
-                "affineDistortionAcknowledged": (
-                    calibration.atlas_transform.affine_distortion_acknowledged
-                ),
-                "permitsFinalExport": False,
-            },
-        )
+    calibration: AtlasRegisteredCalibration | None
+    if plan.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION:
+        calibration = None
+    else:
+        if plan.calibration_uuid is None:
+            raise BridgeError(
+                "CALIBRATION_REQUIRED",
+                "Legacy probe-region export requires its exact calibration.",
+            )
+        calibration = _find_calibration(project, plan.calibration_uuid)
+        actual_calibration_sha256 = atlas_registered_calibration_sha256(calibration)
+        if plan.calibration_sha256 != actual_calibration_sha256:
+            raise BridgeError(
+                "CALIBRATION_DIGEST_MISMATCH",
+                "The probe plan no longer matches its exact animal calibration snapshot.",
+                details={
+                    "actualCalibrationSha256": actual_calibration_sha256,
+                    "planCalibrationSha256": plan.calibration_sha256,
+                },
+            )
+        if not calibration.permits_final_export:
+            raise BridgeError(
+                "CALIBRATION_FINAL_EXPORT_BLOCKED",
+                "The exact animal calibration referenced by this probe plan does not permit "
+                "final export.",
+                details={
+                    "calibrationId": str(calibration.calibration_uuid),
+                    "calibrationSha256": actual_calibration_sha256,
+                    "quality": calibration.effective_quality.value,
+                    "transformMethod": calibration.atlas_transform.method.value,
+                    "affineDistortionAcknowledged": (
+                        calibration.atlas_transform.affine_distortion_acknowledged
+                    ),
+                    "permitsFinalExport": False,
+                },
+            )
     _require_plan_projection_semantics(project, plan)
     export_format = text_value(raw_format, "format", maximum=10).lower()
     if export_format == "csv":
@@ -1491,7 +1785,27 @@ def _region_export_content(
         mime_type = "text/csv"
         file_extension = "csv"
     elif export_format == "json":
-        transform = calibration.atlas_transform
+        calibration_payload: JsonObject | None
+        if calibration is None:
+            calibration_payload = None
+        else:
+            transform = calibration.atlas_transform
+            calibration_payload = {
+                "calibrationId": str(calibration.calibration_uuid),
+                "calibrationSha256": plan.calibration_sha256,
+                "calibrationVersion": calibration.calibration_version,
+                "profileId": calibration.profile_id,
+                "transform": {
+                    "destinationFrame": transform.destination_frame.model_dump(mode="json"),
+                    "matrixRowMajorAPMLDV": list(transform.matrix_row_major),
+                    "maximumResidualMicrometres": transform.max_residual_um,
+                    "method": transform.method.value,
+                    "rmsResidualMicrometres": transform.rms_residual_um,
+                    "sourceFrame": transform.source_frame.model_dump(mode="json"),
+                    "transformId": str(transform.transform_uuid),
+                    "transformVersion": transform.version,
+                },
+            }
         content = json.dumps(
             {
                 "analysis": analysis.model_dump(mode="json"),
@@ -1500,22 +1814,12 @@ def _region_export_content(
                     "metadataSha256": project.atlas.metadata_sha256,
                     "version": project.atlas.atlas_package_version,
                 },
-                "calibration": {
-                    "calibrationId": str(calibration.calibration_uuid),
-                    "calibrationSha256": plan.calibration_sha256,
-                    "calibrationVersion": calibration.calibration_version,
-                    "profileId": calibration.profile_id,
-                    "transform": {
-                        "destinationFrame": transform.destination_frame.model_dump(mode="json"),
-                        "matrixRowMajorAPMLDV": list(transform.matrix_row_major),
-                        "maximumResidualMicrometres": transform.max_residual_um,
-                        "method": transform.method.value,
-                        "rmsResidualMicrometres": transform.rms_residual_um,
-                        "sourceFrame": transform.source_frame.model_dump(mode="json"),
-                        "transformId": str(transform.transform_uuid),
-                        "transformVersion": transform.version,
-                    },
-                },
+                "calibration": calibration_payload,
+                "atlasSurfaceReference": (
+                    None
+                    if plan.surface_relative_input is None
+                    else plan.surface_relative_input.model_dump(mode="json")
+                ),
                 "coordinateConvention": project.coordinate_convention,
                 "exportKind": "probe-region-analysis",
                 "exportSchemaVersion": REGION_EXPORT_SCHEMA_VERSION,
@@ -1528,7 +1832,11 @@ def _region_export_content(
                     "planId": str(plan.plan_uuid),
                     "planInputSha256": plan.input_sha256,
                     "planVersion": plan.plan_version,
-                    "sourceTarget": plan.source_target.model_dump(mode="json"),
+                    "sourceTarget": (
+                        None
+                        if plan.source_target is None
+                        else plan.source_target.model_dump(mode="json")
+                    ),
                 },
             },
             sort_keys=True,

@@ -40,14 +40,14 @@ from mouse_brain_planner.probes.catalog import (
 def test_public_catalog_contains_only_the_two_supported_np2_choices() -> None:
     models = list_probe_models()
 
-    assert PROBE_CATALOG_VERSION == "brain3d-probe-catalog-v5"
+    assert PROBE_CATALOG_VERSION == "brain3d-probe-catalog-v6"
     assert len(models) == 2
 
     np2_single, np2_standard = models
     assert np2_single.model_id == NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID
-    assert np2_single.product_code == "NP2003 / NP2004"
+    assert np2_single.product_code == "NP2003"
     assert np2_standard.model_id == NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID
-    assert np2_standard.product_code == "NP2013 / NP2014"
+    assert np2_standard.product_code == "NP2013"
     assert "384 simultaneously configurable" in np2_standard.geometry_notes
     assert {
         NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID,
@@ -156,7 +156,13 @@ def test_np2_provenance_is_pinned_and_review_status_is_honest(
     assert verification.transcribed_by == "Brain3D automated source transcription"
     assert verification.independently_reviewed_by is None
     assert "no independent human reviewer" in verification.review_notes
-    assert "explicit acknowledgement" in verification.review_notes
+    if model_id in {
+        NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID,
+    }:
+        assert "without a per-plan checkbox" in verification.review_notes
+    else:
+        assert "explicit acknowledgement" in verification.review_notes
     assert tuple(source.sha256 for source in verification.primary_sources) == source_hashes
     assert all(
         source.retrieved_on.isoformat() == "2026-07-23" for source in verification.primary_sources

@@ -2,30 +2,33 @@
 
 ## Enabled catalog
 
-The production catalog (`brain3d-probe-catalog-v5`) exposes exactly two entries:
+The production catalog (`brain3d-probe-catalog-v6`) exposes exactly two entries:
 
 | Model | Geometry state | UI requirement |
 | --- | --- | --- |
-| Neuropixels 2.0 single shank / `NP2003`, `NP2004` | Complete 1,280-site source transcription; `source-transcribed-review-pending` | Explicit acknowledgement that independent review is pending |
-| Neuropixels 2.0 standard four shanks / `NP2013`, `NP2014` | Complete 5,120-site source transcription; 384 simultaneous channels; `source-transcribed-review-pending` | Explicit acknowledgement that independent review is pending |
+| Neuropixels 2.0 `NP2003` / one shank | Complete 1,280-site source transcription; `source-transcribed-review-pending` | Persistent warning; no per-plan geometry checkbox |
+| Neuropixels 2.0 `NP2013` / standard four shanks | Complete 5,120-site source transcription; 384 simultaneous channels; `source-transcribed-review-pending` | Persistent warning; no per-plan geometry checkbox |
 
-Quad Base, Neuropixels 1.0, and the generic fixture remain archived exact definitions for
-old-project compatibility and test evidence. They are not returned by `probe.catalog.list` and
-cannot appear in the new-plan selector. No entry is presented as independently verified hardware
-geometry. The catalog is restricted to non-human animal-research planning.
+The former combined NP2003/NP2004 and NP2013/NP2014 identities, Quad Base, Neuropixels 1.0,
+and the generic fixture remain archived exact definitions for old-project compatibility and test
+evidence. They are not returned by `probe.catalog.list` and cannot appear in the new-plan
+selector. No entry is presented as independently verified hardware geometry. The catalog is
+restricted to non-human animal-research planning.
 
 ## Neuropixels 2.0 transcription
 
 The two supported NP2 choices record:
 
-- `NP2003` and `NP2004`: one 10,000 µm × 70 µm × 24 µm shank with 1,280 sites;
-- `NP2013` and `NP2014`: four such shanks at 250 µm pitch with 5,120 sites total and
+- `NP2003`: one 10,000 µm × 70 µm × 24 µm shank with 1,280 sites;
+- `NP2013`: four such shanks at 250 µm pitch with 5,120 sites total and
   384 simultaneously configurable recording channels across the probe.
 
-Cap, cable, headstage, and base-electronics geometry remain outside trajectory geometry. In the
-four-shank entry, the planned target and entry belong to the official leftmost `shank-0`; shanks
-1-3 are offset +250, +500, and +750 µm along the probe-local lateral axis.
-Axial rotation consequently rotates the entire four-shank array, not each shank independently.
+Cap, cable, headstage, and base-electronics geometry remain outside trajectory geometry. Catalog
+ID `shank-0` is user-facing **Shank 1** and is the AP/ML surface anchor and distal depth target;
+the coordinate is not an array midpoint. The other catalog shanks retain +250, +500, and +750 µm
+probe-local offsets. In the `Sagittal` layout this makes Shank 1 most anterior and the other three
+extend posterior. After `90° CW` as viewed dorsally, Shank 1 is animal-left-most and the others
+extend toward animal right. Layout rotates the complete array, not individual shanks.
 
 Each shank uses 640 rows with two 12 × 12 µm sites per row. Site-center coordinates use the
 source-backed 206 µm physical-tip-to-lowest-row-center distance, 15 µm axial row pitch, and
@@ -87,20 +90,28 @@ mapping, multi-shank offsets, trajectory transforms, overlays, traversal, persis
 stale-result rejection. Those tests do not establish manufacturing tolerances, physical-probe
 conformance, insertion deformation, or procedural accuracy.
 
-## Calibrated placement geometry
+## Direct atlas-surface placement geometry
 
-Planning algorithm `calibrated-stereotaxic-probe-transform-v2` preserves the operator's exact
-subject-stereotaxic azimuth, elevation, insertion depth, and axial rotation separately from the
-derived atlas pose. It constructs entry, target, tip, insertion direction, and the probe's local
-lateral/normal basis in the stereotaxic frame, then maps the complete pose through the same rigid
-or similarity calibration. Shank offsets, site offsets, width, and thickness follow that mapped
-basis and uniform scale; they are not reconstructed from atlas-global ML after rotation.
+Planning algorithm `pinpoint-atlas-surface-ap-ml-depth-v4` persists AP/ML from the named
+Pinpoint/Urchin profile, Shank 1's exact local annotation-surface crossing, the positive path depth
+from that crossing to Shank 1's distal target, one signed sagittal angle, and layout. AP− is
+posterior and ML− is animal-left. Positive angle advances A→P; negative advances P→A. NP2013
+layout `0°` places its shank-spacing axis in the sagittal plane with Shank 1 most anterior, and
+`90°` rotates the whole array clockwise from dorsal with Shank 1 animal-left-most. Shank offsets,
+site offsets, width, and thickness follow the derived local basis.
 
-Full affine calibration is rejected for probe planning because shear would turn a physical
-rectangular cross-section into a different envelope. Legacy v1 plans must be explicitly updated
-before region analysis or any future qualified vessel analysis; their previously derived geometry
-is never treated as current. Archived synthetic vessel tests do not make that analysis available
-in the product.
+Every supported NP2 shank is modeled as the full 10,000 µm proximal-to-distal shaft. At insertion
+depth `d`, its proximal remainder is `10,000 − d` µm opposite the insertion direction from the
+surface plane and can lie outside the brain/atlas. The surface-to-distal-target segment remains a
+separate implanted path for slice overlays, annotation traversal, and path analysis; rendering the
+full shaft does not redefine insertion depth.
+
+The direct v4 path does not require target registration or subject calibration; its named
+population-atlas assumption and annotation digest are stored and revalidated instead. This does
+not establish current-animal correspondence. Calibrated v1–v3 records remain preserved with
+their original target, angle, roll, and calibration semantics. Legacy v1 plans must be explicitly
+updated before region analysis or any future qualified vessel analysis. Archived synthetic vessel
+tests do not make that analysis available in the product.
 
 ## Adding another hardware model
 

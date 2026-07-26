@@ -62,9 +62,18 @@ def analyze_probe_plan_regions(
         raise ProbeRegionServiceError(
             "probe model snapshot is not exact source-pinned catalog geometry"
         ) from error
-    transform_id = (
-        f"calibration:{plan.calibration_uuid}:v{plan.calibration_version}:{plan.calibration_sha256}"
-    )
+    if plan.surface_relative_input is not None:
+        transform_id = (
+            "atlas-surface:"
+            f"{plan.surface_relative_input.bregma_reference.reference_id}:"
+            f"{plan.surface_relative_input.annotation_sha256}:"
+            f"{plan.projection_sha256}"
+        )
+    else:
+        transform_id = (
+            f"calibration:{plan.calibration_uuid}:"
+            f"v{plan.calibration_version}:{plan.calibration_sha256}"
+        )
     shanks = placed_shank_centerlines(plan.probe_model, plan.placement)
     sites = placed_recording_sites(plan.probe_model, plan.placement)
     sites_by_shank: dict[str, list[AtlasRecordingSitePoint]] = {

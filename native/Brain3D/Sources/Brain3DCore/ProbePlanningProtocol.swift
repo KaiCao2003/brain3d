@@ -2,23 +2,32 @@ import CryptoKit
 import Foundation
 
 public enum ProbePlanningContract {
-    public static let catalogVersion = "brain3d-probe-catalog-v5"
+    public static let catalogVersion = "brain3d-probe-catalog-v6"
     public static let neuropixels2SingleShankModelId =
-        "imec-neuropixels-2.0-single-shank-np2003-np2004"
+        "imec-neuropixels-2.0-np2003"
     public static let neuropixels2StandardFourShankModelId =
+        "imec-neuropixels-2.0-np2013"
+    public static let legacyNeuropixels2SingleShankModelId =
+        "imec-neuropixels-2.0-single-shank-np2003-np2004"
+    public static let legacyNeuropixels2StandardFourShankModelId =
         "imec-neuropixels-2.0-standard-four-shank-np2013-np2014"
     public static let neuropixels2QuadBaseFourShankModelId =
         "imec-neuropixels-2.0-quad-base-four-shank-np2020-np2021"
     public static let neuropixels2ModelVersion = "source-snapshot-2026-07-23"
     public static let neuropixels2SingleShankDisplayName =
-        "Neuropixels 2.0 — single shank (NP2003 / NP2004)"
+        "Neuropixels 2.0 — NP2003 · 1 shank"
     public static let neuropixels2StandardFourShankDisplayName =
+        "Neuropixels 2.0 — NP2013 · 4 shanks"
+    public static let legacyNeuropixels2SingleShankDisplayName =
+        "Neuropixels 2.0 — single shank (NP2003 / NP2004)"
+    public static let legacyNeuropixels2StandardFourShankDisplayName =
         "Neuropixels 2.0 — standard four shanks (NP2013 / NP2014)"
     public static let neuropixels2QuadBaseFourShankDisplayName =
         "Neuropixels 2.0 — Quad Base four shanks (NP2020 / NP2021)"
-    public static let neuropixels2SingleShankProductCode = "NP2003 / NP2004"
-    public static let neuropixels2StandardFourShankProductCode =
-        "NP2013 / NP2014"
+    public static let neuropixels2SingleShankProductCode = "NP2003"
+    public static let neuropixels2StandardFourShankProductCode = "NP2013"
+    public static let legacyNeuropixels2SingleShankProductCode = "NP2003 / NP2004"
+    public static let legacyNeuropixels2StandardFourShankProductCode = "NP2013 / NP2014"
     public static let neuropixels2QuadBaseFourShankProductCode =
         "NP2020 / NP2021"
     public static let neuropixels2SingleShankSimultaneousChannelCount = 384
@@ -38,6 +47,9 @@ public enum ProbePlanningContract {
     public static let sourceTranscribedReviewPendingStatus =
         "source-transcribed-review-pending"
     public static let sourceTranscribedReviewPendingWarning =
+        "Source-transcribed manufacturer geometry — independent transcription review "
+            + "pending; verify the source-traced geometry before animal use"
+    public static let legacySourceTranscribedReviewPendingWarning =
         "Source-transcribed manufacturer geometry — independent transcription review "
             + "pending; explicit acknowledgement required"
     public static let manufacturerSpecSHA256 =
@@ -65,9 +77,31 @@ public enum ProbePlanningContract {
     public static let stereotaxicPlanningAlgorithmVersion =
         "calibrated-stereotaxic-probe-transform-v2"
     public static let legacyPlanningAlgorithmVersion = "calibrated-target-angle-depth-v1"
+    public static let surfacePlanningAlgorithmVersion =
+        "pinpoint-atlas-surface-ap-ml-depth-v4"
     public static let planningPlacementMethod =
         "stereotaxic-target-plus-manipulator-angles"
     public static let legacyPlacementMethod = "target-plus-angles-depth"
+    public static let surfacePlacementMethod =
+        "atlas-surface-ap-ml-plus-depth-angle-layout"
+    public static let surfaceDefinitionVersion =
+        "first-annotated-voxel-superior-boundary-v1"
+    public static let surfaceBregmaReferenceId =
+        "pinpoint-allen-mouse-25um-bregma-2025-11-04"
+    public static let surfaceBregmaSourceSHA256 =
+        "23880cef9abacbadd75b2b898a9b43cf1195ca75446f2c34f9ad0c278781f215"
+    public static let surfaceAPSignConvention =
+        "AP positive anterior; AP negative posterior/back"
+    public static let surfaceMLSignConvention =
+        "ML positive animal right; ML negative animal left"
+    public static let surfaceDepthConvention =
+        "positive path length from the resolved atlas brain-surface entry"
+    public static let surfaceAngleConvention =
+        "zero is deep/ventral; positive advances anterior-to-posterior; "
+            + "negative advances posterior-to-anterior"
+    public static let surfaceLayoutConvention =
+        "0 degrees places the shank array in the sagittal plane; "
+            + "90 degrees rotates it clockwise when viewed dorsally"
     public static let regionAlgorithmVersion = "probe-region-analysis-bundle-v1"
     public static let angleConvention =
         "azimuth about +DV from +AP toward +ML; elevation from AP-ML plane toward +DV"
@@ -109,6 +143,7 @@ public enum ProbePlacementMode: String, Codable, CaseIterable, Equatable, Sendab
     case entryAnglesDepth = "ENTRY_ANGLES_DEPTH"
     case targetAnglesDepth = "TARGET_ANGLES_DEPTH"
     case stereotaxicTargetManipulator = "STEREOTAXIC_TARGET_MANIPULATOR"
+    case atlasSurfaceAPML = "ATLAS_SURFACE_AP_ML"
 
     public var displayName: String {
         switch self {
@@ -116,6 +151,7 @@ public enum ProbePlacementMode: String, Codable, CaseIterable, Equatable, Sendab
         case .entryAnglesDepth: "Entry + angles + depth"
         case .targetAnglesDepth: "Target + angles + depth"
         case .stereotaxicTargetManipulator: "Stereotaxic target"
+        case .atlasSurfaceAPML: "Atlas surface AP/ML"
         }
     }
 
@@ -124,7 +160,12 @@ public enum ProbePlacementMode: String, Codable, CaseIterable, Equatable, Sendab
     }
 
     public var requiresAnglesAndDepth: Bool {
-        self != .entryAndTarget
+        switch self {
+        case .entryAnglesDepth, .targetAnglesDepth, .stereotaxicTargetManipulator:
+            true
+        case .entryAndTarget, .atlasSurfaceAPML:
+            false
+        }
     }
 
     public var normalizedPlacementMethod: String {
@@ -134,6 +175,8 @@ public enum ProbePlacementMode: String, Codable, CaseIterable, Equatable, Sendab
         case .targetAnglesDepth: "target-plus-angles-depth"
         case .stereotaxicTargetManipulator:
             ProbePlanningContract.planningPlacementMethod
+        case .atlasSurfaceAPML:
+            ProbePlanningContract.surfacePlacementMethod
         }
     }
 }
@@ -289,6 +332,94 @@ public struct ProbePlanUpdateParameters: Codable, Equatable, Sendable {
         self.insertionDepthMicrometres = insertionDepthMicrometres
         self.axialRotationDegrees = axialRotationDegrees
         self.customGeometryAcknowledged = customGeometryAcknowledged
+    }
+}
+
+public struct AtlasSurfaceProbePlanCreateParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let placementMode: ProbePlacementMode
+    public let modelId: String
+    public let modelVersion: String
+    public let insertionAPMillimetres: Double
+    public let insertionMLMillimetres: Double
+    public let surfaceDepthMillimetres: Double
+    public let sagittalAngleDegrees: Double
+    public let probeLayoutRotationDegrees: Int
+    public let name: String?
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        modelId: String,
+        modelVersion: String,
+        insertionAPMillimetres: Double,
+        insertionMLMillimetres: Double,
+        surfaceDepthMillimetres: Double,
+        sagittalAngleDegrees: Double,
+        probeLayoutRotationDegrees: Int,
+        name: String? = nil
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        placementMode = .atlasSurfaceAPML
+        self.modelId = modelId
+        self.modelVersion = modelVersion
+        self.insertionAPMillimetres = insertionAPMillimetres
+        self.insertionMLMillimetres = insertionMLMillimetres
+        self.surfaceDepthMillimetres = surfaceDepthMillimetres
+        self.sagittalAngleDegrees = sagittalAngleDegrees
+        self.probeLayoutRotationDegrees = probeLayoutRotationDegrees
+        self.name = name
+    }
+}
+
+public struct AtlasSurfaceProbePlanUpdateParameters: Codable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let projectId: String
+    public let expectedProjectRevision: Int
+    public let planId: String
+    public let expectedPlanInputSha256: String
+    public let placementMode: ProbePlacementMode
+    public let modelId: String
+    public let modelVersion: String
+    public let insertionAPMillimetres: Double
+    public let insertionMLMillimetres: Double
+    public let surfaceDepthMillimetres: Double
+    public let sagittalAngleDegrees: Double
+    public let probeLayoutRotationDegrees: Int
+    public let name: String?
+
+    public init(
+        projectId: String,
+        expectedProjectRevision: Int,
+        planId: String,
+        expectedPlanInputSha256: String,
+        modelId: String,
+        modelVersion: String,
+        insertionAPMillimetres: Double,
+        insertionMLMillimetres: Double,
+        surfaceDepthMillimetres: Double,
+        sagittalAngleDegrees: Double,
+        probeLayoutRotationDegrees: Int,
+        name: String? = nil
+    ) {
+        protocolVersion = BridgeProtocolVersion.current
+        self.projectId = projectId
+        self.expectedProjectRevision = expectedProjectRevision
+        self.planId = planId
+        self.expectedPlanInputSha256 = expectedPlanInputSha256
+        placementMode = .atlasSurfaceAPML
+        self.modelId = modelId
+        self.modelVersion = modelVersion
+        self.insertionAPMillimetres = insertionAPMillimetres
+        self.insertionMLMillimetres = insertionMLMillimetres
+        self.surfaceDepthMillimetres = surfaceDepthMillimetres
+        self.sagittalAngleDegrees = sagittalAngleDegrees
+        self.probeLayoutRotationDegrees = probeLayoutRotationDegrees
+        self.name = name
     }
 }
 
@@ -469,7 +600,12 @@ public struct ProbeCatalogModel: Codable, Equatable, Identifiable, Sendable {
     public var id: String { "\(modelId)@\(modelVersion)" }
 
     public var requiresExplicitAcknowledgement: Bool {
-        ProbePlanningContract.requiresExplicitAcknowledgement(
+        if modelId == ProbePlanningContract.neuropixels2SingleShankModelId
+            || modelId == ProbePlanningContract.neuropixels2StandardFourShankModelId
+        {
+            return false
+        }
+        return ProbePlanningContract.requiresExplicitAcknowledgement(
             verificationStatus: verificationStatus
         )
     }
@@ -651,8 +787,16 @@ public struct ProbePlacementDraft: Equatable, Sendable {
 
 public struct ProbePlacedShank: Codable, Equatable, Identifiable, Sendable {
     public let shankId: String
+    /// Surface crossing used as the start of implanted-path analyses.
     public let entry: ProbePhysicalPoint
+    /// Explicit alias of `entry` in current payloads; nil for older bridges.
+    public let surfaceEntry: ProbePhysicalPoint?
+    /// Distal physical tip and direct-plan target.
     public let tip: ProbePhysicalPoint
+    /// Catalogued base end of the complete shank, commonly outside the brain.
+    public let proximalEnd: ProbePhysicalPoint?
+    /// Complete catalogued proximal-to-distal shank length.
+    public let totalLengthMicrometres: Double?
     public let widthMicrometres: Double
     public let thicknessMicrometres: Double
     public let conservativeEnvelopeRadiusMicrometres: Double
@@ -665,11 +809,17 @@ public struct ProbePlacedShank: Codable, Equatable, Identifiable, Sendable {
         widthMicrometres: Double,
         thicknessMicrometres: Double,
         conservativeEnvelopeRadiusMicrometres: Double,
-        envelopeDefinition: String
+        envelopeDefinition: String,
+        surfaceEntry: ProbePhysicalPoint? = nil,
+        proximalEnd: ProbePhysicalPoint? = nil,
+        totalLengthMicrometres: Double? = nil
     ) {
         self.shankId = shankId
         self.entry = entry
+        self.surfaceEntry = surfaceEntry
         self.tip = tip
+        self.proximalEnd = proximalEnd
+        self.totalLengthMicrometres = totalLengthMicrometres
         self.widthMicrometres = widthMicrometres
         self.thicknessMicrometres = thicknessMicrometres
         self.conservativeEnvelopeRadiusMicrometres = conservativeEnvelopeRadiusMicrometres
@@ -677,6 +827,16 @@ public struct ProbePlacedShank: Codable, Equatable, Identifiable, Sendable {
     }
 
     public var id: String { shankId }
+
+    /// Full physical rendering start with a compatibility fallback.
+    public var renderedProximalEnd: ProbePhysicalPoint {
+        proximalEnd ?? entry
+    }
+
+    /// Explicit surface anchor with a compatibility fallback.
+    public var surfaceAnchor: ProbePhysicalPoint {
+        surfaceEntry ?? entry
+    }
 }
 
 public struct ProbeRecordingSite: Codable, Equatable, Identifiable, Sendable {
@@ -703,10 +863,60 @@ public struct ProbeRecordingSite: Codable, Equatable, Identifiable, Sendable {
     public var id: String { "\(shankId):\(siteId)" }
 }
 
+public struct AtlasBregmaReference: Codable, Equatable, Sendable {
+    public let referenceId: String
+    public let atlasIdentifier: String
+    public let atlasVersion: String
+    public let frameId: String
+    public let componentOrder: [String]
+    public let units: String
+    public let apMicrometres: Double
+    public let dvMicrometres: Double
+    public let mlMicrometres: Double
+    public let sourceTitle: String
+    public let sourceUrl: String
+    public let sourceRevision: String
+    public let sourceSha256: String
+    public let retrievedOn: String
+    public let limitation: String
+}
+
+public struct AtlasSurfaceEntry: Codable, Equatable, Sendable {
+    public let atlasIdentifier: String
+    public let atlasVersion: String
+    public let frameId: String
+    public let componentOrder: [String]
+    public let units: String
+    public let apMicrometres: Double
+    public let dvMicrometres: Double
+    public let mlMicrometres: Double
+}
+
+public struct AtlasSurfaceProbeInput: Codable, Equatable, Sendable {
+    public let mode: ProbePlacementMode
+    public let bregmaReference: AtlasBregmaReference
+    public let insertionAPMillimetres: Double
+    public let insertionMLMillimetres: Double
+    public let surfaceDepthMillimetres: Double
+    public let sagittalAngleDegrees: Double
+    public let probeLayoutRotationDegrees: Int
+    public let surfaceEntry: AtlasSurfaceEntry
+    public let surfaceDVIndex: Int
+    public let surfaceDVResolutionMicrometres: Double
+    public let annotationSource: String
+    public let annotationSha256: String
+    public let surfaceDefinitionVersion: String
+    public let apSignConvention: String
+    public let mlSignConvention: String
+    public let depthConvention: String
+    public let angleConvention: String
+    public let layoutConvention: String
+}
+
 public struct ProbePlanProvenance: Codable, Equatable, Sendable {
-    public let calibrationId: String
-    public let calibrationVersion: Int
-    public let calibrationSha256: String
+    public let calibrationId: String?
+    public let calibrationVersion: Int?
+    public let calibrationSha256: String?
     public let atlasMetadataSha256: String
     public let projectionSha256: String
     public let planningAlgorithmVersion: String
@@ -718,15 +928,16 @@ public struct ProbePlanSummary: Codable, Equatable, Identifiable, Sendable {
     public let planId: String
     public let planVersion: Int
     public let name: String
-    public let targetId: String
-    public let targetLabel: String
+    public let targetId: String?
+    public let targetLabel: String?
     public let modelId: String
     public let modelVersion: String
     public let modelDisplayName: String
     public let verificationStatus: String
     public let inputSha256: String
-    public let calibrationId: String
-    public let calibrationVersion: Int
+    public let placementMode: ProbePlacementMode?
+    public let calibrationId: String?
+    public let calibrationVersion: Int?
     public let regionAnalysisAvailable: Bool
     public let regionAnalysisSha256: String?
     public let usableForNavigation: Bool
@@ -738,21 +949,23 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
     public let planId: String
     public let planVersion: Int
     public let name: String
-    public let targetId: String
-    public let targetLabel: String
+    public let targetId: String?
+    public let targetLabel: String?
     public let modelId: String
     public let modelVersion: String
     public let modelDisplayName: String
     public let verificationStatus: String
     public let inputSha256: String
-    public let calibrationId: String
-    public let calibrationVersion: Int
+    public let placementMode: ProbePlacementMode?
+    public let calibrationId: String?
+    public let calibrationVersion: Int?
     public let regionAnalysisAvailable: Bool
     public let regionAnalysisSha256: String?
     public let usableForNavigation: Bool
-    public let sourceTarget: ProbeSourceTarget
+    public let sourceTarget: ProbeSourceTarget?
     public let manipulatorInput: ProbeManipulatorInput?
     public let placementInput: ProbePlacementInput?
+    public let surfaceRelativeInput: AtlasSurfaceProbeInput?
     public let placement: ProbePlacement
     public let shanks: [ProbePlacedShank]
     public let recordingSites: [ProbeRecordingSite]
@@ -765,6 +978,8 @@ public struct ProbePlanDetail: Codable, Equatable, Identifiable, Sendable {
         provenance.planningAlgorithmVersion == ProbePlanningContract.planningAlgorithmVersion
             || provenance.planningAlgorithmVersion
                 == ProbePlanningContract.stereotaxicPlanningAlgorithmVersion
+            || provenance.planningAlgorithmVersion
+                == ProbePlanningContract.surfacePlanningAlgorithmVersion
     }
 
     public var requiresPlanningGeometryUpdate: Bool {
@@ -1222,6 +1437,46 @@ public enum ProbePlanningValidator {
         try requireSha(request.expectedPlanInputSha256, "expectedPlanInputSha256")
     }
 
+    public static func validateCreate(
+        _ request: AtlasSurfaceProbePlanCreateParameters
+    ) throws {
+        try validateSurfaceInput(
+            protocolVersion: request.protocolVersion,
+            projectId: request.projectId,
+            revision: request.expectedProjectRevision,
+            placementMode: request.placementMode,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            insertionAP: request.insertionAPMillimetres,
+            insertionML: request.insertionMLMillimetres,
+            depth: request.surfaceDepthMillimetres,
+            sagittalAngle: request.sagittalAngleDegrees,
+            layoutRotation: request.probeLayoutRotationDegrees,
+            name: request.name
+        )
+    }
+
+    public static func validateUpdate(
+        _ request: AtlasSurfaceProbePlanUpdateParameters
+    ) throws {
+        try validateSurfaceInput(
+            protocolVersion: request.protocolVersion,
+            projectId: request.projectId,
+            revision: request.expectedProjectRevision,
+            placementMode: request.placementMode,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            insertionAP: request.insertionAPMillimetres,
+            insertionML: request.insertionMLMillimetres,
+            depth: request.surfaceDepthMillimetres,
+            sagittalAngle: request.sagittalAngleDegrees,
+            layoutRotation: request.probeLayoutRotationDegrees,
+            name: request.name
+        )
+        try requireUUID(request.planId, "planId")
+        try requireSha(request.expectedPlanInputSha256, "expectedPlanInputSha256")
+    }
+
     public static func validateCatalogList(_ result: ProbeCatalogListResult) throws {
         try requireEnvelope(result.protocolVersion, result.status, "listed")
         guard result.catalogVersion == ProbePlanningContract.catalogVersion,
@@ -1397,6 +1652,58 @@ public enum ProbePlanningValidator {
         try validateCatalogModel(catalogModel, matches: result.plan)
     }
 
+    public static func validateCreatedMutation(
+        _ result: ProbePlanMutationResult,
+        request: AtlasSurfaceProbePlanCreateParameters,
+        catalogModel: ProbeCatalogModel
+    ) throws {
+        try validateMutation(
+            result,
+            projectId: request.projectId,
+            expectedStatus: "created",
+            expectedRevision: request.expectedProjectRevision + 1
+        )
+        try validateSurfaceMutationPlan(
+            result.plan,
+            expectedPlanId: nil,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            name: request.name,
+            insertionAP: request.insertionAPMillimetres,
+            insertionML: request.insertionMLMillimetres,
+            depth: request.surfaceDepthMillimetres,
+            sagittalAngle: request.sagittalAngleDegrees,
+            layoutRotation: request.probeLayoutRotationDegrees
+        )
+        try validateCatalogModel(catalogModel, matches: result.plan)
+    }
+
+    public static func validateUpdatedMutation(
+        _ result: ProbePlanMutationResult,
+        request: AtlasSurfaceProbePlanUpdateParameters,
+        catalogModel: ProbeCatalogModel
+    ) throws {
+        try validateMutation(
+            result,
+            projectId: request.projectId,
+            expectedStatus: "updated",
+            expectedRevision: request.expectedProjectRevision + 1
+        )
+        try validateSurfaceMutationPlan(
+            result.plan,
+            expectedPlanId: request.planId,
+            modelId: request.modelId,
+            modelVersion: request.modelVersion,
+            name: request.name,
+            insertionAP: request.insertionAPMillimetres,
+            insertionML: request.insertionMLMillimetres,
+            depth: request.surfaceDepthMillimetres,
+            sagittalAngle: request.sagittalAngleDegrees,
+            layoutRotation: request.probeLayoutRotationDegrees
+        )
+        try validateCatalogModel(catalogModel, matches: result.plan)
+    }
+
     public static func validateRemove(
         _ result: ProbePlanRemoveResult,
         projectId: String,
@@ -1447,9 +1754,9 @@ public enum ProbePlanningValidator {
               !result.content.isEmpty,
               !result.projectMutated
         else { throw invalid("Generated probe-region export identity or format is invalid.") }
-        let digest = SHA256.hash(data: Data(result.content.utf8)).map {
-            String(format: "%02x", $0)
-        }.joined()
+        let digest = LowercaseHex.encode(
+            SHA256.hash(data: Data(result.content.utf8))
+        )
         guard result.contentSha256 == digest else {
             throw invalid("Probe-region export content SHA-256 does not match its content.")
         }
@@ -1485,20 +1792,48 @@ public enum ProbePlanningValidator {
             modelDisplayName: plan.modelDisplayName,
             verificationStatus: plan.verificationStatus,
             inputSha256: plan.inputSha256,
+            placementMode: plan.placementMode,
             calibrationId: plan.calibrationId,
             calibrationVersion: plan.calibrationVersion,
             regionAnalysisAvailable: plan.regionAnalysisAvailable,
             regionAnalysisSha256: plan.regionAnalysisSha256,
             usableForNavigation: plan.usableForNavigation
         )
-        guard plan.sourceTarget.componentOrder == ["AP", "ML", "DV"],
-              plan.sourceTarget.units == "millimetre",
-              [plan.sourceTarget.apMillimetres, plan.sourceTarget.mlMillimetres,
-               plan.sourceTarget.dvMillimetres].allSatisfy(\.isFinite)
-        else { throw invalid("Probe source target must preserve finite AP/ML/DV millimetres.") }
+        let isSurfacePlan =
+            plan.provenance.planningAlgorithmVersion
+                == ProbePlanningContract.surfacePlanningAlgorithmVersion
+        if isSurfacePlan {
+            guard plan.placementMode == .atlasSurfaceAPML,
+                  plan.sourceTarget == nil,
+                  plan.manipulatorInput == nil,
+                  plan.placementInput == nil,
+                  let surfaceInput = plan.surfaceRelativeInput
+            else {
+                throw invalid(
+                    "Atlas-surface probe plan mixes direct inputs with legacy target fields."
+                )
+            }
+            try validateSurfaceRelativeInput(surfaceInput, placement: plan.placement)
+        } else {
+            guard let sourceTarget = plan.sourceTarget,
+                  plan.surfaceRelativeInput == nil,
+                  sourceTarget.componentOrder == ["AP", "ML", "DV"],
+                  sourceTarget.units == "millimetre",
+                  [sourceTarget.apMillimetres, sourceTarget.mlMillimetres,
+                   sourceTarget.dvMillimetres].allSatisfy(\.isFinite)
+            else {
+                throw invalid(
+                    "Probe source target must preserve finite AP/ML/DV millimetres."
+                )
+            }
+        }
         let placement = plan.placement
         try requireUUID(placement.placementId, "placementId")
         switch plan.provenance.planningAlgorithmVersion {
+        case ProbePlanningContract.surfacePlanningAlgorithmVersion:
+            guard placement.method == ProbePlanningContract.surfacePlacementMethod else {
+                throw invalid("Atlas-surface probe placement method is not the reviewed method.")
+            }
         case ProbePlanningContract.planningAlgorithmVersion:
             guard let placementInput = plan.placementInput,
                   placement.method == placementInput.mode.normalizedPlacementMethod
@@ -1594,6 +1929,9 @@ public enum ProbePlanningValidator {
             try validatePhysicalPoint(shank.entry)
             try validatePhysicalPoint(shank.tip)
         }
+        if isSurfacePlan {
+            try validateAtlasSurfaceShankGeometry(plan)
+        }
         var sites = Set<String>()
         for site in plan.recordingSites {
             guard shankIds.contains(site.shankId), !site.siteId.isEmpty,
@@ -1607,7 +1945,19 @@ public enum ProbePlanningValidator {
               plan.provenance.planInputSha256 == plan.inputSha256,
               plan.provenance.catalogVersion == ProbePlanningContract.catalogVersion
         else { throw invalid("Probe plan provenance does not match the displayed plan.") }
-        try requireSha(plan.provenance.calibrationSha256, "calibrationSha256")
+        if isSurfacePlan {
+            guard plan.calibrationId == nil,
+                  plan.calibrationVersion == nil,
+                  plan.provenance.calibrationSha256 == nil
+            else {
+                throw invalid("Atlas-surface probe provenance cannot claim a calibration.")
+            }
+        } else {
+            guard let calibrationSha256 = plan.provenance.calibrationSha256 else {
+                throw invalid("Calibrated probe provenance is missing its calibration digest.")
+            }
+            try requireSha(calibrationSha256, "calibrationSha256")
+        }
         try requireSha(plan.provenance.atlasMetadataSha256, "atlasMetadataSha256")
         try requireSha(plan.provenance.projectionSha256, "projectionSha256")
         guard !plan.warning.isEmpty else {
@@ -1696,6 +2046,7 @@ public enum ProbePlanningValidator {
             modelDisplayName: plan.modelDisplayName,
             verificationStatus: plan.verificationStatus,
             inputSha256: plan.inputSha256,
+            placementMode: plan.placementMode,
             calibrationId: plan.calibrationId,
             calibrationVersion: plan.calibrationVersion,
             regionAnalysisAvailable: plan.regionAnalysisAvailable,
@@ -1708,23 +2059,38 @@ public enum ProbePlanningValidator {
         planId: String,
         planVersion: Int,
         name: String,
-        targetId: String,
+        targetId: String?,
         modelId: String,
         modelVersion: String,
         modelDisplayName: String,
         verificationStatus: String,
         inputSha256: String,
-        calibrationId: String,
-        calibrationVersion: Int,
+        placementMode: ProbePlacementMode?,
+        calibrationId: String?,
+        calibrationVersion: Int?,
         regionAnalysisAvailable: Bool,
         regionAnalysisSha256: String?,
         usableForNavigation: Bool
     ) throws {
         try requireUUID(planId, "planId")
-        try requireUUID(targetId, "targetId")
-        try requireUUID(calibrationId, "calibrationId")
         try requireSha(inputSha256, "inputSha256")
-        guard planVersion > 0, calibrationVersion > 0,
+        let isSurfacePlan = placementMode == .atlasSurfaceAPML
+        if isSurfacePlan {
+            guard targetId == nil, calibrationId == nil, calibrationVersion == nil else {
+                throw invalid(
+                    "Atlas-surface probe summaries cannot claim a target or calibration."
+                )
+            }
+        } else {
+            guard let targetId, let calibrationId, let calibrationVersion,
+                  calibrationVersion > 0
+            else {
+                throw invalid("Calibrated probe summaries require target and calibration IDs.")
+            }
+            try requireUUID(targetId, "targetId")
+            try requireUUID(calibrationId, "calibrationId")
+        }
+        guard planVersion > 0,
               !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !modelId.isEmpty, !modelVersion.isEmpty, !modelDisplayName.isEmpty,
               acceptedVerificationStatuses.contains(verificationStatus),
@@ -1742,6 +2108,20 @@ public enum ProbePlanningValidator {
             && modelVersion == ProbePlanningContract.neuropixels2ModelVersion
             && modelDisplayName
                 == ProbePlanningContract.neuropixels2StandardFourShankDisplayName
+            && verificationStatus
+                == ProbePlanningContract.sourceTranscribedReviewPendingStatus
+        let isLegacyNeuropixels2Single =
+            modelId == ProbePlanningContract.legacyNeuropixels2SingleShankModelId
+            && modelVersion == ProbePlanningContract.neuropixels2ModelVersion
+            && modelDisplayName
+                == ProbePlanningContract.legacyNeuropixels2SingleShankDisplayName
+            && verificationStatus
+                == ProbePlanningContract.sourceTranscribedReviewPendingStatus
+        let isLegacyNeuropixels2StandardFour =
+            modelId == ProbePlanningContract.legacyNeuropixels2StandardFourShankModelId
+            && modelVersion == ProbePlanningContract.neuropixels2ModelVersion
+            && modelDisplayName
+                == ProbePlanningContract.legacyNeuropixels2StandardFourShankDisplayName
             && verificationStatus
                 == ProbePlanningContract.sourceTranscribedReviewPendingStatus
         let isNeuropixels2QuadBaseFour =
@@ -1762,6 +2142,8 @@ public enum ProbePlanningValidator {
             && verificationStatus == "user-defined-unverified"
         guard isNeuropixels2Single
             || isNeuropixels2StandardFour
+            || isLegacyNeuropixels2Single
+            || isLegacyNeuropixels2StandardFour
             || isNeuropixels2QuadBaseFour
             || isNeuropixels1
             || isGenericTestFixture
@@ -1815,7 +2197,8 @@ public enum ProbePlanningValidator {
                   model.verifiedDeviceLabelPermitted == false,
                   model.shankCount == 4,
                   model.siteCount == 5_120,
-                  model.warning == ProbePlanningContract.sourceTranscribedReviewPendingWarning
+                  model.warning
+                    == ProbePlanningContract.sourceTranscribedReviewPendingWarning
             else {
                 throw invalid(
                     "Neuropixels NP2 standard four-shank identity or warning changed."
@@ -1834,7 +2217,8 @@ public enum ProbePlanningValidator {
                   model.verifiedDeviceLabelPermitted == false,
                   model.shankCount == 4,
                   model.siteCount == 5_120,
-                  model.warning == ProbePlanningContract.sourceTranscribedReviewPendingWarning
+                  model.warning
+                    == ProbePlanningContract.legacySourceTranscribedReviewPendingWarning
             else {
                 throw invalid(
                     "Neuropixels NP2 Quad Base four-shank identity or warning changed."
@@ -1851,7 +2235,8 @@ public enum ProbePlanningValidator {
                   model.verifiedDeviceLabelPermitted == false,
                   model.shankCount == 1,
                   model.siteCount == 960,
-                  model.warning == ProbePlanningContract.sourceTranscribedReviewPendingWarning
+                  model.warning
+                    == ProbePlanningContract.legacySourceTranscribedReviewPendingWarning
             else {
                 throw invalid("Neuropixels NP1 identity or review-pending warning changed.")
             }
@@ -2037,11 +2422,9 @@ public enum ProbePlanningValidator {
             for (siteIndex, site) in shank.sites.enumerated() {
                 let row = siteIndex / 2
                 let column = siteIndex % 2
-                guard site.siteId == String(
-                    format: "shank-%d-electrode-%04d",
-                    shankIndex,
-                    siteIndex
-                ),
+                guard site.siteId
+                    == "shank-\(shankIndex)-electrode-"
+                    + zeroPaddedDecimal(siteIndex, minimumWidth: 4),
                     site.role == "recording",
                     site.bank == "virtual-bank-\(siteIndex / 384)",
                     site.axialFromTipMicrometres == Double(206 + 15 * row),
@@ -2103,7 +2486,8 @@ public enum ProbePlanningValidator {
             } else {
                 expectedLateral = column == 0 ? -24 : 8
             }
-            guard site.siteId == String(format: "electrode-%03d", index),
+            guard site.siteId
+                == "electrode-" + zeroPaddedDecimal(index, minimumWidth: 3),
                   site.role == (referenceSites.contains(index) ? "reference" : "recording"),
                   site.bank == "bank-\(index / 384)",
                   site.axialFromTipMicrometres == Double(209 + 20 * row),
@@ -2137,7 +2521,8 @@ public enum ProbePlanningValidator {
               shank.siteCount == 16
         else { throw invalid("Generic software-test probe geometry changed.") }
         for (index, site) in shank.sites.enumerated() {
-            guard site.siteId == String(format: "test-site-%02d", index + 1),
+            guard site.siteId
+                == "test-site-" + zeroPaddedDecimal(index + 1, minimumWidth: 2),
                   site.role == "recording",
                   site.bank == "software-test",
                   site.axialFromTipMicrometres == Double(index + 1) * 250,
@@ -2235,6 +2620,143 @@ public enum ProbePlanningValidator {
         ) else {
             throw invalid("Probe placement local basis violates the probe right-hand rule.")
         }
+    }
+
+    /// Validate the current direct-planning anchor and complete physical NP2
+    /// shanks independently of the detailed catalog response. Catalog shank-0
+    /// is user-facing "shank 1" and is the only AP/ML surface anchor.
+    private static func validateAtlasSurfaceShankGeometry(
+        _ plan: ProbePlanDetail
+    ) throws {
+        guard let input = plan.surfaceRelativeInput else {
+            throw invalid("Atlas-surface probe plan is missing its surface input.")
+        }
+        let expectedShankCount: Int
+        switch plan.modelId {
+        case ProbePlanningContract.neuropixels2SingleShankModelId:
+            expectedShankCount = 1
+        case ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            expectedShankCount = 4
+        default:
+            throw invalid("Atlas-surface planning supports only NP2003 or NP2013.")
+        }
+        guard plan.shanks.count == expectedShankCount,
+              plan.shanks.map(\.shankId) == (0 ..< expectedShankCount).map({ "shank-\($0)" })
+        else {
+            throw invalid(
+                "Atlas-surface geometry must retain catalog shank 1 as shank-0."
+            )
+        }
+
+        let placement = plan.placement
+        let canonicalEntry = vector(placement.canonicalFrame.entry)
+        let canonicalTarget = vector(placement.canonicalFrame.target)
+        let canonicalTip = vector(placement.canonicalFrame.tip)
+        let inward = vector(placement.inwardDirection)
+        let lateral = vector(placement.localLateralDirection)
+        let fullShankLength = 10_000 * placement.modelToPlacementUniformScale
+
+        guard vectorsApproximatelyEqual(
+            canonicalTarget,
+            canonicalTip,
+            tolerance: coordinateToleranceMicrometres
+        ) else {
+            throw invalid(
+                "Atlas-surface depth target must be the distal tip of shank 1."
+            )
+        }
+        let expectedSurface = input.surfaceEntry
+        guard approximatelyEqual(
+            plan.shanks[0].entry.apMicrometres,
+            expectedSurface.apMicrometres,
+            absoluteTolerance: coordinateToleranceMicrometres
+        ), approximatelyEqual(
+            plan.shanks[0].entry.dvMicrometres,
+            expectedSurface.dvMicrometres,
+            absoluteTolerance: coordinateToleranceMicrometres
+        ), approximatelyEqual(
+            plan.shanks[0].entry.mlMicrometres,
+            expectedSurface.mlMicrometres,
+            absoluteTolerance: coordinateToleranceMicrometres
+        ) else {
+            throw invalid(
+                "Atlas-surface AP/ML must anchor catalog shank-0 (user shank 1)."
+            )
+        }
+
+        for (index, shank) in plan.shanks.enumerated() {
+            guard let surfaceEntry = shank.surfaceEntry,
+                  let proximalEnd = shank.proximalEnd,
+                  let totalLength = shank.totalLengthMicrometres,
+                  totalLength.isFinite,
+                  approximatelyEqual(
+                    totalLength,
+                    fullShankLength,
+                    absoluteTolerance: coordinateToleranceMicrometres
+                  )
+            else {
+                throw invalid(
+                    "Atlas-surface shanks require explicit surface, proximal, and full-length geometry."
+                )
+            }
+            try validatePhysicalPoint(surfaceEntry)
+            try validatePhysicalPoint(proximalEnd)
+
+            let offset = lateral.scaled(by: Double(index) * 250)
+            let expectedEntry = canonicalEntry.adding(offset)
+            let expectedTip = canonicalTip.adding(offset)
+            let expectedProximal = expectedTip
+                .subtracting(inward.scaled(by: fullShankLength))
+            try validateAtlasPoint(
+                shank.entry,
+                matchesCanonical: expectedEntry,
+                label: "\(shank.shankId) implanted-path entry"
+            )
+            try validateAtlasPoint(
+                surfaceEntry,
+                matchesCanonical: expectedEntry,
+                label: "\(shank.shankId) surface-plane entry"
+            )
+            try validateAtlasPoint(
+                shank.tip,
+                matchesCanonical: expectedTip,
+                label: "\(shank.shankId) distal target"
+            )
+            try validateAtlasPoint(
+                proximalEnd,
+                matchesCanonical: expectedProximal,
+                label: "\(shank.shankId) proximal end"
+            )
+
+            let surfaceToTip = expectedTip.subtracting(expectedEntry)
+            let proximalToSurface = expectedEntry.subtracting(expectedProximal)
+            guard approximatelyEqual(
+                surfaceToTip.magnitude,
+                input.surfaceDepthMillimetres * 1_000,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ), approximatelyEqual(
+                proximalToSurface.magnitude + surfaceToTip.magnitude,
+                fullShankLength,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ), proximalToSurface.dot(inward) > 0
+            else {
+                throw invalid(
+                    "Atlas-surface depth and proximal extension do not partition the full shank."
+                )
+            }
+        }
+    }
+
+    private static func zeroPaddedDecimal(
+        _ value: Int,
+        minimumWidth: Int
+    ) -> String {
+        let digits = String(value.magnitude)
+        let padding = String(
+            repeating: "0",
+            count: max(0, minimumWidth - digits.count)
+        )
+        return (value < 0 ? "-" : "") + padding + digits
     }
 
     private static func validatePlacedGeometry(
@@ -2402,6 +2924,241 @@ public enum ProbePlanningValidator {
         }
     }
 
+    private static func validateSurfaceInput(
+        protocolVersion: Int,
+        projectId: String,
+        revision: Int,
+        placementMode: ProbePlacementMode,
+        modelId: String,
+        modelVersion: String,
+        insertionAP: Double,
+        insertionML: Double,
+        depth: Double,
+        sagittalAngle: Double,
+        layoutRotation: Int,
+        name: String?
+    ) throws {
+        guard protocolVersion == BridgeProtocolVersion.current else {
+            throw invalid("Probe request protocol version is unsupported.")
+        }
+        try requireUUID(projectId, "projectId")
+        let supportedModel =
+            modelId == ProbePlanningContract.neuropixels2SingleShankModelId
+                || modelId == ProbePlanningContract.neuropixels2StandardFourShankModelId
+        guard revision >= 0,
+              placementMode == .atlasSurfaceAPML,
+              supportedModel,
+              modelVersion == ProbePlanningContract.neuropixels2ModelVersion,
+              insertionAP.isFinite,
+              insertionML.isFinite,
+              depth.isFinite,
+              depth > 0,
+              depth <= 10,
+              sagittalAngle.isFinite,
+              abs(sagittalAngle) < 90,
+              layoutRotation == 0 || layoutRotation == 90
+        else {
+            throw invalid(
+                "Atlas-surface planning requires NP2003/NP2013, finite AP/ML, "
+                    + "0–10 mm depth, an angle strictly inside ±90°, and layout 0° or 90°."
+            )
+        }
+        if let name {
+            guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  name.count <= 200
+            else { throw invalid("Probe-plan name is empty or too long.") }
+        }
+    }
+
+    private static func validateSurfaceMutationPlan(
+        _ plan: ProbePlanDetail,
+        expectedPlanId: String?,
+        modelId: String,
+        modelVersion: String,
+        name: String?,
+        insertionAP: Double,
+        insertionML: Double,
+        depth: Double,
+        sagittalAngle: Double,
+        layoutRotation: Int
+    ) throws {
+        guard let input = plan.surfaceRelativeInput,
+              expectedPlanId == nil || plan.planId == expectedPlanId,
+              plan.targetId == nil,
+              plan.calibrationId == nil,
+              plan.placementMode == .atlasSurfaceAPML,
+              plan.modelId == modelId,
+              plan.modelVersion == modelVersion,
+              name == nil || plan.name == name,
+              input.mode == .atlasSurfaceAPML,
+              input.insertionAPMillimetres == insertionAP,
+              input.insertionMLMillimetres == insertionML,
+              input.surfaceDepthMillimetres == depth,
+              input.sagittalAngleDegrees == sagittalAngle,
+              input.probeLayoutRotationDegrees == layoutRotation
+        else {
+            throw invalid(
+                "Atlas-surface mutation does not acknowledge the submitted "
+                    + "probe identity and direct placement inputs."
+            )
+        }
+    }
+
+    private static func validateSurfaceRelativeInput(
+        _ input: AtlasSurfaceProbeInput,
+        placement: ProbePlacement
+    ) throws {
+        let reference = input.bregmaReference
+        let entry = input.surfaceEntry
+        let expectedEntryAP =
+            reference.apMicrometres - input.insertionAPMillimetres * 1_000
+        let expectedEntryML =
+            reference.mlMicrometres - input.insertionMLMillimetres * 1_000
+        let expectedEntryDV =
+            Double(input.surfaceDVIndex) * input.surfaceDVResolutionMicrometres
+        let expectedInwardAP =
+            -sin(input.sagittalAngleDegrees * .pi / 180)
+        let expectedInwardDV =
+            -cos(input.sagittalAngleDegrees * .pi / 180)
+        let expectedLateralAP = input.probeLayoutRotationDegrees == 0
+            ? -cos(input.sagittalAngleDegrees * .pi / 180)
+            : 0
+        let expectedLateralML = input.probeLayoutRotationDegrees == 90 ? 1.0 : 0.0
+        let expectedLateralDV = input.probeLayoutRotationDegrees == 0
+            ? sin(input.sagittalAngleDegrees * .pi / 180)
+            : 0
+
+        guard input.mode == .atlasSurfaceAPML,
+              reference.referenceId == ProbePlanningContract.surfaceBregmaReferenceId,
+              reference.atlasIdentifier == SafetyPolicy.supportedAtlasIdentifier,
+              reference.atlasVersion == SafetyPolicy.supportedAtlasVersion,
+              reference.frameId == ProbePlanningContract.atlasFrameId,
+              reference.componentOrder == ["AP", "DV", "ML"],
+              reference.units == "micrometre",
+              [reference.apMicrometres, reference.dvMicrometres,
+               reference.mlMicrometres].allSatisfy({ $0.isFinite && $0 >= 0 }),
+              !reference.sourceTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              reference.sourceUrl.hasPrefix("https://"),
+              !reference.sourceRevision.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              reference.sourceSha256 == ProbePlanningContract.surfaceBregmaSourceSHA256,
+              reference.retrievedOn.range(
+                  of: #"^\d{4}-\d{2}-\d{2}$"#,
+                  options: .regularExpression
+              ) != nil,
+              !reference.limitation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              input.insertionAPMillimetres.isFinite,
+              input.insertionMLMillimetres.isFinite,
+              input.surfaceDepthMillimetres.isFinite,
+              input.surfaceDepthMillimetres > 0,
+              input.surfaceDepthMillimetres <= 10,
+              input.sagittalAngleDegrees.isFinite,
+              abs(input.sagittalAngleDegrees) < 90,
+              input.probeLayoutRotationDegrees == 0
+                || input.probeLayoutRotationDegrees == 90,
+              entry.atlasIdentifier == reference.atlasIdentifier,
+              entry.atlasVersion == reference.atlasVersion,
+              entry.frameId == ProbePlanningContract.atlasFrameId,
+              entry.componentOrder == ["AP", "DV", "ML"],
+              entry.units == "micrometre",
+              [entry.apMicrometres, entry.dvMicrometres,
+               entry.mlMicrometres].allSatisfy(\.isFinite),
+              input.surfaceDVIndex >= 0,
+              input.surfaceDVResolutionMicrometres.isFinite,
+              input.surfaceDVResolutionMicrometres > 0,
+              !input.annotationSource.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              input.surfaceDefinitionVersion
+                == ProbePlanningContract.surfaceDefinitionVersion,
+              input.apSignConvention == ProbePlanningContract.surfaceAPSignConvention,
+              input.mlSignConvention == ProbePlanningContract.surfaceMLSignConvention,
+              input.depthConvention == ProbePlanningContract.surfaceDepthConvention,
+              input.angleConvention == ProbePlanningContract.surfaceAngleConvention,
+              input.layoutConvention == ProbePlanningContract.surfaceLayoutConvention
+        else {
+            throw invalid(
+                "Atlas-surface input is missing the reviewed coordinate, source, "
+                    + "surface, angle, or layout semantics."
+            )
+        }
+        try requireSha(input.annotationSha256, "annotationSha256")
+
+        guard approximatelyEqual(
+            entry.apMicrometres,
+            expectedEntryAP,
+            absoluteTolerance: coordinateToleranceMicrometres
+        ),
+            approximatelyEqual(
+                entry.mlMicrometres,
+                expectedEntryML,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ),
+            approximatelyEqual(
+                entry.dvMicrometres,
+                expectedEntryDV,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ),
+            approximatelyEqual(
+                placement.atlasFrame.entry.apMicrometres,
+                entry.apMicrometres,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ),
+            approximatelyEqual(
+                placement.atlasFrame.entry.dvMicrometres,
+                entry.dvMicrometres,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ),
+            approximatelyEqual(
+                placement.atlasFrame.entry.mlMicrometres,
+                entry.mlMicrometres,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ),
+            approximatelyEqual(
+                placement.insertionDepthMicrometres,
+                input.surfaceDepthMillimetres * 1_000,
+                absoluteTolerance: coordinateToleranceMicrometres
+            ),
+            approximatelyEqual(
+                placement.axialRotationDegrees,
+                Double(-90 + input.probeLayoutRotationDegrees),
+                absoluteTolerance: directionTolerance
+            ),
+            approximatelyEqual(
+                placement.inwardDirection.ap,
+                expectedInwardAP,
+                absoluteTolerance: directionTolerance
+            ),
+            approximatelyEqual(
+                placement.inwardDirection.ml,
+                0,
+                absoluteTolerance: directionTolerance
+            ),
+            approximatelyEqual(
+                placement.inwardDirection.dv,
+                expectedInwardDV,
+                absoluteTolerance: directionTolerance
+            ),
+            approximatelyEqual(
+                placement.localLateralDirection.ap,
+                expectedLateralAP,
+                absoluteTolerance: directionTolerance
+            ),
+            approximatelyEqual(
+                placement.localLateralDirection.ml,
+                expectedLateralML,
+                absoluteTolerance: directionTolerance
+            ),
+            approximatelyEqual(
+                placement.localLateralDirection.dv,
+                expectedLateralDV,
+                absoluteTolerance: directionTolerance
+            )
+        else {
+            throw invalid(
+                "Atlas-surface entry, depth, angle, or layout does not match "
+                    + "the normalized probe placement."
+            )
+        }
+    }
+
     private static func validateInput(
         protocolVersion: Int,
         projectId: String,
@@ -2457,7 +3214,13 @@ public enum ProbePlanningValidator {
         let requiresAcknowledgement: Bool
         switch modelId {
         case ProbePlanningContract.neuropixels2SingleShankModelId,
-             ProbePlanningContract.neuropixels2StandardFourShankModelId,
+             ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            guard modelVersion == ProbePlanningContract.neuropixels2ModelVersion else {
+                throw invalid("The requested Neuropixels 2.0 model version is not catalogued.")
+            }
+            requiresAcknowledgement = false
+        case ProbePlanningContract.legacyNeuropixels2SingleShankModelId,
+             ProbePlanningContract.legacyNeuropixels2StandardFourShankModelId,
              ProbePlanningContract.neuropixels2QuadBaseFourShankModelId:
             guard modelVersion == ProbePlanningContract.neuropixels2ModelVersion else {
                 throw invalid("The requested Neuropixels 2.0 model version is not catalogued.")

@@ -11,8 +11,7 @@ public enum MajorVesselDisplayFilter {
     public static let adjustmentStepMicrometres = 10.0
 
     public static var allowedMinimumDiameterRange: ClosedRange<Double> {
-        MajorVesselContract.minimumIncludedDiameterMicrometres
-            ... maximumMinimumDiameterMicrometres
+        MajorVesselContract.minimumIncludedDiameterMicrometres...maximumMinimumDiameterMicrometres
     }
 
     public static func clampedMinimumDiameterMicrometres(_ proposed: Double) -> Double {
@@ -45,7 +44,8 @@ public enum MajorVesselDisplayFilter {
               startRadiusMicrometres > 0,
               endRadiusMicrometres > 0
         else { return nil }
-        let minimumRadius = clampedMinimumDiameterMicrometres(
+        let minimumRadius =
+            clampedMinimumDiameterMicrometres(
             minimumDiameterMicrometres
         ) / 2
         let startOffset = startRadiusMicrometres - minimumRadius
@@ -172,7 +172,8 @@ public struct MajorVesselSliceSpatialIndex: Equatable, Sendable {
         for orientation: AtlasSliceOrientation,
         sliceIndex: Int
     ) -> [MajorVesselSegmentReference]? {
-        let buckets = switch orientation {
+        let buckets =
+            switch orientation {
         case .coronal: coronal
         case .sagittal: sagittal
         case .horizontal: horizontal
@@ -283,6 +284,69 @@ public enum MajorVesselSliceOverlayGeometry {
         minimumVisibleDiameterMicrometres: Double =
             MajorVesselContract.minimumIncludedDiameterMicrometres
     ) -> MajorVesselSliceOverlay {
+        makeDorsalProjection(
+            graph: graph,
+            atlas: atlas,
+            assetSHA256: assetSHA256,
+            minimumVisibleDiameterMicrometres:
+                minimumVisibleDiameterMicrometres,
+            cancellationCheck: {}
+        )
+    }
+
+    /// Builds the full-graph dorsal projection away from the caller's actor.
+    ///
+    /// The production vessel graph contains 119,755 source segments. Keeping
+    /// this traversal cancellable lets display-filter updates coalesce without
+    /// monopolizing the main actor or publishing a superseded projection.
+    public static func makeDorsalProjectionAsync(
+        geometry: MajorVesselGeometryResult,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres
+    ) async throws -> MajorVesselSliceOverlay {
+        try await makeDorsalProjectionAsync(
+            graph: geometry.graph,
+            atlas: geometry.atlas,
+            assetSHA256: geometry.provenance.derivedAssetSha256,
+            minimumVisibleDiameterMicrometres:
+                minimumVisibleDiameterMicrometres
+        )
+    }
+
+    public static func makeDorsalProjectionAsync(
+        graph: MajorVesselGraph,
+        atlas: ViewerAtlasIdentity,
+        assetSHA256: String,
+        minimumVisibleDiameterMicrometres: Double =
+            MajorVesselContract.minimumIncludedDiameterMicrometres
+    ) async throws -> MajorVesselSliceOverlay {
+        let worker = Task.detached(priority: .userInitiated) {
+            try makeDorsalProjection(
+                graph: graph,
+                atlas: atlas,
+                assetSHA256: assetSHA256,
+                minimumVisibleDiameterMicrometres:
+                    minimumVisibleDiameterMicrometres,
+                cancellationCheck: {
+                    try Task.checkCancellation()
+                }
+            )
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
+    }
+
+    private static func makeDorsalProjection(
+        graph: MajorVesselGraph,
+        atlas: ViewerAtlasIdentity,
+        assetSHA256: String,
+        minimumVisibleDiameterMicrometres: Double,
+        cancellationCheck: () throws -> Void
+    ) rethrows -> MajorVesselSliceOverlay {
+        try cancellationCheck()
         let minimumVisibleDiameterMicrometres =
             MajorVesselDisplayFilter.clampedMinimumDiameterMicrometres(
                 minimumVisibleDiameterMicrometres
@@ -291,6 +355,9 @@ public enum MajorVesselSliceOverlayGeometry {
         var segments: [MajorVesselSliceSegment] = []
         segments.reserveCapacity(graph.segmentCount)
         for runIndex in 0 ..< graph.runCount {
+            if runIndex.isMultiple(of: 256) {
+                try cancellationCheck()
+            }
             let runStart = graph.runOffsets[runIndex]
             let runEnd = graph.runOffsets[runIndex + 1]
             let sourceEdgeIndex = graph.sourceEdgeIndices[runIndex]
@@ -337,9 +404,8 @@ public enum MajorVesselSliceOverlayGeometry {
             orientation: .horizontal,
             sliceIndex: -1,
             assetSHA256: assetSHA256,
-            inPlaneResolutionMicrometres: (
-                resolution.apMicrometres * resolution.mlMicrometres
-            ).squareRoot(),
+            inPlaneResolutionMicrometres: (resolution.apMicrometres * resolution.mlMicrometres)
+                .squareRoot(),
             minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
             segments: segments
         )
@@ -355,7 +421,8 @@ public enum MajorVesselSliceOverlayGeometry {
             MajorVesselContract.minimumIncludedDiameterMicrometres,
         spatialIndex: MajorVesselSliceSpatialIndex? = nil
     ) -> MajorVesselSliceOverlay {
-        let references: [MajorVesselSegmentReference]? = if let spatialIndex,
+        let references: [MajorVesselSegmentReference]? =
+            if let spatialIndex,
                             spatialIndex.assetSHA256
                             == geometry.provenance.derivedAssetSha256,
                             spatialIndex.atlasMetadataSHA256 == geometry.atlas.metadataSha256
@@ -385,7 +452,8 @@ public enum MajorVesselSliceOverlayGeometry {
             MajorVesselContract.minimumIncludedDiameterMicrometres,
         spatialIndex: MajorVesselSliceSpatialIndex? = nil
     ) -> MajorVesselSliceOverlay {
-        let references: [MajorVesselSegmentReference]? = if let spatialIndex,
+        let references: [MajorVesselSegmentReference]? =
+            if let spatialIndex,
                             spatialIndex.assetSHA256 == assetSHA256,
                             spatialIndex.atlasMetadataSHA256 == atlas.metadataSha256
         {
@@ -425,9 +493,8 @@ public enum MajorVesselSliceOverlayGeometry {
                 orientation: orientation,
                 sliceIndex: sliceIndex,
                 assetSHA256: assetSHA256,
-                inPlaneResolutionMicrometres: (
-                    resolution[orientation.rowAxis] * resolution[orientation.columnAxis]
-                ).squareRoot(),
+                inPlaneResolutionMicrometres: (resolution[orientation.rowAxis]
+                    * resolution[orientation.columnAxis]).squareRoot(),
                 minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
                 segments: []
             )
@@ -443,18 +510,21 @@ public enum MajorVesselSliceOverlayGeometry {
             let end = graph.pointsASRMicrometres[pointIndex + 1]
             let startRadius = Double(graph.radiiMicrometres[pointIndex])
             let endRadius = Double(graph.radiiMicrometres[pointIndex + 1])
-            guard let diameterInterval = MajorVesselDisplayFilter.visibleInterval(
+            guard
+                let diameterInterval = MajorVesselDisplayFilter.visibleInterval(
                 startRadiusMicrometres: startRadius,
                 endRadiusMicrometres: endRadius,
                 minimumDiameterMicrometres: minimumVisibleDiameterMicrometres
-            ), let slabInterval = radiusBearingSlabInterval(
+                ),
+                let slabInterval = radiusBearingSlabInterval(
                 startFixed: Double(axisValue(start, fixedAxis)),
                 endFixed: Double(axisValue(end, fixedAxis)),
                 startRadius: startRadius,
                 endRadius: endRadius,
                 slabMinimum: slabMinimum,
                 slabMaximum: slabMaximum
-            ) else { return }
+                )
+            else { return }
             let lower = max(diameterInterval.lowerBound, slabInterval.lowerBound)
             let upper = min(diameterInterval.upperBound, slabInterval.upperBound)
             guard upper - lower > 1e-12 else { return }
@@ -511,9 +581,8 @@ public enum MajorVesselSliceOverlayGeometry {
             orientation: orientation,
             sliceIndex: sliceIndex,
             assetSHA256: assetSHA256,
-            inPlaneResolutionMicrometres: (
-                resolution[orientation.rowAxis] * resolution[orientation.columnAxis]
-            ).squareRoot(),
+            inPlaneResolutionMicrometres: (resolution[orientation.rowAxis]
+                * resolution[orientation.columnAxis]).squareRoot(),
             minimumVisibleDiameterMicrometres: minimumVisibleDiameterMicrometres,
             segments: segments
         )
@@ -530,19 +599,23 @@ public enum MajorVesselSliceOverlayGeometry {
         var lower = 0.0
         var upper = 1.0
         // center(t) + radius(t) >= slabMinimum
-        guard constrainNonnegativeLinear(
+        guard
+            constrainNonnegativeLinear(
             intercept: startFixed + startRadius - slabMinimum,
             slope: (endFixed - startFixed) + (endRadius - startRadius),
             lower: &lower,
             upper: &upper
-        ) else { return nil }
+            )
+        else { return nil }
         // slabMaximum - center(t) + radius(t) >= 0
-        guard constrainNonnegativeLinear(
+        guard
+            constrainNonnegativeLinear(
             intercept: slabMaximum - startFixed + startRadius,
             slope: -(endFixed - startFixed) + (endRadius - startRadius),
             lower: &lower,
             upper: &upper
-        ) else { return nil }
+            )
+        else { return nil }
         lower = min(1, max(0, lower))
         upper = min(1, max(0, upper))
         return lower <= upper ? lower ... upper : nil

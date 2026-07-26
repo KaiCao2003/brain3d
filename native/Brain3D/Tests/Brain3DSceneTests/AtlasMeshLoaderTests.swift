@@ -144,7 +144,7 @@ struct AtlasMeshLoaderTests {
             """.utf8
         )
         try data.write(to: obj, options: .atomic)
-        let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let sha = LowercaseHex.encode(SHA256.hash(data: data))
         return (
             root.standardizedFileURL,
             obj.standardizedFileURL,

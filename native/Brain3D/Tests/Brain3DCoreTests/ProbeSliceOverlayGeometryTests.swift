@@ -101,6 +101,42 @@ struct ProbeSliceOverlayGeometryTests {
         #expect(unrelated.markers.isEmpty)
     }
 
+    @Test("Slice intersections use the complete shaft, not only surface-to-target depth")
+    func completeShaftIntersection() throws {
+        let surface = point(ap: 75, dv: 50, ml: 75)
+        let shank = ProbePlacedShank(
+            shankId: "shank-0",
+            entry: surface,
+            tip: point(ap: 100, dv: 75, ml: 75),
+            widthMicrometres: 70,
+            thicknessMicrometres: 24,
+            conservativeEnvelopeRadiusMicrometres: 37,
+            envelopeDefinition: "circumscribed-radius-of-rectangular-cross-section",
+            surfaceEntry: surface,
+            proximalEnd: point(ap: 0, dv: -25, ml: 75, inside: false),
+            totalLengthMicrometres: 141.421_356_237
+        )
+        let overlay = ProbeSliceOverlayGeometry.make(
+            orientation: .coronal,
+            sliceIndex: 1,
+            resolution: resolution,
+            shape: shape,
+            entry: outsidePoint,
+            target: outsidePoint,
+            tip: outsidePoint,
+            shanks: [shank],
+            recordingSites: []
+        )
+
+        let intersection = try #require(overlay.shankIntersections.first)
+        guard case let .point(point) = intersection.geometry else {
+            Issue.record("The full proximal-to-distal shaft should cross this slice once.")
+            return
+        }
+        #expect(point.column == 3)
+        #expect(point.row == 0.5)
+    }
+
     @Test("A centerline lying in the plane is clipped to the image, not projected elsewhere")
     func coplanarIntersection() {
         let shank = ProbePlacedShank(

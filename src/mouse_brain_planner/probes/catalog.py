@@ -26,10 +26,14 @@ from mouse_brain_planner.domain.probe_models import (
     RecordingSiteDefinition,
 )
 
-PROBE_CATALOG_VERSION: Final = "brain3d-probe-catalog-v5"
+PROBE_CATALOG_VERSION: Final = "brain3d-probe-catalog-v6"
 
-NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID: Final = "imec-neuropixels-2.0-single-shank-np2003-np2004"
-NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID: Final = (
+NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID: Final = "imec-neuropixels-2.0-np2003"
+NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID: Final = "imec-neuropixels-2.0-np2013"
+LEGACY_NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID: Final = (
+    "imec-neuropixels-2.0-single-shank-np2003-np2004"
+)
+LEGACY_NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID: Final = (
     "imec-neuropixels-2.0-standard-four-shank-np2013-np2014"
 )
 NEUROPIXELS_2_0_QUAD_BASE_FOUR_SHANK_MODEL_ID: Final = (
@@ -239,15 +243,26 @@ def _neuropixels_2_0_shank(
     )
 
 
-def _neuropixels_2_0_single_shank_model() -> ProbeModelDefinition:
+def _neuropixels_2_0_single_shank_model(
+    *,
+    legacy_combined_identity: bool = False,
+) -> ProbeModelDefinition:
     """Return the source-transcribed NP2003/NP2004 physical geometry."""
 
     return ProbeModelDefinition(
-        model_id=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        model_id=(
+            LEGACY_NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID
+            if legacy_combined_identity
+            else NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID
+        ),
         model_version=NEUROPIXELS_2_0_MODEL_VERSION,
-        display_name="Neuropixels 2.0 — single shank (NP2003 / NP2004)",
+        display_name=(
+            "Neuropixels 2.0 — single shank (NP2003 / NP2004)"
+            if legacy_combined_identity
+            else "Neuropixels 2.0 — NP2003 · 1 shank"
+        ),
         manufacturer="imec",
-        product_code="NP2003 / NP2004",
+        product_code="NP2003 / NP2004" if legacy_combined_identity else "NP2003",
         verification=ProbeModelVerification(
             status=ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING,
             primary_sources=_neuropixels_2_0_sources(include_quad_base_spec=False),
@@ -259,15 +274,27 @@ def _neuropixels_2_0_single_shank_model() -> ProbeModelDefinition:
                 "All 1280 physical site centers are generated from the cited exact "
                 "source constants, but no independent human reviewer has checked the "
                 "complete table against the artifacts or a physical probe. This model "
-                "must remain review-pending and requires explicit acknowledgement."
+                + (
+                    "must remain review-pending and requires explicit acknowledgement."
+                    if legacy_combined_identity
+                    else (
+                        "must remain review-pending. The built-in source-traced NP2003 "
+                        "planning path retains this warning without a per-plan checkbox."
+                    )
+                )
             ),
         ),
         declared_shank_count=1,
         expected_site_count=_NP2_SITES_PER_SHANK,
         shanks=(_neuropixels_2_0_shank(0),),
         geometry_notes=(
-            "NP2003 and NP2004 have identical implantable single-shank geometry; "
-            "the order codes differ only by cap/package. Electrode IDs 0-1279 map "
+            (
+                "NP2003 and NP2004 have identical implantable single-shank geometry; "
+                "the order codes differ only by cap/package. "
+                if legacy_combined_identity
+                else "NP2003 implantable single-shank geometry. "
+            )
+            + "Electrode IDs 0-1279 map "
             "row-major into 640 two-site rows. Axial positions are 206 + 15*row "
             "micrometres from the physical tip. Lateral positions are -8 and +24 "
             "micrometres in the 70 micrometre shank frame. The large tip reference "
@@ -284,6 +311,7 @@ def _neuropixels_2_0_single_shank_model() -> ProbeModelDefinition:
 def _neuropixels_2_0_four_shank_model(
     *,
     quad_base: bool,
+    legacy_combined_identity: bool = False,
 ) -> ProbeModelDefinition:
     """Return an exact four-shank hardware identity with shared geometry."""
 
@@ -296,9 +324,17 @@ def _neuropixels_2_0_four_shank_model(
             "recording channels (384 per shank)."
         )
     else:
-        model_id = NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID
-        display_name = "Neuropixels 2.0 — standard four shanks (NP2013 / NP2014)"
-        product_code = "NP2013 / NP2014"
+        model_id = (
+            LEGACY_NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID
+            if legacy_combined_identity
+            else NEUROPIXELS_2_0_STANDARD_FOUR_SHANK_MODEL_ID
+        )
+        display_name = (
+            "Neuropixels 2.0 — standard four shanks (NP2013 / NP2014)"
+            if legacy_combined_identity
+            else "Neuropixels 2.0 — NP2013 · 4 shanks"
+        )
+        product_code = "NP2013 / NP2014" if legacy_combined_identity else "NP2013"
         channel_note = (
             "The standard electronics provide 384 simultaneously configurable "
             "recording channels across the four-shank probe."
@@ -321,8 +357,15 @@ def _neuropixels_2_0_four_shank_model(
                 "All 5120 physical site centers and four shank offsets are generated "
                 "from the cited exact source constants, but no independent human "
                 "reviewer has checked the complete table against the artifacts or a "
-                "physical probe. This model must remain review-pending and requires "
-                "explicit acknowledgement."
+                "physical probe. This model must remain review-pending"
+                + (
+                    " and requires explicit acknowledgement."
+                    if quad_base or legacy_combined_identity
+                    else (
+                        ". The built-in source-traced NP2013 planning path retains "
+                        "this warning without a per-plan checkbox."
+                    )
+                )
             ),
         ),
         declared_shank_count=_NP2_FOUR_SHANK_COUNT,
@@ -556,6 +599,11 @@ _SUPPORTED_MODELS_BY_IDENTITY: Final[dict[tuple[str, str], ProbeModelDefinition]
     (model.model_id, model.model_version): model for model in _SUPPORTED_MODELS
 }
 _ARCHIVED_COMPATIBILITY_MODELS: Final[tuple[ProbeModelDefinition, ...]] = (
+    _neuropixels_2_0_single_shank_model(legacy_combined_identity=True),
+    _neuropixels_2_0_four_shank_model(
+        quad_base=False,
+        legacy_combined_identity=True,
+    ),
     _neuropixels_2_0_four_shank_model(quad_base=True),
     _neuropixels_1_0_model(),
     _generic_test_model(),
@@ -591,6 +639,13 @@ def get_supported_probe_model(
         raise KeyError(
             f"unsupported production probe model identity {(model_id, model_version)!r}"
         ) from error
+
+
+def is_supported_probe_model_snapshot(model: ProbeModelDefinition) -> bool:
+    """Return whether ``model`` exactly matches one current built-in choice."""
+
+    canonical = _SUPPORTED_MODELS_BY_IDENTITY.get((model.model_id, model.model_version))
+    return canonical is not None and canonical == model
 
 
 def get_probe_model(model_id: str, model_version: str) -> ProbeModelDefinition:

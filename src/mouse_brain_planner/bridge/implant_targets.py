@@ -348,7 +348,7 @@ def remove_implant_target(
     referencing_plan_ids = sorted(
         str(plan.plan_uuid)
         for plan in snapshot.probe_plans
-        if plan.source_target.target_uuid == target_id
+        if (plan.source_target is not None and plan.source_target.target_uuid == target_id)
     )
     if referencing_plan_ids:
         raise BridgeError(

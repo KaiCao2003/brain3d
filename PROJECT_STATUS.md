@@ -5,9 +5,9 @@ Status reviewed: 2026-07-25
 ## Bottom line
 
 The current development tree implements the native research-planning path for independent 25 µm
-atlas slices, subject calibration and target projection, simplified NPX2 probe planning, and
-a synchronized SceneKit 3D view. A pinned VesSAP C57BL/6J major-vessel reference is visible in
-all five views; clearance analysis remains unavailable. The application remains an engineering
+atlas slices, direct atlas-surface NP2003/NP2013 planning, shared region highlighting, and a
+synchronized SceneKit 3D view. A pinned VesSAP C57BL/6J major-vessel reference is visible in all
+five views; clearance analysis remains unavailable. The application remains an engineering
 testing build—not a qualified distribution or a validated animal-surgery navigation system.
 
 The source is public at [KaiCao2003/brain3d](https://github.com/KaiCao2003/brain3d).
@@ -17,16 +17,16 @@ The source is public at [KaiCao2003/brain3d](https://github.com/KaiCao2003/brain
 | Area | Implemented behavior | Important boundary |
 | --- | --- | --- |
 | Native workspace | Exactly `Dorsal / Coronal / Sagittal / Horizontal / 3D`, one full-size view | No focus mode, crosshair, or 2×2 layout |
-| Atlas regions | Complete paged 840-structure ontology, common hierarchy/search/selection across all five modes | Selecting a region never moves or couples slice depths; only its 3D mesh loads |
+| Atlas regions | Complete paged 840-structure ontology, common hierarchy/search/selection, descendant-inclusive annotation highlight in all four 2D modes, and the same selected mesh in 3D | Selecting a region never moves or couples slice depths; zero-voxel structures are not fabricated |
 | Atlas slices | Independent persisted depths, buttons/slider/wheel, editable one-based slice number, pan/zoom, click-to-replace region label, and explicit atlas-physical coordinate header | `allen_mouse_25um` v1.2 only; 10 µm excluded from testing; header coordinates are not bregma-relative |
 | 3D | SceneKit whole-brain mesh, camera control/reset, non-cortical region highlight, probe envelopes, and major-vessel tubes | Rendering consumes schema-checked brain/probe/vessel geometry from the backend |
-| Coordinates | Required subject identity and signed AP/ML/DV millimetres from bregma | AP− posterior, ML− animal-left (screen-right in reviewed 2D presets), DV− deep/ventral |
-| Calibration | Create/list/inspect/validate/activate/remove subject calibration; QC-gated target projection; bregma-before-lambda, atlas-midline/laterality checks, and full skull/atlas fit reproduction | No default Allen bregma transform is invented; changed/rehashed matrices, residuals, leveling angles, or QC fail closed |
-| Probes | Production selector contains only NP2 single and standard four-shank; exact catalog snapshots; new plans use implant site + name + azimuth/elevation/depth/roll with 2D/3D overlays; existing-plan edits require Apply changes or Revert; meaningful uncreated drafts require Create plan or Discard draft | Manufacturer models are source-transcribed and review-pending, not independently verified; unapplied or uncreated edits cannot be silently discarded, saved, or exported |
+| Coordinates | Required animal-only context plus signed surface-insertion AP/ML millimetres from a named Pinpoint/Urchin profile, local annotation-surface depth, one sagittal angle, and layout | AP+ anterior/AP− posterior; ML+ right/ML− left; positive angle A→P/negative P→A; the profile is not Allen-official or animal-specific |
+| Direct surface | Exact superior boundary of the first nonzero annotation voxel at the resolved AP/ML column; persisted source/digest and load-time rederivation | Population-atlas surface, not measured pia/skull/current-animal anatomy |
+| Probes | Primary selector contains only `NP2003` and `NP2013`; normal NP2013 layout is sagittal and `90°` is clockwise from dorsal; numeric edits commit on Return/focus loss and atomic selector changes update immediately | Built-ins are source-transcribed and review-pending, not independently verified; v4 has no target/calibration prerequisite, geometry checkbox, or Apply button |
 | Major vessels | VesSAP BL6J-no1, nominal diameter ≥30 µm, overlaid on Dorsal/Coronal/Sagittal/Horizontal/3D; visible-diameter filter is adjustable from 30–250 µm | One cleared ex-vivo population reference; geometry is reduced on a 50 µm spatial grid; no capillaries |
-| Surgery-plan PDF | Direct-PDF two-page protocol prefill, one target-centred view or all five, then one AP/`|ML|`-matched page from `MBSC_Figs_with_Layers.pdf`; each planning page has a dedicated exact-coordinate line | User-owned PDF locations are saved once in Settings and are not bundled; disconnected volumes must be reconnected; planning titles/coordinates and final order are verified |
+| Surgery-plan PDF | Direct-PDF two-page protocol prefill, one plan-centred view or all five, then one AP/`|ML|`-matched page from `MBSC_Figs_with_Layers.pdf`; v4 pages print AP/ML, local-surface depth, signed angle, and layout | User-owned PDF locations are saved once in Settings and are not bundled; disconnected volumes must be reconnected; planning titles/coordinates and final order are verified |
 | Vessel analysis | Unavailable; geometry is display-only and analysis returns `VESSEL_ANALYSIS_UNAVAILABLE` | No conflict, no-conflict, clearance, absence, suitability, or safety claim is produced |
-| Projects | Schema-8 revisioned, checksummed `.mouseplan` save/open, migrations, backup recovery, persisted calibration rederivation, exact probe-model validation, and full v2/v3 probe reconstruction | Schema-7 data migrates without guessed geometry; stale revisions, source mismatches, altered catalog geometry, translated or same-target alternate-angle rehashed trajectories, and invalid legacy calibration fits fail closed; v1 probes are load/review only until updated |
+| Projects | Schema-9 revisioned, checksummed `.mouseplan` save/open, migrations, backup recovery, v4 surface rederivation, exact probe-model validation, and legacy v2/v3 reconstruction | Schema-8→9 preserves existing v1–v3 targets/calibrations without guessed conversion; stale sources, altered geometry, forged surface evidence, and invalid legacy fits fail closed |
 | Draft lifecycle | One main planning window with an app-owned probe draft; same-context window/sidebar reconstruction preserves typed values; open/reconnect/quit and plan changes are dirty-state guarded | Closing the main window does not quit the app or silently discard the current draft |
 
 Population vascular density and subject dorsal-image registration remain archived compatibility
@@ -35,16 +35,16 @@ they are not shown in the primary UI, and they are not interpreted as vessel pat
 
 ## Probe evidence state
 
-The catalog defaults to Neuropixels 2.0 single shank and exposes only complete 1,280-site
-`NP2003`/`NP2004` geometry and a 5,120-site standard `NP2013`/`NP2014` choice; both have 384
-simultaneous channels. Quad Base, NP1, and the synthetic fixture remain archived definitions for
-old-project compatibility and tests, not selectable new hardware. Digests, retrieval dates,
-coordinate rules, product identities, shank dimensions and offsets, tip geometry, references,
-and banks are retained.
+The primary selector exposes only the complete 1,280-site `NP2003` and 5,120-site standard
+four-shank `NP2013`; both have 384 simultaneous channels. `NP2004`/`NP2014` remain cited where
+the pinned sources group equivalent physical geometries, not as extra UI choices. Quad Base,
+NP1, and the synthetic fixture remain archived definitions for old-project compatibility and
+tests. Digests, retrieval dates, coordinate rules, product identities, shank dimensions and
+offsets, tip geometry, references, and banks are retained.
 
 Its exact status is `source-transcribed-review-pending`. Independent full-table review has not
-been completed, so the UI requires explicit acknowledgement. The generic 16-site entry is a
-synthetic software-test model and is labeled accordingly.
+been completed. The v4 UI does not add a per-plan geometry checkbox and does not describe either
+model as independently verified. The generic 16-site entry is a synthetic software-test model.
 
 Project validation compares every catalog-owned persisted model against its exact source-pinned
 definition, including provenance, verification state, shank and tip geometry, and the complete
@@ -76,9 +76,11 @@ See [the VesSAP derivation and validation record](docs/VESSAP_MAJOR_VESSELS.md).
 
 ## Engineering evidence and remaining qualification work
 
-Python tests cover source integrity, coordinate transforms, calibration, probe placement, exact
-voxel traversal, the vessel display/analysis boundary, persistence, and real cached atlas paths.
-Persisted-plan tests reconstruct v2/v3 geometry from preserved planning inputs and reject
+Python tests cover source integrity, coordinate transforms, direct AP/ML sign handling, exact
+annotation-surface resolution, positive/negative sagittal angle and layout direction, probe
+placement, region overlays, voxel traversal, the vessel display/analysis boundary, persistence,
+and real cached atlas paths. Persisted-plan tests rederive v4 surface geometry and reconstruct
+legacy v2/v3 geometry from preserved planning inputs; they reject forged surface evidence,
 translated/rehashed geometry, same-target alternate-angle geometry, projection-digest forgeries,
 changed/rehashed catalog model snapshots, and legacy calibrations that violate AP ordering or
 atlas midline/laterality semantics. Calibration tests independently rerun both production fits
@@ -88,8 +90,9 @@ or region analysis until updated; vessel-clearance analysis is unavailable for e
 Legacy synthetic tests preserve isolated tapered-geometry contracts, but the production bridge
 cannot expose them. Swift tests cover strict protocol decoding, independent view state, viewport
 math, complete ontology paging/closure, slice overlays, SceneKit transforms, bounded mesh
-caching, a singleton main-window policy with app-owned same-context draft retention, and an
-off-screen composite containing whole brain, Thalamus, NP2, and VesSAP vessels.
+caching, descendant-inclusive 2D region compositing, a singleton main-window policy with
+app-owned same-context draft retention, and an off-screen composite containing whole brain,
+Thalamus, NP2, and VesSAP vessels.
 Surgery-export tests cover the exact 132-page atlas catalog, historical Bregma/Interaural
 convention, AP/`|ML|` matching, direct protocol-PDF overlay units, per-page vessel
 identity/count disclosure, bounded long subject/target identity, exact planning-page coordinate

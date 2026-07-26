@@ -35,6 +35,9 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     migration only copies the schema-7 payload and bumps the version: current
     ``PlannerProject`` validation may then accept coherent state or reject
     unsafe legacy geometry, but migration never repairs or reinterprets it.
+    Schema 9 adds the optional calibration-free atlas-surface probe-plan
+    representation. Existing schema-8 plans retain their exact target and
+    calibration semantics; migration only advances the envelope version.
     Earlier projects otherwise default new state to empty without altering
     legacy AP/ML/DV coordinates.
     """
@@ -53,33 +56,45 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
             )
         return payload
     if version == 1:
-        return _migrate_v7_to_v8(
-            _migrate_v6_to_v7(
-                _migrate_v5_to_v6(
-                    _migrate_v4_to_v5(
-                        _migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload)))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(
+                _migrate_v6_to_v7(
+                    _migrate_v5_to_v6(
+                        _migrate_v4_to_v5(
+                            _migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload)))
+                        )
                     )
                 )
             )
         )
     if version == 2:
-        return _migrate_v7_to_v8(
-            _migrate_v6_to_v7(
-                _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload))))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(
+                _migrate_v6_to_v7(
+                    _migrate_v5_to_v6(
+                        _migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload)))
+                    )
+                )
             )
         )
     if version == 3:
-        return _migrate_v7_to_v8(
-            _migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload))))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(
+                _migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload))))
+            )
         )
     if version == 4:
-        return _migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(payload))))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(payload))))
+        )
     if version == 5:
-        return _migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(payload)))
+        return _migrate_v8_to_v9(_migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(payload))))
     if version == 6:
-        return _migrate_v7_to_v8(_migrate_v6_to_v7(payload))
+        return _migrate_v8_to_v9(_migrate_v7_to_v8(_migrate_v6_to_v7(payload)))
     if version == 7:
-        return _migrate_v7_to_v8(payload)
+        return _migrate_v8_to_v9(_migrate_v7_to_v8(payload))
+    if version == 8:
+        return _migrate_v8_to_v9(payload)
     raise UnsupportedProjectSchemaError(
         f"project schema {version!r} cannot be migrated to {PROJECT_SCHEMA_VERSION}"
     )
@@ -298,6 +313,19 @@ def _migrate_v7_to_v8(payload: dict[str, Any]) -> dict[str, Any]:
         )
     migrated = copy.deepcopy(payload)
     migrated["schema_version"] = 8
+    return migrated
+
+
+def _migrate_v8_to_v9(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add no inferred geometry while enabling the new v4 plan representation."""
+
+    missing = {"project_revision", "probe_vessel_analyses"} - set(payload)
+    if missing:
+        raise UnsupportedProjectSchemaError(
+            "schema 8 project is missing required persisted state: " + ", ".join(sorted(missing))
+        )
+    migrated = copy.deepcopy(payload)
+    migrated["schema_version"] = 9
     return migrated
 
 

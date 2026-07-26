@@ -145,6 +145,147 @@ struct ProbePlanningProtocolTests {
         ])
     }
 
+    @Test("Atlas-surface requests expose only the simplified NP2 controls")
+    func atlasSurfaceRequestKeys() throws {
+        let create = AtlasSurfaceProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            modelId: ProbePlanningContract.neuropixels2SingleShankModelId,
+            modelVersion: ProbePlanningContract.neuropixels2ModelVersion,
+            insertionAPMillimetres: -1.5,
+            insertionMLMillimetres: -0.8,
+            surfaceDepthMillimetres: 2.3,
+            sagittalAngleDegrees: 12,
+            probeLayoutRotationDegrees: 0
+        )
+        #expect(try keys(create) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "placementMode",
+            "modelId", "modelVersion", "insertionAPMillimetres",
+            "insertionMLMillimetres", "surfaceDepthMillimetres",
+            "sagittalAngleDegrees", "probeLayoutRotationDegrees",
+        ])
+        try ProbePlanningValidator.validateCreate(create)
+
+        let update = AtlasSurfaceProbePlanUpdateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 8,
+            planId: planId,
+            expectedPlanInputSha256: hex("a"),
+            modelId: ProbePlanningContract.neuropixels2StandardFourShankModelId,
+            modelVersion: ProbePlanningContract.neuropixels2ModelVersion,
+            insertionAPMillimetres: -1.4,
+            insertionMLMillimetres: 0.9,
+            surfaceDepthMillimetres: 3.1,
+            sagittalAngleDegrees: -8,
+            probeLayoutRotationDegrees: 90
+        )
+        #expect(try keys(update) == [
+            "protocolVersion", "projectId", "expectedProjectRevision", "planId",
+            "expectedPlanInputSha256", "placementMode", "modelId", "modelVersion",
+            "insertionAPMillimetres", "insertionMLMillimetres",
+            "surfaceDepthMillimetres", "sagittalAngleDegrees",
+            "probeLayoutRotationDegrees",
+        ])
+        try ProbePlanningValidator.validateUpdate(update)
+
+        let tooDeep = AtlasSurfaceProbePlanCreateParameters(
+            projectId: projectId,
+            expectedProjectRevision: 7,
+            modelId: ProbePlanningContract.neuropixels2SingleShankModelId,
+            modelVersion: ProbePlanningContract.neuropixels2ModelVersion,
+            insertionAPMillimetres: 0,
+            insertionMLMillimetres: 0,
+            surfaceDepthMillimetres: 10.1,
+            sagittalAngleDegrees: 0,
+            probeLayoutRotationDegrees: 0
+        )
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validateCreate(tooDeep)
+        }
+    }
+
+    @Test("Atlas-surface responses retain trustworthy sign, surface, and layout evidence")
+    func atlasSurfacePlanValidation() throws {
+        let result = try decode(
+            ProbePlanGetResult.self,
+            [
+                "protocolVersion": 1,
+                "status": "found",
+                "projectId": projectId,
+                "projectRevision": 7,
+                "plan": surfacePlanDetail(),
+                "regionAnalysis": NSNull(),
+                "majorVesselAnalysis": NSNull(),
+            ]
+        )
+        try ProbePlanningValidator.validatePlanGet(
+            result,
+            projectId: projectId,
+            projectRevision: 7,
+            planId: planId
+        )
+        let input = try #require(result.plan.surfaceRelativeInput)
+        #expect(result.plan.targetId == nil)
+        #expect(result.plan.calibrationId == nil)
+        #expect(input.insertionAPMillimetres == 4.2)
+        #expect(input.insertionMLMillimetres == -3.7)
+        #expect(input.surfaceDepthMillimetres == 3.2)
+        #expect(input.sagittalAngleDegrees == 0)
+        #expect(input.probeLayoutRotationDegrees == 0)
+        #expect(input.surfaceEntry.mlMicrometres == 9_400)
+        #expect(
+            result.plan.placement.atlasFrame.entry.mlMicrometres
+                == input.surfaceEntry.mlMicrometres
+        )
+        #expect(
+            result.plan.shanks.first?.entry.mlMicrometres
+                == input.surfaceEntry.mlMicrometres
+        )
+        #expect(result.plan.placement.axialRotationDegrees == -90)
+        let primaryShank = try #require(result.plan.shanks.first)
+        #expect(primaryShank.surfaceAnchor == primaryShank.entry)
+        #expect(primaryShank.totalLengthMicrometres == 10_000)
+        #expect(primaryShank.proximalEnd?.insideAtlas == false)
+        let proximalDV = try #require(primaryShank.proximalEnd?.dvMicrometres)
+        #expect(proximalDV < primaryShank.entry.dvMicrometres)
+        #expect(result.plan.hasCurrentPlanningGeometry)
+    }
+
+    @Test("Atlas-surface validation rejects the former ML addition formula")
+    func atlasSurfacePlanRejectsOldMLFormula() throws {
+        var plan = surfacePlanDetail()
+        var input = try #require(
+            plan["surfaceRelativeInput"] as? [String: Any]
+        )
+        // The fixture entry is 9.4 mm in BrainGlobe physical ML. It is valid
+        // for operator ML -3.7 mm because physical ML increases animal-left:
+        // 5.7 - (-3.7) = 9.4. Reinterpreting the same entry as ML +3.7 is the
+        // former, laterality-reversed addition formula and must fail closed.
+        input["insertionMLMillimetres"] = 3.7
+        plan["surfaceRelativeInput"] = input
+        let result = try decode(
+            ProbePlanGetResult.self,
+            [
+                "protocolVersion": 1,
+                "status": "found",
+                "projectId": projectId,
+                "projectRevision": 7,
+                "plan": plan,
+                "regionAnalysis": NSNull(),
+                "majorVesselAnalysis": NSNull(),
+            ]
+        )
+
+        #expect(throws: ProbePlanningValidationError.self) {
+            try ProbePlanningValidator.validatePlanGet(
+                result,
+                projectId: projectId,
+                projectRevision: 7,
+                planId: planId
+            )
+        }
+    }
+
     @Test("Mutation responses must acknowledge the submitted plan and placement")
     func mutationResponseBindsRequest() throws {
         let catalogModel = try decodedCatalogModel(
@@ -619,6 +760,7 @@ struct ProbePlanningProtocolTests {
             "ENTRY_ANGLES_DEPTH",
             "TARGET_ANGLES_DEPTH",
             "STEREOTAXIC_TARGET_MANIPULATOR",
+            "ATLAS_SURFACE_AP_ML",
         ])
         #expect(ProbePlacementMode.entryAndTarget.requiresEntryCoordinates)
         #expect(!ProbePlacementMode.entryAndTarget.requiresAnglesAndDepth)
@@ -626,6 +768,8 @@ struct ProbePlanningProtocolTests {
         #expect(ProbePlacementMode.entryAnglesDepth.requiresAnglesAndDepth)
         #expect(!ProbePlacementMode.targetAnglesDepth.requiresEntryCoordinates)
         #expect(ProbePlacementMode.targetAnglesDepth.requiresAnglesAndDepth)
+        #expect(!ProbePlacementMode.atlasSurfaceAPML.requiresEntryCoordinates)
+        #expect(!ProbePlacementMode.atlasSurfaceAPML.requiresAnglesAndDepth)
 
         let missingEntry = ProbePlanCreateParameters(
             projectId: projectId,
@@ -743,7 +887,7 @@ struct ProbePlanningProtocolTests {
         }
     }
 
-    @Test("NP2 hardware identities preserve every site and acknowledgement gate")
+    @Test("NP2 identities preserve every site without gating the public models")
     func neuropixels2CatalogAndCreateGate() throws {
         let configurations = [
             (
@@ -754,7 +898,8 @@ struct ProbePlanningProtocolTests {
                 shankCount: 1,
                 siteCount: 1_280,
                 sourceCount: 5,
-                simultaneousChannelCount: 384
+                simultaneousChannelCount: 384,
+                requiresAcknowledgement: false
             ),
             (
                 fourShank: true,
@@ -764,7 +909,8 @@ struct ProbePlanningProtocolTests {
                 shankCount: 4,
                 siteCount: 5_120,
                 sourceCount: 5,
-                simultaneousChannelCount: 384
+                simultaneousChannelCount: 384,
+                requiresAcknowledgement: false
             ),
             (
                 fourShank: true,
@@ -774,7 +920,8 @@ struct ProbePlanningProtocolTests {
                 shankCount: 4,
                 siteCount: 5_120,
                 sourceCount: 6,
-                simultaneousChannelCount: 1_536
+                simultaneousChannelCount: 1_536,
+                requiresAcknowledgement: true
             ),
         ]
 
@@ -837,7 +984,11 @@ struct ProbePlanningProtocolTests {
                 modelVersion: ProbePlanningContract.neuropixels2ModelVersion,
                 acknowledged: false
             )
-            #expect(throws: ProbePlanningValidationError.self) {
+            if configuration.requiresAcknowledgement {
+                #expect(throws: ProbePlanningValidationError.self) {
+                    try ProbePlanningValidator.validateCreate(unacknowledged)
+                }
+            } else {
                 try ProbePlanningValidator.validateCreate(unacknowledged)
             }
             try ProbePlanningValidator.validateCreate(probeCreate(
@@ -1437,7 +1588,7 @@ struct ProbePlanningProtocolTests {
             expectedProjectRevision: 7,
             planId: result.plan.planId,
             expectedPlanInputSha256: result.plan.inputSha256,
-            targetId: result.plan.targetId,
+            targetId: result.plan.targetId ?? "",
             modelId: result.plan.modelId,
             modelVersion: result.plan.modelVersion,
             name: result.plan.name,
@@ -1524,9 +1675,9 @@ struct ProbePlanningProtocolTests {
             ]
         ).regionAnalysis
         let content = "record_type,plan_id\nregion_segment,\(planId)\n"
-        let digest = SHA256.hash(data: Data(content.utf8)).map {
-            String(format: "%02x", $0)
-        }.joined()
+        let digest = LowercaseHex.encode(
+            SHA256.hash(data: Data(content.utf8))
+        )
         let generationRequest = ProbeRegionExportParameters(
             projectId: projectId,
             expectedProjectRevision: 8,
@@ -1687,6 +1838,151 @@ struct ProbePlanningProtocolTests {
 
     private func planDetail() -> [String: Any] {
         try! planDetail(matchingCatalog: genericCatalogModel(detailed: true))
+    }
+
+    private func surfacePlanDetail() -> [String: Any] {
+        let frameId = "ATLAS_CANONICAL_AP_ML_DV_UM:test"
+        let entry = TestVector3(ap: -1_000, ml: -9_400, dv: -100)
+        let inward = TestVector3(ap: 0, ml: 0, dv: -1)
+        let tip = entry.adding(inward.scaled(by: 3_200))
+        let target = tip
+        let proximalEnd = tip.subtracting(inward.scaled(by: 10_000))
+        let lateral = TestVector3(ap: -1, ml: 0, dv: 0)
+        let normal = TestVector3(ap: 0, ml: -1, dv: 0)
+        let physicalEntry = physical(canonical: entry, voxel: [40, 4, 376])
+        let physicalTip = physical(canonical: tip, voxel: [40, 132, 376])
+        let physicalTarget = physicalTip
+        let physicalProximalEnd = physicalOutside(canonical: proximalEnd)
+
+        return [
+            "planId": planId,
+            "planVersion": 1,
+            "name": "NP2003 · AP 4.2 · ML -3.7",
+            "targetId": NSNull(),
+            "targetLabel": NSNull(),
+            "modelId": ProbePlanningContract.neuropixels2SingleShankModelId,
+            "modelVersion": ProbePlanningContract.neuropixels2ModelVersion,
+            "modelDisplayName":
+                ProbePlanningContract.neuropixels2SingleShankDisplayName,
+            "verificationStatus":
+                ProbePlanningContract.sourceTranscribedReviewPendingStatus,
+            "placementMode": ProbePlacementMode.atlasSurfaceAPML.rawValue,
+            "inputSha256": hex("a"),
+            "calibrationId": NSNull(),
+            "calibrationVersion": NSNull(),
+            "regionAnalysisAvailable": false,
+            "regionAnalysisSha256": NSNull(),
+            "sourceTarget": NSNull(),
+            "manipulatorInput": NSNull(),
+            "placementInput": NSNull(),
+            "surfaceRelativeInput": [
+                "mode": ProbePlacementMode.atlasSurfaceAPML.rawValue,
+                "bregmaReference": [
+                    "referenceId": ProbePlanningContract.surfaceBregmaReferenceId,
+                    "atlasIdentifier": SafetyPolicy.supportedAtlasIdentifier,
+                    "atlasVersion": SafetyPolicy.supportedAtlasVersion,
+                    "frameId": ProbePlanningContract.atlasFrameId,
+                    "componentOrder": ["AP", "DV", "ML"],
+                    "units": "micrometre",
+                    "apMicrometres": 5_200.0,
+                    "dvMicrometres": 332.0,
+                    "mlMicrometres": 5_700.0,
+                    "sourceTitle": "Pinpoint Allen CCF bregma defaults",
+                    "sourceUrl": "https://example.invalid/pinned-pinpoint-source",
+                    "sourceRevision": "git commit pinned",
+                    "sourceSha256": ProbePlanningContract.surfaceBregmaSourceSHA256,
+                    "retrievedOn": "2026-07-25",
+                    "limitation":
+                        "Population-atlas convention; not an individual registration.",
+                ],
+                "insertionAPMillimetres": 4.2,
+                "insertionMLMillimetres": -3.7,
+                "surfaceDepthMillimetres": 3.2,
+                "sagittalAngleDegrees": 0.0,
+                "probeLayoutRotationDegrees": 0,
+                "surfaceEntry": [
+                    "atlasIdentifier": SafetyPolicy.supportedAtlasIdentifier,
+                    "atlasVersion": SafetyPolicy.supportedAtlasVersion,
+                    "frameId": ProbePlanningContract.atlasFrameId,
+                    "componentOrder": ["AP", "DV", "ML"],
+                    "units": "micrometre",
+                    "apMicrometres": 1_000.0,
+                    "dvMicrometres": 100.0,
+                    "mlMicrometres": 9_400.0,
+                ],
+                "surfaceDVIndex": 4,
+                "surfaceDVResolutionMicrometres": 25.0,
+                "annotationSource": "brainglobe allen_mouse_25um annotation",
+                "annotationSha256": hex("e"),
+                "surfaceDefinitionVersion":
+                    ProbePlanningContract.surfaceDefinitionVersion,
+                "apSignConvention": ProbePlanningContract.surfaceAPSignConvention,
+                "mlSignConvention": ProbePlanningContract.surfaceMLSignConvention,
+                "depthConvention": ProbePlanningContract.surfaceDepthConvention,
+                "angleConvention": ProbePlanningContract.surfaceAngleConvention,
+                "layoutConvention": ProbePlanningContract.surfaceLayoutConvention,
+            ],
+            "placement": [
+                "placementId": "55555555-5555-4555-8555-555555555555",
+                "method": ProbePlanningContract.surfacePlacementMethod,
+                "azimuthDegrees": 0.0,
+                "elevationDegrees": -90.0,
+                "insertionDepthMicrometres": 3_200.0,
+                "axialRotationDegrees": -90.0,
+                "angleConvention": ProbePlanningContract.angleConvention,
+                "inwardDirection": direction(frameId: frameId, vector: inward),
+                "localLateralDirection": direction(frameId: frameId, vector: lateral),
+                "localNormalDirection": direction(frameId: frameId, vector: normal),
+                "modelToPlacementUniformScale": 1.0,
+                "canonicalFrame": [
+                    "frameId": frameId,
+                    "componentOrder": ["AP", "ML", "DV"],
+                    "units": "micrometre",
+                    "apPositiveDirection": "anterior",
+                    "mlPositiveDirection": "right",
+                    "dvPositiveDirection": "dorsal/up",
+                    "entry": canonical(entry),
+                    "target": canonical(target),
+                    "tip": canonical(tip),
+                ],
+                "atlasFrame": [
+                    "frameId": ProbePlanningContract.atlasFrameId,
+                    "componentOrder": ["AP", "DV", "ML"],
+                    "units": "micrometre",
+                    "origin": "anterior/superior/right atlas corner",
+                    "entry": physicalEntry,
+                    "target": physicalTarget,
+                    "tip": physicalTip,
+                ],
+            ],
+            "shanks": [[
+                "shankId": "shank-0",
+                "entry": physicalEntry,
+                "surfaceEntry": physicalEntry,
+                "tip": physicalTip,
+                "proximalEnd": physicalProximalEnd,
+                "totalLengthMicrometres": 10_000.0,
+                "widthMicrometres": 70.0,
+                "thicknessMicrometres": 24.0,
+                "conservativeEnvelopeRadiusMicrometres": hypot(35.0, 12.0),
+                "envelopeDefinition":
+                    "circumscribed-radius-of-rectangular-cross-section",
+            ]],
+            "recordingSites": [],
+            "provenance": [
+                "calibrationId": NSNull(),
+                "calibrationVersion": NSNull(),
+                "calibrationSha256": NSNull(),
+                "atlasMetadataSha256": hex("c"),
+                "projectionSha256": hex("d"),
+                "planningAlgorithmVersion":
+                    ProbePlanningContract.surfacePlanningAlgorithmVersion,
+                "planInputSha256": hex("a"),
+                "catalogVersion": ProbePlanningContract.catalogVersion,
+            ],
+            "warning": "Animal research planning only — independently verify geometry",
+            "usableForNavigation": false,
+        ]
     }
 
     private func basePlanDetail() -> [String: Any] {
@@ -2060,7 +2356,9 @@ struct ProbePlanningProtocolTests {
             "shankCount": shankCount,
             "siteCount": shankCount * 1_280,
             "units": "micrometre",
-            "warning": ProbePlanningContract.sourceTranscribedReviewPendingWarning,
+            "warning": quadBase
+                ? ProbePlanningContract.legacySourceTranscribedReviewPendingWarning
+                : ProbePlanningContract.sourceTranscribedReviewPendingWarning,
         ]
         guard detailed else { return model }
 
@@ -2088,11 +2386,8 @@ struct ProbePlanningProtocolTests {
 
     private func neuropixels2Shank(_ shankIndex: Int) -> [String: Any] {
         let sites: [[String: Any]] = (0 ..< 1_280).map { siteIndex in
-            let siteId = String(
-                format: "shank-%d-electrode-%04d",
-                shankIndex,
-                siteIndex
-            )
+            let siteId = "shank-\(shankIndex)-electrode-"
+                + zeroPaddedDecimal(siteIndex, width: 4)
             let axial = Double(206 + 15 * (siteIndex / 2))
             let lateral = Double(-8 + 32 * (siteIndex % 2))
             return [
@@ -2254,7 +2549,7 @@ struct ProbePlanningProtocolTests {
             "shankCount": 1,
             "siteCount": 960,
             "units": "micrometre",
-            "warning": ProbePlanningContract.sourceTranscribedReviewPendingWarning,
+            "warning": ProbePlanningContract.legacySourceTranscribedReviewPendingWarning,
         ]
         if detailed {
             model["geometryNotes"] = "Complete NP1000 row-major site transcription"
@@ -2289,7 +2584,7 @@ struct ProbePlanningProtocolTests {
                         lateral = column == 0 ? -24 : 8
                     }
                     return [
-                        "siteId": String(format: "electrode-%03d", index),
+                        "siteId": "electrode-" + zeroPaddedDecimal(index, width: 3),
                         "role": [191, 575, 959].contains(index) ? "reference" : "recording",
                         "bank": "bank-\(index / 384)",
                         "axialFromTipMicrometres": Double(209 + 20 * row),
@@ -2384,7 +2679,7 @@ struct ProbePlanningProtocolTests {
                 "siteCount": 16,
                 "sites": (1 ... 16).map { index in
                     [
-                        "siteId": String(format: "test-site-%02d", index),
+                        "siteId": "test-site-" + zeroPaddedDecimal(index, width: 2),
                         "role": "recording",
                         "bank": "software-test",
                         "axialFromTipMicrometres": Double(index) * 250,
@@ -2472,6 +2767,18 @@ struct ProbePlanningProtocolTests {
         physical(ap: -point.ap, dv: -point.dv, ml: -point.ml, voxel: voxel)
     }
 
+    private func physicalOutside(
+        canonical point: TestVector3
+    ) -> [String: Any] {
+        [
+            "apMicrometres": -point.ap,
+            "dvMicrometres": -point.dv,
+            "mlMicrometres": -point.ml,
+            "insideAtlas": false,
+            "voxelIndex": NSNull(),
+        ]
+    }
+
     private func canonical(ap: Double, ml: Double, dv: Double) -> [String: Any] {
         ["apMicrometres": ap, "mlMicrometres": ml, "dvMicrometres": dv]
     }
@@ -2525,6 +2832,11 @@ struct ProbePlanningProtocolTests {
 
     private func hex(_ character: Character) -> String {
         String(repeating: String(character), count: 64)
+    }
+
+    private func zeroPaddedDecimal(_ value: Int, width: Int) -> String {
+        let text = String(value)
+        return String(repeating: "0", count: max(0, width - text.count)) + text
     }
 
     private func decode<T: Decodable>(_ type: T.Type, _ object: [String: Any]) throws -> T {

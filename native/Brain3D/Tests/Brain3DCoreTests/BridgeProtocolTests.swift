@@ -345,6 +345,7 @@ struct BridgeProtocolTests {
             environment: [:],
             currentDirectoryURL: root.appendingPathComponent("native/Brain3D"),
             executableURL: nestedExecutable,
+            resourceURL: nil,
             sourceFileURL: root.appendingPathComponent(
                 "native/Brain3D/Sources/Brain3DCore/BridgeClient.swift"
             ),
@@ -357,8 +358,119 @@ struct BridgeProtocolTests {
         #expect(discovered?.environment?["PYTHONPATH"] == root.appendingPathComponent("src").path)
     }
 
-    @Test("An environment override wins over development discovery")
-    func environmentOverrideWins() {
+    @Test("A regular executable bundled in app resources is discovered without arguments")
+    func bundledDiscovery() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("brain3d-swift-bundled-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: root) }
+        let resources = root.appendingPathComponent("Brain3D.app/Contents/Resources")
+        let bridge = resources.appendingPathComponent(
+            BridgeLaunchConfiguration.bundledBridgeRelativePath
+        )
+        try fileManager.createDirectory(
+            at: bridge.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\n".utf8).write(to: bridge)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bridge.path)
+
+        let discovered = BridgeLaunchConfiguration.bundledDefault(
+            resourceURL: resources,
+            fileManager: fileManager
+        )
+
+        #expect(discovered?.executableURL == bridge.resolvingSymlinksInPath())
+        #expect(discovered?.arguments == [])
+        #expect(discovered?.workingDirectoryURL == nil)
+        #expect(discovered?.environment == nil)
+    }
+
+    @Test("Bundled bridge wins over development checkout discovery")
+    func bundledDiscoveryWinsOverDevelopmentCheckout() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("brain3d-swift-bundled-priority-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: root) }
+        let resources = root.appendingPathComponent("Brain3D.app/Contents/Resources")
+        let bridge = resources.appendingPathComponent(
+            BridgeLaunchConfiguration.bundledBridgeRelativePath
+        )
+        let python = root.appendingPathComponent(".venv/bin/python")
+        let server = root.appendingPathComponent("src/mouse_brain_planner/bridge/server.py")
+        for executable in [bridge, python] {
+            try fileManager.createDirectory(
+                at: executable.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data("#!/bin/sh\n".utf8).write(to: executable)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: executable.path
+            )
+        }
+        try fileManager.createDirectory(
+            at: server.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# fixture\n".utf8).write(to: server)
+
+        let discovered = BridgeLaunchConfiguration.developmentDefault(
+            environment: [:],
+            currentDirectoryURL: root,
+            executableURL: nil,
+            resourceURL: resources,
+            sourceFileURL: root.appendingPathComponent("BridgeClient.swift"),
+            fileManager: fileManager
+        )
+
+        #expect(discovered?.executableURL == bridge.resolvingSymlinksInPath())
+        #expect(discovered?.arguments == [])
+    }
+
+    @Test("Bundled discovery rejects an executable symlink that escapes app resources")
+    func bundledDiscoveryRejectsEscapingSymlink() throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("brain3d-swift-bundled-escape-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: root) }
+        let resources = root.appendingPathComponent("Brain3D.app/Contents/Resources")
+        let bridge = resources.appendingPathComponent(
+            BridgeLaunchConfiguration.bundledBridgeRelativePath
+        )
+        let outside = root.appendingPathComponent("outside-bridge")
+        try fileManager.createDirectory(
+            at: bridge.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\n".utf8).write(to: outside)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: outside.path)
+        try fileManager.createSymbolicLink(at: bridge, withDestinationURL: outside)
+
+        #expect(
+            BridgeLaunchConfiguration.bundledDefault(
+                resourceURL: resources,
+                fileManager: fileManager
+            ) == nil
+        )
+    }
+
+    @Test("An environment override wins over bundled and development discovery")
+    func environmentOverrideWins() throws {
+        let fileManager = FileManager.default
+        let resources = fileManager.temporaryDirectory
+            .appendingPathComponent("brain3d-swift-env-priority-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: resources) }
+        let bridge = resources.appendingPathComponent(
+            BridgeLaunchConfiguration.bundledBridgeRelativePath
+        )
+        try fileManager.createDirectory(
+            at: bridge.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("#!/bin/sh\n".utf8).write(to: bridge)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: bridge.path)
+
         let configured = BridgeLaunchConfiguration.developmentDefault(
             environment: [
                 "BRAIN3D_BRIDGE_EXECUTABLE": "/custom/bridge",
@@ -366,6 +478,7 @@ struct BridgeProtocolTests {
             ],
             currentDirectoryURL: URL(fileURLWithPath: "/tmp"),
             executableURL: nil,
+            resourceURL: resources,
             sourceFileURL: URL(fileURLWithPath: "/tmp/BridgeClient.swift")
         )
 

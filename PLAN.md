@@ -9,8 +9,8 @@ path, with typed protocol coverage; it does not mean validated for an animal pro
 | 0 | Baseline, reachability audit, risk inventory, architecture ADRs | Complete |
 | 1 | One supported GUI and minimal dependencies | Complete |
 | 2 | Independent single-view atlas navigation | Implemented |
-| 3 | Subject calibration and AP/ML/DV target projection | Implemented |
-| 4 | Source-traceable probe catalog and placement | Implemented; supported NP2 independent review pending |
+| 3 | Source-pinned AP/ML profile and exact local annotation-surface entry | Implemented; population-atlas assumption only |
+| 4 | Source-traceable NP2003/NP2013 catalog and direct depth/angle/layout placement | Implemented; supported NP2 independent review pending |
 | 5 | Exact region traversal, site mapping, inspection, export | Implemented |
 | 6 | Major-vessel source, provenance, and 2D overlays | VesSAP display-only overlay implemented; P60_606 archived |
 | 7 | Tapered-radius reference vessel analysis | Algorithm tests retained; production capability absent |
@@ -26,15 +26,18 @@ path, with typed protocol coverage; it does not mean validated for an animal pro
 - The complete 840-structure Allen hierarchy and search are shared by all five modes. Selecting a
   cortical or non-cortical structure replaces one global identity and lazily loads only that 3D
   mesh; it does not couple the three slice depths.
-- Subject calibrations carry atlas identity, transforms, residuals, QC, uncertainty, version,
-  and hash. Projection and probe creation require an active calibration that permits planning.
-- Bregma input is named `[AP, ML, DV]`: negative is posterior, left, and deep/ventral.
+- V4 plans persist the named Pinpoint/Urchin reference, annotation identity, exact local surface,
+  surface-entry AP/ML, path depth, signed sagittal angle, layout, and model snapshot. AP− is
+  posterior and ML− is animal-left. A separate target registration/calibration is not a v4
+  prerequisite.
+- Legacy subject calibrations and target records remain preserved with their original identity,
+  transforms, residuals, QC, uncertainty, version, and hash.
 - The production probe catalog contains only NP2 single shank (1,280 sites / 384 channels) and
   standard four shank (5,120 sites / 384 channels). Quad Base, NP1, and the synthetic fixture are
   archived compatibility/test definitions and are absent from the new-plan selector.
   Manufacturer entries stay `source-transcribed-review-pending` until independent full-table
   reviews are recorded.
-- Probe plans expose entry, target, tip, shank envelope, and recording sites in slice and 3D
+- Probe plans expose entry, tip, shank envelope, and recording sites in slice and 3D
   views. Exact voxel traversal drives region inspection and CSV/JSON export.
 - The VesSAP `BL6J-no1` diameter-≥30 µm reference is served after exact source/asset/transform
   checks and overlaid in all five views. True source-skeleton adjacency is retained through a

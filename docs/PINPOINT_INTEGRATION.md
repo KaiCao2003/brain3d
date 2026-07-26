@@ -8,7 +8,19 @@ engine.
 Brain3D directly uses its existing BrainGlobe/Allen CCF service for ontology records, annotation
 queries, meshes, coordinates, and slice state. It does not copy Pinpoint source or assets. The
 native SwiftUI/SceneKit client consumes the complete reviewed `allen_mouse_25um` v1.2 ontology,
-keeps one selected region across all five views, and loads only the selected region mesh.
+keeps one selected ontology identity across all five modes, and loads only reviewed geometry for
+that selection. Descendant annotation voxels drive the four 2D highlights and the selected
+structure's mesh drives 3D; a selection with neither voxels nor mesh remains selected in an
+explicit no-geometry state.
+
+The direct probe workflow separately records the bregma constants published in Virtual Brain
+Lab's Urchin source at pinned commit
+`57be3cdc7d6230543ebbd367be1cbcf1a47862a5`, together with that file's SHA-256. Brain3D
+implements the AP/ML, local annotation-surface, depth, sagittal-angle, and layout geometry in its
+own typed service. AP/ML anchors user-facing Shank 1's surface crossing, and depth ends at that
+shank's distal target rather than an array midpoint. This source-pinned convention is not copied
+Unity implementation and is not presented as Allen-official bregma or individual-animal
+registration.
 
 Embedding the hosted Pinpoint WebGL application as the authoritative viewer is **NO-GO** for the
 current build. This is an engineering decision, not a criticism of Pinpoint.
@@ -60,9 +72,11 @@ The existing backend is the integration boundary:
 1. BrainGlobe provides all normalized Allen structures for the pinned atlas.
 2. `atlas.regions` pages the complete ontology; `atlas.search` searches acronym and name.
 3. Point and ray picks resolve the same ontology identity used by search.
-4. `atlas.mesh` lazily returns the selected structure's reviewed mesh.
-5. Swift keeps one selected region while Dorsal, Coronal, Sagittal, Horizontal, and 3D retain
-   their own navigation state.
+4. `atlas.mesh` lazily returns the selected structure's reviewed mesh when that geometry exists.
+5. `atlas.region.overlay` derives the selected structure plus descendants from the exact
+   annotation for Dorsal, Coronal, Sagittal, and Horizontal.
+6. Swift keeps that selected ontology identity while 3D loads its reviewed mesh or presents the
+   explicit no-geometry result; all five modes retain their own navigation state.
 
 The reviewed local atlas contains 840 structure records and 839 mesh files. Structure `RSPd4`
 (`545`) has no mesh file and no annotation voxels in this 25 µm package; it remains searchable

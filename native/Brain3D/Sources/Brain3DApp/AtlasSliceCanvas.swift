@@ -353,6 +353,7 @@ enum MajorVesselRasterizer {
 /// pixels into atlas coordinates.
 struct AtlasSliceCanvas: NSViewRepresentable {
     let imageData: Data?
+    let regionOverlayData: Data?
     let imagePixelWidth: Int
     let imagePixelHeight: Int
     let viewportIdentity: String
@@ -385,6 +386,7 @@ struct AtlasSliceCanvas: NSViewRepresentable {
     private func update(_ view: AtlasSliceNSView) {
         view.configure(
             imageData: imageData,
+            regionOverlayData: regionOverlayData,
             imagePixelWidth: imagePixelWidth,
             imagePixelHeight: imagePixelHeight,
             viewportIdentity: viewportIdentity,
@@ -414,6 +416,8 @@ final class AtlasSliceNSView: NSView {
     // source radius data.
     private var imageData: Data?
     private var image: NSImage?
+    private var regionOverlayData: Data?
+    private var regionOverlayImage: NSImage?
     private var imagePixelWidth = 0
     private var imagePixelHeight = 0
     private var anatomicalLabels: AtlasCanvasAnatomicalLabels?
@@ -468,6 +472,7 @@ final class AtlasSliceNSView: NSView {
 
     func configure(
         imageData: Data?,
+        regionOverlayData: Data? = nil,
         imagePixelWidth: Int,
         imagePixelHeight: Int,
         viewportIdentity: String,
@@ -501,6 +506,11 @@ final class AtlasSliceNSView: NSView {
         if self.imageData != imageData {
             self.imageData = imageData
             image = imageData.flatMap(NSImage.init(data:))
+            visualContentChanged = true
+        }
+        if self.regionOverlayData != regionOverlayData {
+            self.regionOverlayData = regionOverlayData
+            regionOverlayImage = regionOverlayData.flatMap(NSImage.init(data:))
             visualContentChanged = true
         }
         if self.imagePixelWidth != sanitizedWidth || self.imagePixelHeight != sanitizedHeight {
@@ -568,6 +578,7 @@ final class AtlasSliceNSView: NSView {
             hints: nil
         )
         context?.imageInterpolation = previousInterpolation ?? .default
+        drawRegionOverlayIfPresent(in: rect)
         drawMajorVesselsIfPresent(in: rect)
         drawProbeOverlayIfPresent()
         drawMajorVesselConflictIfPresent()
@@ -1004,6 +1015,25 @@ final class AtlasSliceNSView: NSView {
         // the user directly manipulates the viewport.
         context?.imageInterpolation = .none
         majorVesselRasterImage.draw(
+            in: imageRect,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: nil
+        )
+        context?.imageInterpolation = previousInterpolation ?? .default
+    }
+
+    private func drawRegionOverlayIfPresent(in imageRect: CGRect) {
+        guard let regionOverlayImage else { return }
+        let context = NSGraphicsContext.current
+        let previousInterpolation = context?.imageInterpolation
+        // The mask is generated on the exact annotation voxel grid. Nearest
+        // neighbour display keeps the filled region and its boundary aligned
+        // with the underlying atlas slice at every zoom level.
+        context?.imageInterpolation = .none
+        regionOverlayImage.draw(
             in: imageRect,
             from: .zero,
             operation: .sourceOver,

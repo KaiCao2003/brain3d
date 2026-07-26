@@ -10,10 +10,17 @@ phantom-targeting, histological-outcome, or formal usability validation.
   resolution, not targeting accuracy. The 10 µm atlas is outside the testing phase.
 - The Allen CCF is a population reference from fixed brains and does not provide one official,
   subject-specific bregma/lambda transform.
-- AP/ML/DV projection depends on user-entered matched landmarks, frame definitions, laterality,
-  QC thresholds, and uncertainty. Passing software QC does not establish biological truth.
+- Direct v4 AP/ML uses a source-pinned Pinpoint/Urchin population-atlas profile (AP− posterior,
+  ML− animal-left), not the individual animal's measured bregma. Its annotation-derived surface
+  is not a measured pia or skull surface.
+- Legacy v1–v3 AP/ML/DV projection remains dependent on its stored matched landmarks, frame
+  definitions, laterality, QC thresholds, and uncertainty.
 - Region labels are annotation-voxel results, not subject histology. Boundary, hemisphere, and
   registration errors remain possible.
+- The complete ontology can contain a named structure with no voxels in the reviewed annotation.
+  In `allen_mouse_25um` v1.2, `RSPd4` (structure 545) is such an ontology-only entry. Brain3D
+  keeps the selection visible but reports zero 2D highlight pixels and no reviewed 3D geometry;
+  it does not synthesize or infer a mesh for anatomy absent from the annotation.
 
 ## Native views
 
@@ -39,11 +46,15 @@ phantom-targeting, histological-outcome, or formal usability validation.
   not import the actual IMRO/electrode selection, and must not imply that all sites are recorded
   simultaneously. Both supported hardware choices provide 384 simultaneously configurable
   recording channels.
+- V4 depth is path length from a 25 µm annotation boundary. Its single signed sagittal angle and
+  two whole-array layouts do not model arbitrary ML tilt, probe bending, or independent shank
+  rotation.
 - Manufacturer tolerances, insertion bending, tissue deformation, brain shift, skull mounting,
   probe-base/headstage geometry, and manipulator backlash are not modeled.
 - The generic 16-site model is synthetic software-test geometry, not a physical device profile.
-- Region traversal and site assignment use the selected Allen annotation and current calibration;
-  they do not predict histological recording location or post-insertion displacement.
+- Region traversal and site assignment use the selected Allen annotation and the persisted v4
+  surface/profile evidence (or a preserved legacy calibration); they do not predict histological
+  recording location or post-insertion displacement.
 
 ## VesSAP display-reference limits
 
@@ -107,9 +118,9 @@ SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
   AP follows the historical atlas convention `Bregma = Interaural − 3.80 mm`. The appended
   historical plate is a coordinate reference, not a subject registration. Its output copy gets
   an identity/plan summary, but no claimed trajectory transform is drawn on the artwork.
-- A FINAL surgery-plan label records exact saved-project, active-calibration, projection, and
-  current-probe provenance gates. It does not establish biological, vascular, procedural, or
-  surgical validity.
+- A FINAL surgery-plan label records exact saved-project and current v4 profile/surface/probe
+  provenance gates. It does not establish biological, vascular, procedural, or surgical
+  validity. Preserved legacy exports retain their original target/calibration requirements.
 - Population vascular density and subject-image registration remain archived as compatibility
   code and persisted data. Their methods/capabilities are not registered by the primary bridge;
   they are absent from the UI and are not used as vessel paths or clearance geometry.

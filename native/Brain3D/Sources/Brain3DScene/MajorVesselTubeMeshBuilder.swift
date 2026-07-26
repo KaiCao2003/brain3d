@@ -20,7 +20,7 @@ enum MajorVesselTubeMeshBuilder {
         runOffsets: [Int],
         minimumVisibleDiameterMicrometres: Double = 0
     ) async throws -> MajorVesselTubeMeshData {
-        try await Task.detached(priority: .userInitiated) {
+        let worker = Task.detached(priority: .userInitiated) {
             try build(
                 pointsASRMicrometres: pointsASRMicrometres,
                 radiiMicrometres: radiiMicrometres,
@@ -28,7 +28,12 @@ enum MajorVesselTubeMeshBuilder {
                 minimumVisibleDiameterMicrometres:
                     minimumVisibleDiameterMicrometres
             )
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
     }
 
     static func build(
@@ -44,7 +49,7 @@ enum MajorVesselTubeMeshBuilder {
             minimumVisibleDiameterMicrometres:
                 minimumVisibleDiameterMicrometres
         )
-        let filtered = filteredRuns(
+        let filtered = try filteredRuns(
             pointsASRMicrometres: pointsASRMicrometres,
             radiiMicrometres: radiiMicrometres,
             runOffsets: runOffsets,
@@ -83,6 +88,9 @@ enum MajorVesselTubeMeshBuilder {
             var normal = initialNormal(for: tangents[0])
 
             for pointIndex in runPoints.indices {
+                if pointIndex.isMultiple(of: 256) {
+                    try Task.checkCancellation()
+                }
                 let tangent = tangents[pointIndex]
                 if pointIndex > 0 {
                     normal = transportedNormal(normal, to: tangent)
@@ -105,6 +113,9 @@ enum MajorVesselTubeMeshBuilder {
             }
 
             for pointIndex in 0 ..< runPoints.count - 1 {
+                if pointIndex.isMultiple(of: 256) {
+                    try Task.checkCancellation()
+                }
                 let current = runVertexStart + pointIndex * sideCount
                 let next = current + sideCount
                 for side in 0 ..< sideCount {
@@ -185,7 +196,8 @@ enum MajorVesselTubeMeshBuilder {
         radiiMicrometres: [Float],
         runOffsets: [Int],
         minimumVisibleDiameterMicrometres: Double
-    ) -> FilteredRuns {
+    ) throws -> FilteredRuns {
+        try Task.checkCancellation()
         guard minimumVisibleDiameterMicrometres > 0 else {
             return FilteredRuns(
                 points: pointsASRMicrometres,
@@ -223,6 +235,9 @@ enum MajorVesselTubeMeshBuilder {
         }
 
         for runIndex in 0 ..< runOffsets.count - 1 {
+            if runIndex.isMultiple(of: 256) {
+                try Task.checkCancellation()
+            }
             let runStart = runOffsets[runIndex]
             let runEnd = runOffsets[runIndex + 1]
             var previousReachedSourceEndpoint = false

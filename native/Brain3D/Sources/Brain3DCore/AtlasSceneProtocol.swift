@@ -11,6 +11,10 @@ public enum AtlasSceneContract {
             + "acronym/name; decimal structure ID is exact only"
     public static let maximumMeshByteSize = 128 * 1024 * 1024
     public static let maximumRayLengthMicrometres = 250_000.0
+    public static let regionOverlayAlgorithmVersion =
+        "annotation-descendants-filled-outline-v1"
+    public static let regionOverlaySelectionRule =
+        "selected structure and every descendant in structureIdPath"
 }
 
 public enum AtlasSceneContractError: Error, Equatable, LocalizedError, Sendable {
@@ -354,6 +358,195 @@ public struct AtlasRegionSearchResult: Decodable, Equatable, Sendable {
         else {
             throw AtlasSceneContractError.invalid(
                 "Atlas region search metadata is inconsistent."
+            )
+        }
+    }
+}
+
+public enum AtlasRegionOverlayOrientation: String, Codable, CaseIterable, Hashable, Sendable {
+    case dorsal
+    case coronal
+    case sagittal
+    case horizontal
+
+    public init(_ sliceOrientation: AtlasSliceOrientation) {
+        switch sliceOrientation {
+        case .coronal: self = .coronal
+        case .sagittal: self = .sagittal
+        case .horizontal: self = .horizontal
+        }
+    }
+
+    public var sliceOrientation: AtlasSliceOrientation? {
+        switch self {
+        case .dorsal: nil
+        case .coronal: .coronal
+        case .sagittal: .sagittal
+        case .horizontal: .horizontal
+        }
+    }
+}
+
+public struct AtlasRegionOverlayParameters: Encodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let structureId: Int
+    public let orientation: AtlasRegionOverlayOrientation
+    public let index: Int?
+
+    public init(
+        structureId: Int,
+        orientation: AtlasRegionOverlayOrientation,
+        index: Int? = nil
+    ) throws {
+        guard structureId > 0,
+              (orientation == .dorsal && index == nil)
+                || (orientation != .dorsal && index.map({ $0 >= 0 }) == true)
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Dorsal overlays omit index; slice overlays require a nonnegative index."
+            )
+        }
+        protocolVersion = BridgeProtocolVersion.current
+        self.structureId = structureId
+        self.orientation = orientation
+        self.index = index
+    }
+}
+
+public struct AtlasRegionOverlayResult: Decodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let algorithmVersion: String
+    public let selectionRule: String
+    public let region: AtlasRegionSummary
+    public let includedStructureIds: [Int]
+    public let visiblePixelCount: Int
+    public let mimeType: String
+    public let colorModel: String
+    public let alphaMode: String
+    public let pngBase64: String
+    public let width: Int
+    public let height: Int
+    public let orientation: AtlasRegionOverlayOrientation
+    public let index: Int?
+    public let sliceCount: Int?
+    public let fixedAxis: AtlasAnatomicalAxis?
+    public let rowAxis: AtlasAnatomicalAxis
+    public let columnAxis: AtlasAnatomicalAxis
+    public let atlas: ViewerAtlasIdentity
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case protocolVersion
+        case algorithmVersion
+        case selectionRule
+        case region
+        case includedStructureIds
+        case visiblePixelCount
+        case mimeType
+        case colorModel
+        case alphaMode
+        case pngBase64
+        case width
+        case height
+        case orientation
+        case index
+        case sliceCount
+        case fixedAxis
+        case rowAxis
+        case columnAxis
+        case atlas
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireAtlasSceneExactKeys(
+            decoder,
+            CodingKeys.self,
+            label: "atlas region overlay result"
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        algorithmVersion = try container.decode(String.self, forKey: .algorithmVersion)
+        selectionRule = try container.decode(String.self, forKey: .selectionRule)
+        region = try container.decode(AtlasRegionSummary.self, forKey: .region)
+        includedStructureIds = try container.decode(
+            [Int].self,
+            forKey: .includedStructureIds
+        )
+        visiblePixelCount = try container.decode(Int.self, forKey: .visiblePixelCount)
+        mimeType = try container.decode(String.self, forKey: .mimeType)
+        colorModel = try container.decode(String.self, forKey: .colorModel)
+        alphaMode = try container.decode(String.self, forKey: .alphaMode)
+        pngBase64 = try container.decode(String.self, forKey: .pngBase64)
+        width = try container.decode(Int.self, forKey: .width)
+        height = try container.decode(Int.self, forKey: .height)
+        orientation = try container.decode(
+            AtlasRegionOverlayOrientation.self,
+            forKey: .orientation
+        )
+        index = try container.decodeIfPresent(Int.self, forKey: .index)
+        sliceCount = try container.decodeIfPresent(Int.self, forKey: .sliceCount)
+        fixedAxis = try container.decodeIfPresent(AtlasAnatomicalAxis.self, forKey: .fixedAxis)
+        rowAxis = try container.decode(AtlasAnatomicalAxis.self, forKey: .rowAxis)
+        columnAxis = try container.decode(AtlasAnatomicalAxis.self, forKey: .columnAxis)
+        atlas = try container.decode(ViewerAtlasIdentity.self, forKey: .atlas)
+        try validate()
+    }
+
+    private func validate() throws {
+        let pixelCount = width.multipliedReportingOverflow(by: height)
+        guard protocolVersion == BridgeProtocolVersion.current,
+              algorithmVersion == AtlasSceneContract.regionOverlayAlgorithmVersion,
+              selectionRule == AtlasSceneContract.regionOverlaySelectionRule,
+              !includedStructureIds.isEmpty,
+              includedStructureIds.contains(region.structureId),
+              includedStructureIds.allSatisfy({ $0 > 0 }),
+              Set(includedStructureIds).count == includedStructureIds.count,
+              includedStructureIds == includedStructureIds.sorted(),
+              visiblePixelCount >= 0,
+              width > 0,
+              height > 0,
+              !pixelCount.overflow,
+              visiblePixelCount <= pixelCount.partialValue,
+              mimeType == "image/png",
+              colorModel == "RGBA",
+              alphaMode == "straight",
+              !pngBase64.isEmpty
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas region overlay identity, image, or ontology metadata is invalid."
+            )
+        }
+
+        if orientation == .dorsal {
+            guard index == nil,
+                  sliceCount == nil,
+                  fixedAxis == nil,
+                  rowAxis == .ap,
+                  columnAxis == .ml,
+                  width == atlas.shapeVoxels.mlVoxels,
+                  height == atlas.shapeVoxels.apVoxels
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "Dorsal region overlay dimensions or axes do not match the atlas."
+                )
+            }
+            return
+        }
+
+        guard let sliceOrientation = orientation.sliceOrientation,
+              let index,
+              let sliceCount,
+              let fixedAxis,
+              index >= 0,
+              sliceCount == atlas.shapeVoxels[sliceOrientation.fixedAxis],
+              index < sliceCount,
+              fixedAxis == sliceOrientation.fixedAxis,
+              rowAxis == sliceOrientation.rowAxis,
+              columnAxis == sliceOrientation.columnAxis,
+              width == atlas.shapeVoxels[sliceOrientation.columnAxis],
+              height == atlas.shapeVoxels[sliceOrientation.rowAxis]
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Slice region overlay dimensions, axes, or index do not match the atlas."
             )
         }
     }

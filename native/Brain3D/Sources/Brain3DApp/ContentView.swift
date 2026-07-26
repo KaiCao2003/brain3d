@@ -50,7 +50,7 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "Apply or revert probe edits, then save the plan, "
+                "Finish the active numeric edit with Return or by leaving the field, then save, "
                     + "to keep all current changes."
             )
         }
@@ -65,7 +65,7 @@ struct ContentView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text(
-                "Apply or revert probe edits, then save the plan, "
+                "Finish the active numeric edit with Return or by leaving the field, then save, "
                     + "to keep all current changes."
             )
         }

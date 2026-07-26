@@ -41,14 +41,20 @@ struct SurgeryPlanExportSheet: View {
     ) {
         self.model = model
         self.hasUnappliedProbeEdits = hasUnappliedProbeEdits
-        let defaultTargetId = model.selectedProbePlan?.targetId
+        let defaultTargetId = model.selectedProbePlan?.surfaceRelativeInput == nil
+            ? (model.selectedProbePlan?.targetId
             ?? model.implantTargets.first?.targetId
-            ?? ""
+            ?? "")
+            : (model.selectedProbePlan?.planId ?? "")
         let defaultTarget = model.implantTargets.first {
             $0.targetId == defaultTargetId
         }
         _selectedTargetId = State(initialValue: defaultTargetId)
-        _targetLabel = State(initialValue: defaultTarget?.label ?? "")
+        _targetLabel = State(
+            initialValue: model.selectedProbePlan?.surfaceRelativeInput == nil
+                ? (defaultTarget?.label ?? "")
+                : (model.selectedProbePlan?.name ?? "")
+        )
         _mouseNumber = State(initialValue: "")
         _viewSelection = State(
             initialValue: SurgeryPlanViewSelection(
@@ -88,9 +94,20 @@ struct SurgeryPlanExportSheet: View {
 
             Form {
                 Section("Plan") {
-                    Picker("Implant target", selection: $selectedTargetId) {
-                        ForEach(model.implantTargets) { target in
-                            Text(target.label).tag(target.targetId)
+                    if let directSurfacePlan {
+                        LabeledContent("Probe") {
+                            Text(
+                                "\(directSurfacePlan.modelDisplayName) · "
+                                    + "\(directSurfacePlan.name)"
+                            )
+                            .font(.caption)
+                            .multilineTextAlignment(.trailing)
+                        }
+                    } else {
+                        Picker("Archived implant target", selection: $selectedTargetId) {
+                            ForEach(model.implantTargets) { target in
+                                Text(target.label).tag(target.targetId)
+                            }
                         }
                     }
                     TextField("Target region / label", text: $targetLabel)
@@ -108,8 +125,7 @@ struct SurgeryPlanExportSheet: View {
                     }
                     if exportClass == .draft {
                         Text(
-                            "DRAFT — the projected plan is unsaved, or it has no current "
-                                + "final-export calibration/probe trajectory."
+                            "DRAFT — save the current animal plan before final export."
                         )
                         .font(.caption)
                         .foregroundStyle(.orange)
@@ -184,10 +200,10 @@ struct SurgeryPlanExportSheet: View {
                             Text(resolvedAtlasPlate.displayName)
                                 .font(.caption.monospacedDigit())
                         }
-                        if let target = selectedTarget {
+                        if let coordinates = selectedCoordinates {
                             let requested = atlasOrientation == .coronal
-                                ? target.apMillimetres
-                                : abs(target.mlMillimetres)
+                                ? coordinates.ap
+                                : abs(coordinates.ml)
                             Text(
                                 String(
                                     format:
@@ -203,9 +219,13 @@ struct SurgeryPlanExportSheet: View {
                             if atlasOrientation == .sagittal {
                                 Text(
                                     "The plate is matched by |ML|. "
-                                        + (target.mlMillimetres < 0
-                                            ? "This target remains explicitly left (ML−)."
-                                            : "This target remains explicitly right (ML+).")
+                                        + (directSurfacePlan != nil
+                                            ? (coordinates.ml < 0
+                                                ? "This insertion remains explicitly left (ML−)."
+                                                : "This insertion remains explicitly right (ML+).")
+                                            : (coordinates.ml < 0
+                                                ? "This target remains explicitly left (ML−)."
+                                                : "This target remains explicitly right (ML+)."))
                                 )
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
@@ -315,7 +335,32 @@ struct SurgeryPlanExportSheet: View {
         model.implantTargets.first { $0.targetId == selectedTargetId }
     }
 
+    private var directSurfacePlan: ProbePlanDetail? {
+        guard let atlas = model.viewerSnapshot?.atlas else { return nil }
+        return SurgeryPlanReadiness.currentSurfaceProbePlan(
+            model.selectedProbePlan,
+            atlas: atlas
+        )
+    }
+
+    private var selectedCoordinates: (ap: Double, ml: Double)? {
+        if let input = directSurfacePlan?.surfaceRelativeInput {
+            return (
+                ap: input.insertionAPMillimetres,
+                ml: input.insertionMLMillimetres
+            )
+        }
+        guard let selectedTarget else { return nil }
+        return (
+            ap: selectedTarget.apMillimetres,
+            ml: selectedTarget.mlMillimetres
+        )
+    }
+
     private var matchingPlan: ProbePlanDetail? {
+        if let directSurfacePlan {
+            return directSurfacePlan
+        }
         guard let project = model.backendState?.project,
               let target = selectedTarget,
               let atlas = model.viewerSnapshot?.atlas,
@@ -338,6 +383,15 @@ struct SurgeryPlanExportSheet: View {
     }
 
     private var exportClass: SurgeryPlanExportClass {
+        if let directSurfacePlan,
+           let project = model.backendState?.project
+        {
+            return SurgeryPlanReadiness.exportClass(
+                project: project,
+                hasUnsavedChanges: model.hasUnsavedChanges,
+                surfaceProbePlan: directSurfacePlan
+            )
+        }
         guard let project = model.backendState?.project,
               let target = selectedTarget,
               let atlas = model.viewerSnapshot?.atlas,
@@ -386,14 +440,20 @@ struct SurgeryPlanExportSheet: View {
 
     private var blockingReason: String? {
         guard !hasUnappliedProbeEdits else {
-            return "Apply or revert probe edits before exporting."
+            return "Finish the numeric edit with Return or leave the field, then wait "
+                + "for the probe update before exporting."
         }
         guard model.backendState?.project != nil else {
             return "Open an animal plan first."
         }
-        guard selectedTarget != nil else {
-            return "Select a stored implant target."
+        guard directSurfacePlan != nil || selectedTarget != nil else {
+            return "Create an NP2003 or NP2013 probe plan first."
         }
+        if directSurfacePlan != nil {
+            guard model.majorVesselGeometry != nil else {
+                return "Wait for the reviewed major-vessel layer to finish loading."
+            }
+        } else {
         guard let project = model.backendState?.project,
               let target = selectedTarget,
               let atlas = model.viewerSnapshot?.atlas,
@@ -406,6 +466,7 @@ struct SurgeryPlanExportSheet: View {
               ) != nil
         else {
             return "Project the selected target with the active calibration."
+        }
         }
         guard model.majorVesselGeometry != nil else {
             return "Wait for the reviewed major-vessel layer to finish loading."
@@ -463,12 +524,13 @@ struct SurgeryPlanExportSheet: View {
             atlasResolutionError = atlasPDFStatus.detail
             return
         }
-        guard let selectedTarget else { return }
+        guard let coordinates = selectedCoordinates else { return }
         do {
             resolvedAtlasPlate = try SurgeryAtlasCatalog.nearestPlate(
                 in: URL(fileURLWithPath: atlasPDFPath),
                 orientation: atlasOrientation,
-                target: selectedTarget
+                apMillimetres: coordinates.ap,
+                mlMillimetres: coordinates.ml
             )
         } catch {
             atlasResolutionError = error.localizedDescription

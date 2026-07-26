@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 from pydantic import ValidationError
 
+from mouse_brain_planner.analysis.probe_region_service import annotation_array_sha256
 from mouse_brain_planner.atlas.brainglobe_adapter import AtlasAdapterError
 from mouse_brain_planner.bridge import PROTOCOL_VERSION
 from mouse_brain_planner.bridge.atlas_interaction import (
@@ -46,6 +47,9 @@ from mouse_brain_planner.domain.coordinate_models import (
     BrainGlobePhysicalPoint,
     BrainGlobeVoxelIndex,
 )
+from mouse_brain_planner.domain.probe_plan_models import (
+    ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
+)
 from mouse_brain_planner.domain.project_models import PlannerProject, ViewerSliceDepths
 from mouse_brain_planner.domain.vessel_models import (
     DorsalRegistrationMethod,
@@ -62,6 +66,9 @@ from mouse_brain_planner.persistence.project_io import (
     save_project,
 )
 from mouse_brain_planner.rendering.dorsal_surface import render_dorsal_surface
+from mouse_brain_planner.surgery.probe_planning import (
+    validate_atlas_surface_probe_plan_semantics,
+)
 from mouse_brain_planner.vasculature.density_overlay import (
     REFERENCE_DENSITY_DV_MAXIMUM_LABEL,
     REFERENCE_DENSITY_PROJECTION_DISCLOSURE,
@@ -486,12 +493,6 @@ class PlanningBridgeSession:
         atlas = self._require_loaded_atlas()
         title = _optional_text(params.get("title"), field_name="title", maximum=200)
         subject_id = _optional_text(params.get("subjectId"), field_name="subjectId", maximum=200)
-        if subject_id is None:
-            raise BridgeError(
-                "ANIMAL_SUBJECT_ID_REQUIRED",
-                "Creating an animal surgery plan requires a nonempty animal subject ID.",
-                details={"field": "subjectId"},
-            )
         space = BrainGlobeAtlasSpace(atlas.metadata)
         shape = atlas.metadata.shape_voxels
         centre_index = BrainGlobeVoxelIndex(
@@ -557,17 +558,6 @@ class PlanningBridgeSession:
                 details={"exceptionType": type(error).__name__},
             ) from error
         project = result.project
-        if project.subject_id is None or not project.subject_id.strip():
-            raise BridgeError(
-                "ANIMAL_SUBJECT_ID_REQUIRED",
-                "This legacy project has no animal subject ID and cannot be opened for "
-                "surgery planning. Create a new animal plan with an explicit subject ID, "
-                "then review and recreate the required planning records.",
-                details={
-                    "projectOpened": False,
-                    "suggestedAction": "Create a new animal plan with an explicit subject ID.",
-                },
-            )
         if project.atlas is None:
             raise BridgeError(
                 "PROJECT_ATLAS_REQUIRED",
@@ -584,6 +574,7 @@ class PlanningBridgeSession:
                     "loadedVersion": atlas.metadata.atlas_package_version,
                 },
             )
+        _validate_loaded_atlas_surface_plans(project, atlas)
         if not project.scientific_disclaimer_acknowledged:
             raise BridgeError(
                 "ANIMAL_ONLY_ACKNOWLEDGEMENT_REQUIRED",
@@ -1742,6 +1733,41 @@ def _image_result(image: SubjectVascularImage) -> JsonObject:
         "coordinateFrame": image.coordinate_frame,
         "subjectSpecific": True,
     }
+
+
+def _validate_loaded_atlas_surface_plans(
+    project: PlannerProject,
+    atlas: LoadedAtlasProtocol,
+) -> None:
+    """Reject direct plans that cannot be reproduced from the loaded annotation bytes."""
+
+    plans = tuple(
+        plan
+        for plan in project.probe_plans
+        if (plan.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION)
+    )
+    if not plans:
+        return
+    annotation = np.asarray(atlas.annotation)
+    try:
+        annotation_sha256 = annotation_array_sha256(annotation)
+        for plan in plans:
+            validate_atlas_surface_probe_plan_semantics(
+                plan=plan,
+                atlas=atlas.metadata,
+                annotation=annotation,
+                annotation_sha256=annotation_sha256,
+            )
+    except (TypeError, ValueError) as error:
+        raise BridgeError(
+            "PROJECT_OPEN_FAILED",
+            "An atlas-surface probe plan cannot be reproduced from the loaded annotation.",
+            details={
+                "exceptionType": type(error).__name__,
+                "projectOpened": False,
+                "reason": str(error),
+            },
+        ) from error
 
 
 def _same_atlas(left: AtlasMetadata, right: AtlasMetadata) -> bool:

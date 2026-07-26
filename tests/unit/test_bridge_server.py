@@ -20,6 +20,7 @@ from mouse_brain_planner.bridge.server import (
     BridgeDispatcher,
     BridgeServer,
     encode_rgb_png,
+    encode_rgba_png,
 )
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata
 
@@ -324,6 +325,18 @@ def test_navigation_png_compression_is_full_resolution_and_pixel_lossless() -> N
         np.testing.assert_array_equal(np.asarray(decoded.convert("RGB")), expected)
     with Image.open(BytesIO(archival)) as decoded:
         np.testing.assert_array_equal(np.asarray(decoded.convert("RGB")), expected)
+
+
+def test_region_overlay_png_preserves_straight_rgba_pixels_losslessly() -> None:
+    expected = np.arange(5 * 9 * 4, dtype=np.uint8).reshape(5, 9, 4)
+
+    encoded = encode_rgba_png(expected, compression_level=1)
+
+    assert encoded.startswith(b"\x89PNG\r\n\x1a\n")
+    with Image.open(BytesIO(encoded)) as decoded:
+        assert decoded.mode == "RGBA"
+        assert decoded.size == (9, 5)
+        np.testing.assert_array_equal(np.asarray(decoded), expected)
 
 
 def test_slice_requires_an_open_atlas_and_exact_orientation_and_index_types() -> None:

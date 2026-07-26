@@ -6,13 +6,25 @@ import Testing
 @Suite("Pinned major-vessel protocol")
 struct MajorVesselProtocolTests {
     @Test("Exact production bridge geometry decodes with pinned provenance")
-    func validGeometry() throws {
+    func validGeometry() async throws {
         let payload = try geometryPayload()
         let result = try JSONDecoder().decode(MajorVesselGeometryResult.self, from: payload)
+        let dorsalProjection =
+            try await MajorVesselSliceOverlayGeometry.makeDorsalProjectionAsync(
+                geometry: result
+            )
 
         #expect(result.pointCount == MajorVesselContract.expectedPointCount)
         #expect(result.runCount == MajorVesselContract.expectedRunCount)
         #expect(result.segmentCount == MajorVesselContract.expectedSegmentCount)
+        #expect(
+            dorsalProjection.segments.count
+                == MajorVesselContract.expectedSegmentCount
+        )
+        #expect(
+            dorsalProjection.assetSHA256
+                == MajorVesselContract.derivedAssetSHA256
+        )
         #expect(result.graph.pointsASRMicrometres[0] == SIMD3<Float>(0.5, 0.5, 0.5))
         #expect(result.graph.radiiMicrometres[0] == 15.25)
         #expect(result.graph.runOffsets.first == 0)
@@ -25,10 +37,12 @@ struct MajorVesselProtocolTests {
         #expect(result.provenance.registrationUncertaintyBoundMicrometres == nil)
         #expect(result.provenance.tissueDistortionUncertaintyBoundMicrometres == nil)
         #expect(result.provenance.uncertaintyBoundsReviewed == false)
-        #expect(result.limitations.contains(where: {
+        #expect(
+            result.limitations.contains(where: {
             $0.localizedCaseInsensitiveContains("pial")
         }))
-        #expect(result.limitations.contains(where: {
+        #expect(
+            result.limitations.contains(where: {
             $0.localizedCaseInsensitiveContains("not the current animal")
         }))
     }
@@ -315,7 +329,7 @@ struct MajorVesselProtocolTests {
             "byteOrder": "littleEndian",
             "shape": shape,
             "byteLength": data.count,
-            "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "sha256": LowercaseHex.encode(SHA256.hash(data: data)),
             "dataBase64": data.base64EncodedString(),
         ]
     }

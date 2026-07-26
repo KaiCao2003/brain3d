@@ -55,7 +55,7 @@ private final class Brain3DAppDelegate: NSObject, NSApplicationDelegate {
             alert.alertStyle = .warning
             alert.messageText = "Quit and discard unsaved animal plan changes?"
             alert.informativeText =
-                "This animal surgery plan has unsaved or unapplied probe changes. "
+                "This animal surgery plan has unsaved changes or an unfinished probe edit. "
                 + "Cancel to return to the plan, or quit and discard those changes."
             let cancelButton = alert.addButton(withTitle: "Cancel")
             cancelButton.keyEquivalent = "\u{1b}"

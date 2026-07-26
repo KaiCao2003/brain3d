@@ -191,6 +191,43 @@ struct AtlasViewerInteractionPolicyTests {
         #expect(frames.sagittal?.index == 21)
     }
 
+    @Test("A depth change refreshes only its view and retains the shared region")
+    func regionOverlayDepthRefreshCoherence() throws {
+        let selected = try region(
+            structureId: 549,
+            acronym: "TH",
+            name: "Thalamus"
+        )
+        let other = try region(
+            structureId: 385,
+            acronym: "VISp",
+            name: "Primary visual area"
+        )
+
+        #expect(
+            AtlasRegionOverlayRefreshPolicy.targets(afterSliceChange: .sagittal)
+                == [.sagittal]
+        )
+        #expect(AtlasRegionOverlayRefreshPolicy.accepts(
+            candidateRegion: selected,
+            candidateIndex: 231,
+            selectedRegion: selected,
+            displayedIndex: 231
+        ))
+        #expect(!AtlasRegionOverlayRefreshPolicy.accepts(
+            candidateRegion: selected,
+            candidateIndex: 230,
+            selectedRegion: selected,
+            displayedIndex: 231
+        ))
+        #expect(!AtlasRegionOverlayRefreshPolicy.accepts(
+            candidateRegion: other,
+            candidateIndex: 231,
+            selectedRegion: selected,
+            displayedIndex: 231
+        ))
+    }
+
     private func frame(
         _ orientation: AtlasSliceOrientation,
         index: Int
@@ -215,6 +252,24 @@ struct AtlasViewerInteractionPolicyTests {
             columnAxis: axes.column,
             sliceCenterMicrometres: Double(index) * 25 + 12.5,
             png: Data([UInt8(index & 0xFF)])
+        )
+    }
+
+    private func region(
+        structureId: Int,
+        acronym: String,
+        name: String
+    ) throws -> AtlasRegionSummary {
+        try JSONDecoder().decode(
+            AtlasRegionSummary.self,
+            from: JSONSerialization.data(withJSONObject: [
+                "structureId": structureId,
+                "acronym": acronym,
+                "name": name,
+                "parentStructureId": 997,
+                "structureIdPath": [997, structureId],
+                "rgb": [255, 112, 128],
+            ])
         )
     }
 }
@@ -280,6 +335,7 @@ struct AtlasCanvasRenderedDirectionTests {
         )
         view.configure(
             imageData: try solidPNG(width: imageSize, height: imageSize),
+            regionOverlayData: nil,
             imagePixelWidth: imageSize,
             imagePixelHeight: imageSize,
             viewportIdentity: "direction-test",
@@ -305,6 +361,47 @@ struct AtlasCanvasRenderedDirectionTests {
         let meanY = pinkPixels.map(\.y).reduce(0, +) / pinkPixels.count
         #expect(meanX > rendered.width / 2)
         #expect(meanY > rendered.height / 2)
+    }
+
+    @Test("Annotation region RGBA is visibly composited over the atlas pixels")
+    @MainActor
+    func regionOverlayComposition() throws {
+        let imageSize = 40
+        let view = AtlasSliceNSView(
+            frame: NSRect(x: 0, y: 0, width: 240, height: 240)
+        )
+        view.configure(
+            imageData: try solidPNG(width: imageSize, height: imageSize),
+            regionOverlayData: try regionOverlayPNG(
+                width: imageSize,
+                height: imageSize
+            ),
+            imagePixelWidth: imageSize,
+            imagePixelHeight: imageSize,
+            viewportIdentity: "region-overlay-test",
+            anatomicalLabels: .dorsal,
+            selection: nil,
+            majorVesselOverlay: nil,
+            majorVesselConflictOverlay: nil,
+            probeOverlay: nil,
+            interactionHelp: "Region overlay test",
+            accessibilityLabel: "Region overlay test",
+            accessibilityValue: "Selected thalamus",
+            resetGeneration: 0,
+            onPick: { _, _ in },
+            onSliceStep: { _ in }
+        )
+
+        let rendered = try render(view)
+        let selectedPixels = try matchingPixels(in: rendered) {
+            red, green, blue, alpha in
+            alpha > 200
+                && green > 130
+                && Int(green) > Int(red) * 2
+                && green > blue
+        }
+        #expect(selectedPixels.count > 1_000)
+        #expect(selectedPixels.count < rendered.width * rendered.height / 2)
     }
 
     @MainActor
@@ -335,6 +432,42 @@ struct AtlasCanvasRenderedDirectionTests {
         NSGraphicsContext.current = context
         NSColor(calibratedWhite: 0.12, alpha: 1).setFill()
         NSRect(x: 0, y: 0, width: width, height: height).fill()
+        context.flushGraphics()
+        NSGraphicsContext.restoreGraphicsState()
+        return try #require(representation.representation(using: .png, properties: [:]))
+    }
+
+    @MainActor
+    private func regionOverlayPNG(width: Int, height: Int) throws -> Data {
+        let representation = try #require(NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: width,
+            pixelsHigh: height,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ))
+        let context = try #require(NSGraphicsContext(bitmapImageRep: representation))
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        NSColor.clear.setFill()
+        NSRect(x: 0, y: 0, width: width, height: height).fill()
+        NSColor(
+            srgbRed: 0.08,
+            green: 0.85,
+            blue: 0.28,
+            alpha: 0.9
+        ).setFill()
+        NSRect(
+            x: width / 4,
+            y: height / 4,
+            width: width / 2,
+            height: height / 2
+        ).fill()
         context.flushGraphics()
         NSGraphicsContext.restoreGraphicsState()
         return try #require(representation.representation(using: .png, properties: [:]))

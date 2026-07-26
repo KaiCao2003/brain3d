@@ -47,13 +47,14 @@ SwiftUI owns:
 - rendering bridge-produced atlas PNGs and backend-validated mesh assets;
 - SceneKit camera interaction, ray construction, and display of schema-checked brain/probe/
   reference-vessel geometry payloads; and
-- calibration, target, and probe controls that send declared typed inputs.
+- direct AP/ML/surface-depth/angle/layout probe controls that send declared typed inputs.
 
 Python owns:
 
 - BrainGlobe atlas acquisition, validation, metadata, hierarchy, arrays, and mesh provenance;
 - coordinate systems and transforms;
-- subject calibration, AP/ML/DV target projection, probe geometry, and voxel traversal;
+- source-pinned Pinpoint/Urchin AP/ML conversion, exact annotation-surface resolution, probe
+  geometry, and voxel traversal;
 - digest-bound VesSAP display geometry and fail-closed clearance rejection;
 - subject dorsal-image byte preservation, landmark fitting, residuals, and atlas-grid resampling;
 - population reference-density validation and its non-subject-specific limitation;
@@ -69,10 +70,16 @@ process decision, is:
 
 - exactly `allen_mouse_25um` v1.2; 10 µm is not offered during testing;
 - exactly one selected `Dorsal / Coronal / Sagittal / Horizontal / 3D` view, with independent
-  slice depths and click-to-replace region labels;
+  slice depths and click-to-replace region labels; one ontology selection drives reviewed
+  descendant masks in all four 2D modes and its reviewed mesh in 3D, while an ontology-only
+  entry with neither voxels nor mesh remains selected in an explicit no-geometry state;
 - a SceneKit brain/probe/reference-vessel scene with camera control and atlas ray picking;
-- signed bregma AP/ML/DV targets, versioned subject calibration, QC-gated projection, and probe
-  planning/region export;
+- only NP2003/NP2013 in the primary probe selector, with AP− posterior, ML− animal-left, AP/ML
+  anchored at user-facing Shank 1's exact local annotation-surface crossing, depth to that
+  shank's distal target, signed sagittal angle, and sagittal/90°-clockwise layout; 3D renders each
+  complete 10 mm shaft while slice/traversal analysis uses only the implanted surface-to-tip path;
+- no separate target-registration, subject-calibration, or geometry-checkbox prerequisite for a
+  v4 direct plan; legacy v1–v3 records retain their original archived semantics;
 - a VesSAP BL6J-no1 diameter-≥30 µm reference overlaid in all five views, with the older
   LAMBADA P60_606 derivative retained only as rejected evidence; and
 - no reference-vessel analysis capability.

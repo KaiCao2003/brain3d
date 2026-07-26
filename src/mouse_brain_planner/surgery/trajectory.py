@@ -477,13 +477,20 @@ def placed_shank_centerlines(
     model: ProbeModelDefinition,
     placement: NormalizedProbePlacement,
 ) -> tuple[PlacedProbeShank, ...]:
-    """Map every source-defined shank offset into the anatomical frame."""
+    """Map every source-defined shank offset and full length into the frame.
+
+    The placed ``entry``/``tip`` pair is intentionally the implanted path used
+    by anatomical and vessel analysis.  ``proximal_end`` extends the catalogued
+    shank back from its distal tip, so visual consumers can show the portion
+    above the surface without changing analysis depth semantics.
+    """
 
     _validate_model_placement_pair(model, placement)
     lateral, normal = placement_cross_section_axes(placement)
     geometry_scale = placement.model_to_placement_uniform_scale
     entry = _array(placement.entry)
     tip = _array(placement.tip)
+    inward = np.asarray(placement.inward_direction.as_ap_ml_dv(), dtype=np.float64)
     return tuple(
         PlacedProbeShank(
             placement_uuid=placement.placement_uuid,
@@ -502,6 +509,14 @@ def placed_shank_centerlines(
                 + lateral * (shank.center_lateral_um * geometry_scale)
                 + normal * (shank.center_normal_um * geometry_scale),
             ),
+            proximal_end=_point(
+                placement.entry.frame_id,
+                tip
+                - inward * (shank.length_um * geometry_scale)
+                + lateral * (shank.center_lateral_um * geometry_scale)
+                + normal * (shank.center_normal_um * geometry_scale),
+            ),
+            length_um=shank.length_um * geometry_scale,
             width_um=shank.width_um * geometry_scale,
             thickness_um=shank.thickness_um * geometry_scale,
         )
@@ -517,6 +532,18 @@ def placement_permits_final_export(
 
     _validate_model_placement_pair(model, placement)
     if model.verification.status is ProbeVerificationStatus.VERIFIED:
+        return True
+    # The two built-in NP2003/NP2013 snapshots are complete, source-pinned
+    # transcriptions. They remain honestly review-pending in every detail and
+    # export warning, but the simple atlas-surface workflow does not fabricate
+    # a per-plan "geometry checked" acknowledgement merely to unlock output.
+    from mouse_brain_planner.probes.catalog import is_supported_probe_model_snapshot
+
+    if (
+        model.verification.status is ProbeVerificationStatus.SOURCE_TRANSCRIBED_REVIEW_PENDING
+        and model.verification.complete_geometry_transcribed
+        and is_supported_probe_model_snapshot(model)
+    ):
         return True
     return placement.custom_geometry_acknowledged
 

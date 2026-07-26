@@ -1,6 +1,6 @@
 # Scientific Validation Record
 
-Reviewed: 2026-07-23
+Reviewed: 2026-07-25
 
 This file distinguishes implemented and tested software behavior from scientific or procedural
 validation. Brain3D is restricted to non-human mouse research. No clinical, veterinary-device,
@@ -11,11 +11,11 @@ claimed.
 
 | Area | Software evidence in the current tree | What remains unestablished |
 | --- | --- | --- |
-| Native workspace | Single selected five-mode view, independent depths, click labels, pan/zoom/wheel, stale-frame checks | Procedure usability and error rate |
+| Native workspace | Single selected five-mode view, independent depths, shared selected-region overlays in four 2D modes plus 3D, pan/zoom/wheel, stale-frame checks | Procedure usability and error rate |
 | Allen atlas | Strict `allen_mouse_25um` v1.2 identity, metadata/array checks, real-cache smoke paths | Subject anatomy and 25 µm targeting accuracy |
-| Calibration | Typed CRUD, matched-landmark fits, residual/QC gates, transform round trips, hash/revision binding | Accuracy of user measurements and biological registration |
-| Target/probe | AP/ML/DV sign tests, projection provenance, versioned placement, overlays, exact voxel traversal/export | Insertion deformation and histological endpoint |
-| NP2 geometry | The supported 1,280-site single-shank and 5,120-site standard four-shank choices are derived from pinned source constants; shank/site count, pitch, offset, transform, and plan-creation tests | Independent full-table review and physical-probe conformance |
+| Direct atlas-surface input | Source-pinned Pinpoint/Urchin reference; AP/ML sign tests; exact first-annotated-voxel surface; depth/angle/layout reconstruction and persisted-digest checks | Accuracy of the profile for an individual animal, pia/skull correspondence, and achieved path |
+| Legacy calibration | Typed CRUD, matched-landmark fits, residual/QC gates, transform round trips, hash/revision binding retained for v1–v3 | Accuracy of user measurements and biological registration |
+| NP2 geometry | Selectable NP2003/NP2013 geometries are derived from pinned source constants; shank/site count, pitch, offset, transform, and plan-creation tests | Independent full-table review and physical-probe conformance |
 | NP1 geometry | All 960 sites derived from pinned source snapshots; schema/count/pattern tests | Independent full-table review and physical-probe conformance |
 | VesSAP display geometry | Pinned source/asset/transform digests; true-path extraction; axis/laterality/bounds/label checks; Python→Swift binary protocol; slice/3D render tests | Subject registration, live anatomy, clearing/inter-animal error, and qualified vessel surfaces |
 | LAMBADA evidence | Reproducible extraction, source/asset hashes, schema/bounds/radius/run checks, and digest-bound rejected qualification | Biological laterality, whole-brain coverage, and subject-specific vasculature |
@@ -43,26 +43,37 @@ does not bound stereotaxic, registration, or procedural error. Slice and SceneKi
 round trips test the application convention, not biological correspondence to an individual
 mouse.
 
-## Calibration and bregma convention
+## Direct bregma, surface, angle, and layout convention
 
-User inputs are named `[AP, ML, DV]` millimetres from bregma:
+The v4 direct path uses AP and ML millimetres from a named Pinpoint/Urchin profile:
 
 | Axis | Positive | Negative |
 | --- | --- | --- |
 | AP | anterior | posterior / back |
-| ML | right | left |
-| DV | dorsal / up | deep / ventral |
+| ML | left | right |
 
-An unprojected target remains a coordinate record. Projection requires a selected subject
-calibration built from declared skull-frame metadata, four matched landmarks, laterality, a DV
-reference, a rigid/similarity fit, and user-sourced QC limits. The result carries calibration and
-atlas hashes. The Allen CCF supplies no unique official bregma transform; passing QC means only
-that the declared numeric rules passed.
+The pinned reference resolves to BrainGlobe physical `[AP,DV,ML] = [5200,332,5700] µm` for
+`allen_mouse_25um` v1.2. The exact Urchin revision and source SHA-256 are persisted. This is a
+reproducible Pinpoint planning convention, not an Allen-supplied official bregma and not a
+subject-specific registration.
+
+At the requested AP/ML column, software tests require the entry to equal the superior boundary
+of the first nonzero annotation voxel. Depth is the positive entry-to-tip path length. For the
+single visible sagittal angle, positive advances A→P and negative advances P→A. NP2013 layout
+`0°` places the shank plane sagittally; `90°` rotates it clockwise from dorsal. These tests
+establish implementation signs and reconstruction, not accuracy in a live animal.
+
+V1–v3 target/calibration records remain preserved with their original requirements. Their
+projection still requires declared skull-frame metadata, matched landmarks, laterality, a DV
+reference, a rigid/similarity fit, and user-sourced QC limits. They are not silently converted
+into v4 surface plans.
 
 ## Neuropixels 2.0 evidence
 
-The supported NP2 catalog entries cover `NP2003`/`NP2004` (single shank) and standard
-`NP2013`/`NP2014` (four shanks); both expose 384 simultaneous channels. The transcription uses
+The primary selector exposes `NP2003` (single shank) and standard `NP2013` (four shanks); both
+expose 384 simultaneous channels. `NP2004` and `NP2014` remain cited in the pinned source
+artifacts where they share the transcribed physical geometries, but are not extra UI choices.
+The transcription uses
 pinned imec data-sheet, User Manual V1.0.6, electrode-channel mapping, ProbeTable 1.8, and
 SpikeGLX snapshots. Quad Base remains archived compatibility evidence and is not selectable.
 
@@ -71,7 +82,7 @@ use the source-backed 206 µm tip-to-lowest-row-center distance, 15 µm axial pi
 lateral centers. Four-shank centers are 0/+250/+500/+750 µm from primary leftmost `shank-0`.
 The manufacturer 175 µm chisel-tip length remains a distinct physical dimension.
 
-The two supported choices and archived Quad Base definition are
+The two selectable choices and archived Quad Base definition are
 **`source-transcribed-review-pending`**. Exact software reconstruction and end-to-end creation
 tests do not establish manufacturing tolerance, independent transcription review,
 physical-device conformance, implantation accuracy, or tissue response.

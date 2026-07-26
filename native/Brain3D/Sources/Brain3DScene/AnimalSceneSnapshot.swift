@@ -150,13 +150,24 @@ public struct AnimalSceneSnapshot: Equatable, Sendable {
             projectId,
             String(projectRevision),
             meshResult.mesh.sha256,
-            highlightedRegionMesh?.mesh.sha256 ?? "no-highlighted-region",
+            highlightedRegionMesh.map(Self.highlightedRegionIdentity)
+                ?? "no-highlighted-region",
             selectedProbePlan?.inputSha256 ?? "no-probe",
             implantSite.map(Self.implantSiteIdentity) ?? "no-implant-site",
             majorVessels?.provenance.derivedAssetSha256 ?? "no-vessels",
             String(minimumVisibleVesselDiameterMicrometres.bitPattern, radix: 16),
             selectedVesselConflict.map(Self.conflictIdentity) ?? "no-vessel-conflict",
         ].joined(separator: ":")
+    }
+
+    private static func highlightedRegionIdentity(
+        _ mesh: AtlasMeshResult
+    ) -> String {
+        [
+            String(mesh.region?.structureId ?? 0),
+            mesh.mesh.sha256,
+            mesh.region?.rgb.map(String.init).joined(separator: ",") ?? "no-color",
+        ].joined(separator: "@")
     }
 
     static func validateImplantSite(

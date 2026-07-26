@@ -26,6 +26,23 @@ struct AtlasSceneProtocolTests {
         #expect(search["query"] as? String == "thalamus")
         #expect(search["limit"] as? Int == 25)
 
+        let overlayData = try JSONEncoder().encode(
+            try AtlasRegionOverlayParameters(
+                structureId: 549,
+                orientation: .sagittal,
+                index: 228
+            )
+        )
+        let overlay = try #require(
+            JSONSerialization.jsonObject(with: overlayData) as? [String: Any]
+        )
+        #expect(Set(overlay.keys) == Set([
+            "protocolVersion", "structureId", "orientation", "index",
+        ]))
+        #expect(overlay["structureId"] as? Int == 549)
+        #expect(overlay["orientation"] as? String == "sagittal")
+        #expect(overlay["index"] as? Int == 228)
+
         let meshData = try JSONEncoder().encode(try AtlasMeshParameters())
         let mesh = try #require(JSONSerialization.jsonObject(with: meshData) as? [String: Any])
         #expect(Set(mesh.keys) == Set(["protocolVersion", "target"]))
@@ -51,6 +68,55 @@ struct AtlasSceneProtocolTests {
             "endApMicrometres", "endDvMicrometres", "endMlMicrometres",
         ]))
         #expect(ray["frameId"] as? String == AtlasSceneContract.physicalFrameId)
+    }
+
+    @Test("Annotation region overlays decode for dorsal and every orthogonal view")
+    func regionOverlayDecoding() throws {
+        let coronal = try decode(
+            AtlasRegionOverlayResult.self,
+            object: regionOverlayPayload(orientation: "coronal", index: 100)
+        )
+        #expect(coronal.orientation == .coronal)
+        #expect(coronal.index == 100)
+        #expect(coronal.fixedAxis == .ap)
+        #expect(coronal.width == 456)
+        #expect(coronal.height == 320)
+        #expect(coronal.region.acronym == "TH")
+        #expect(coronal.includedStructureIds == [549, 1_000_001])
+
+        let dorsal = try decode(
+            AtlasRegionOverlayResult.self,
+            object: regionOverlayPayload(orientation: "dorsal", index: nil)
+        )
+        #expect(dorsal.orientation == .dorsal)
+        #expect(dorsal.index == nil)
+        #expect(dorsal.sliceCount == nil)
+        #expect(dorsal.fixedAxis == nil)
+        #expect(dorsal.rowAxis == .ap)
+        #expect(dorsal.columnAxis == .ml)
+        #expect(dorsal.width == 456)
+        #expect(dorsal.height == 528)
+    }
+
+    @Test("Region overlays fail closed on wrong axes, duplicate descendants, or extra fields")
+    func invalidRegionOverlayPayloads() throws {
+        var wrongAxis = regionOverlayPayload(orientation: "horizontal", index: 10)
+        wrongAxis["fixedAxis"] = "AP"
+        #expect(throws: Error.self) {
+            try decode(AtlasRegionOverlayResult.self, object: wrongAxis)
+        }
+
+        var duplicate = regionOverlayPayload(orientation: "dorsal", index: nil)
+        duplicate["includedStructureIds"] = [549, 549]
+        #expect(throws: Error.self) {
+            try decode(AtlasRegionOverlayResult.self, object: duplicate)
+        }
+
+        var extra = regionOverlayPayload(orientation: "sagittal", index: 200)
+        extra["approximate"] = true
+        #expect(throws: Error.self) {
+            try decode(AtlasRegionOverlayResult.self, object: extra)
+        }
     }
 
     @Test("Two strict pages load all 840 structures and close the complete tree")
@@ -328,6 +394,66 @@ struct AtlasSceneProtocolTests {
                 "distanceInsideVoxelMicrometres": 25.0,
             ] : NSNull(),
             "coordinateFrame": coordinateFrame(),
+            "atlas": atlas(),
+        ]
+    }
+
+    private func regionOverlayPayload(
+        orientation: String,
+        index: Int?
+    ) -> [String: Any] {
+        let sliceOrientation = AtlasSliceOrientation(rawValue: orientation)
+        let width: Int
+        let height: Int
+        let sliceCount: Any
+        let fixedAxis: Any
+        let rowAxis: String
+        let columnAxis: String
+        if let sliceOrientation {
+            switch sliceOrientation {
+            case .coronal:
+                width = 456
+                height = 320
+                sliceCount = 528
+            case .sagittal:
+                width = 528
+                height = 320
+                sliceCount = 456
+            case .horizontal:
+                width = 456
+                height = 528
+                sliceCount = 320
+            }
+            fixedAxis = sliceOrientation.fixedAxis.rawValue
+            rowAxis = sliceOrientation.rowAxis.rawValue
+            columnAxis = sliceOrientation.columnAxis.rawValue
+        } else {
+            width = 456
+            height = 528
+            sliceCount = NSNull()
+            fixedAxis = NSNull()
+            rowAxis = "AP"
+            columnAxis = "ML"
+        }
+        return [
+            "protocolVersion": 1,
+            "algorithmVersion": AtlasSceneContract.regionOverlayAlgorithmVersion,
+            "selectionRule": AtlasSceneContract.regionOverlaySelectionRule,
+            "region": thalamusRegion(),
+            "includedStructureIds": [549, 1_000_001],
+            "visiblePixelCount": 100,
+            "mimeType": "image/png",
+            "colorModel": "RGBA",
+            "alphaMode": "straight",
+            "pngBase64": "AAAA",
+            "width": width,
+            "height": height,
+            "orientation": orientation,
+            "index": index.map { $0 as Any } ?? NSNull(),
+            "sliceCount": sliceCount,
+            "fixedAxis": fixedAxis,
+            "rowAxis": rowAxis,
+            "columnAxis": columnAxis,
             "atlas": atlas(),
         ]
     }

@@ -41,6 +41,9 @@ dev = [
   "pytest-cov==7.1.0",
   "ruff==0.15.22",
 ]
+release = [
+  "pyinstaller==6.21.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mouse_brain_planner"]

@@ -6,7 +6,11 @@ import hashlib
 import json
 import math
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
+
+import numpy as np
+from numpy.typing import NDArray
 
 from mouse_brain_planner.coordinates.anatomical_atlas import (
     canonical_anatomical_to_brainglobe_physical,
@@ -18,9 +22,11 @@ from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_models import NormalizedProbePlacement, ProbeModelDefinition
 from mouse_brain_planner.domain.probe_plan_models import (
+    ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
     LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
     PROBE_PLANNING_ALGORITHM_VERSION,
     STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION,
+    AtlasSurfaceProbeInput,
     BregmaRelativeEntryInput,
     ProbeManipulatorInput,
     ProbePlacementInput,
@@ -33,9 +39,14 @@ from mouse_brain_planner.domain.stereotaxy_models import (
     BregmaRelativeTargetMM,
     atlas_registered_calibration_sha256,
 )
-from mouse_brain_planner.domain.surgery_common import UnitDirectionAPMLDV
+from mouse_brain_planner.domain.surgery_common import AnimalSurgeryContext, UnitDirectionAPMLDV
 from mouse_brain_planner.domain.transform_models import AnatomicalPoint
 from mouse_brain_planner.probes.catalog import validate_probe_model_catalog_snapshot
+from mouse_brain_planner.surgery.atlas_surface_planning import (
+    placement_from_atlas_surface_input,
+    resolve_atlas_surface_input,
+    validate_resolved_surface_against_annotation,
+)
 from mouse_brain_planner.surgery.stereotaxy import bregma_relative_target_to_point
 from mouse_brain_planner.surgery.trajectory import (
     direction_from_angles,
@@ -55,6 +66,159 @@ PROBE_SCALE_MATCH_ABSOLUTE_TOLERANCE = 1e-12
 
 class ProbePlanningError(ValueError):
     """Raised when a plan would require an invalid or implicit assumption."""
+
+
+def build_atlas_surface_probe_plan(
+    *,
+    annotation: NDArray[np.integer[Any]],
+    annotation_sha256: str,
+    annotation_source: str,
+    atlas: AtlasMetadata,
+    model: ProbeModelDefinition,
+    insertion_ap_mm: float,
+    insertion_ml_mm: float,
+    surface_depth_mm: float,
+    sagittal_angle_deg: float,
+    probe_layout_rotation_deg: int,
+    subject_id: str | None,
+    name: str | None = None,
+    context: AnimalSurgeryContext | None = None,
+    plan_uuid: UUID | None = None,
+    plan_version: int = 1,
+    created_at: datetime | None = None,
+) -> tuple[ProbePlanRecord, BrainGlobePhysicalPoint]:
+    """Create the calibration-free Pinpoint-style atlas-surface plan."""
+
+    validate_probe_model_catalog_snapshot(model)
+    if context is not None and context.subject_id != subject_id:
+        raise ProbePlanningError("preserved plan context does not match project subject")
+    actual_context = context or AnimalSurgeryContext(subject_id=subject_id)
+    input_data = resolve_atlas_surface_input(
+        annotation=annotation,
+        atlas=atlas,
+        insertion_ap_mm=insertion_ap_mm,
+        insertion_ml_mm=insertion_ml_mm,
+        surface_depth_mm=surface_depth_mm,
+        sagittal_angle_deg=sagittal_angle_deg,
+        probe_layout_rotation_deg=probe_layout_rotation_deg,
+        annotation_sha256=annotation_sha256,
+        annotation_source=annotation_source,
+    )
+    normalized_name = (
+        name.strip()
+        if name is not None and name.strip()
+        else _default_surface_plan_name(model, input_data)
+    )
+    placement = placement_from_atlas_surface_input(
+        input_data=input_data,
+        atlas=atlas,
+        context=actual_context,
+        model=model,
+        name=normalized_name,
+        custom_geometry_acknowledged=False,
+    )
+    actual_plan_uuid = plan_uuid or uuid4()
+    projection_sha256 = atlas_surface_projection_digest(input_data)
+    input_sha256 = probe_plan_input_digest(
+        plan_uuid=actual_plan_uuid,
+        plan_version=plan_version,
+        name=normalized_name,
+        source_target=None,
+        probe_model=model,
+        placement=placement,
+        calibration_uuid=None,
+        calibration_version=None,
+        calibration_sha256=None,
+        atlas_metadata_sha256=atlas.metadata_sha256,
+        projection_sha256=projection_sha256,
+        surface_relative_input=input_data,
+        planning_algorithm_version=ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
+    )
+    values: dict[str, object] = {
+        "plan_uuid": actual_plan_uuid,
+        "plan_version": plan_version,
+        "name": normalized_name,
+        "source_target": None,
+        "probe_model": model,
+        "manipulator_input": None,
+        "placement_input": None,
+        "surface_relative_input": input_data,
+        "placement": placement,
+        "calibration_uuid": None,
+        "calibration_version": None,
+        "calibration_sha256": None,
+        "atlas_metadata_sha256": atlas.metadata_sha256,
+        "projection_sha256": projection_sha256,
+        "planning_algorithm_version": ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
+        "input_sha256": input_sha256,
+    }
+    if created_at is not None:
+        values["created_at"] = created_at
+    return ProbePlanRecord.model_validate(values), input_data.surface_entry_physical
+
+
+def validate_atlas_surface_probe_plan_semantics(
+    *,
+    plan: ProbePlanRecord,
+    atlas: AtlasMetadata,
+    annotation: NDArray[np.integer[Any]] | None = None,
+    annotation_sha256: str | None = None,
+) -> None:
+    """Reproduce v4 geometry, optionally checking the loaded annotation bytes."""
+
+    if plan.planning_algorithm_version != ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION:
+        raise ProbePlanningError("plan is not an atlas-surface v4 plan")
+    input_data = plan.surface_relative_input
+    if input_data is None:
+        raise ProbePlanningError("atlas-surface plan is missing preserved inputs")
+    validate_probe_model_catalog_snapshot(plan.probe_model)
+    if plan.atlas_metadata_sha256 != atlas.metadata_sha256:
+        raise ProbePlanningError("probe plan atlas digest does not match the project atlas")
+    expected_projection_sha256 = atlas_surface_projection_digest(input_data)
+    if plan.projection_sha256 != expected_projection_sha256:
+        raise ProbePlanningError("atlas-surface projection digest does not match its inputs")
+    expected = placement_from_atlas_surface_input(
+        input_data=input_data,
+        atlas=atlas,
+        context=plan.placement.context,
+        model=plan.probe_model,
+        name=plan.name,
+        custom_geometry_acknowledged=plan.placement.custom_geometry_acknowledged,
+    )
+    validate_rederived_probe_placement_geometry(actual=plan.placement, expected=expected)
+    if annotation is not None:
+        if annotation_sha256 is None:
+            raise ProbePlanningError("annotation SHA-256 is required when revalidating the surface")
+        validate_resolved_surface_against_annotation(
+            input_data=input_data,
+            annotation=annotation,
+            atlas=atlas,
+            annotation_sha256=annotation_sha256,
+        )
+
+
+def atlas_surface_projection_digest(input_data: AtlasSurfaceProbeInput) -> str:
+    """Hash the resolved surface boundary and all external reference provenance."""
+
+    encoded = json.dumps(
+        {
+            "algorithm": ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION,
+            "surfaceRelativeInput": input_data.model_dump(mode="json"),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _default_surface_plan_name(
+    model: ProbeModelDefinition,
+    input_data: AtlasSurfaceProbeInput,
+) -> str:
+    product = model.product_code or model.display_name
+    return f"{product} · AP {input_data.insertion_ap_mm:g} · ML {input_data.insertion_ml_mm:g}"
 
 
 def project_bregma_target_through_calibration(

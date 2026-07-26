@@ -1,8 +1,9 @@
 import Brain3DCore
-@testable import Brain3DScene
 import Foundation
-import simd
 import Testing
+import simd
+
+@testable import Brain3DScene
 
 @Suite("Radius-bearing reference major-vessel tubes")
 struct MajorVesselTubeMeshBuilderTests {
@@ -108,6 +109,30 @@ struct MajorVesselTubeMeshBuilderTests {
         #expect(node.geometry?.elements.first?.primitiveType == .triangles)
         #expect(node.categoryBitMask == SceneCategory.majorVessel.rawValue)
         #expect(node.simdTransform == transform.sourceToSceneMatrix)
+    }
+
+    @Test("Cancelling an async rebuild stops its detached mesh worker")
+    func asyncCancellation() async {
+        let pointCount = 100_000
+        let points = (0..<pointCount).map {
+            SIMD3<Float>(Float($0), 0, 0)
+        }
+        let radii = [Float](repeating: 25, count: pointCount)
+        let worker = Task {
+            try await MajorVesselTubeMeshBuilder.buildAsync(
+                pointsASRMicrometres: points,
+                radiiMicrometres: radii,
+                runOffsets: [0, pointCount],
+                minimumVisibleDiameterMicrometres: 30
+            )
+        }
+
+        await Task.yield()
+        worker.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await worker.value
+        }
     }
 
     @Test("Production cardinality fits one deterministic batch")

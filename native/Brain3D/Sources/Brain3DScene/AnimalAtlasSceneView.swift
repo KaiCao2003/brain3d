@@ -91,6 +91,12 @@ public struct AnimalAtlasSceneView: NSViewRepresentable {
                 let snapshotIdentity = snapshot.identity
                 applyTask = Task { @MainActor [weak self, weak controller] in
                     guard let self, let controller else { return }
+                    // `updateNSView` runs inside SwiftUI's render transaction.
+                    // Defer renderer phase callbacks until that transaction has
+                    // ended so `.loading`/`.ready` never publish model changes
+                    // from within the representable update itself.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
                     await controller.apply(snapshot: snapshot) { [weak self] phase in
                         self?.parent.phaseChanged(snapshotIdentity, phase)
                     }
