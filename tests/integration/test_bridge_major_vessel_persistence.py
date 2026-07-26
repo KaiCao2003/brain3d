@@ -87,7 +87,7 @@ def test_analysis_save_open_round_trip_and_plan_mutations_invalidate(
         "registrationUncertaintyMicrometres": 20.0,
         "requiredMarginMicrometres": 10.0,
         "sourceOrLabPolicy": (
-            "Display the bundled diameter >= 30 micrometre VesSAP reference only. "
+            "Display the configured external diameter >= 30 micrometre VesSAP reference only. "
             "Clearance classification is unavailable without published subject-registration "
             "and tissue-distortion uncertainty bounds."
         ),

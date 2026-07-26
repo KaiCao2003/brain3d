@@ -1,6 +1,6 @@
-"""Pinned display-only VesSAP major-vessel geometry.
+"""External display-only VesSAP major-vessel geometry.
 
-The bundled derivative starts from the public BL6J-no1 whole-brain centerline
+The optional derivative starts from the public BL6J-no1 whole-brain centerline
 and radius volumes released with VesSAP.  Centerline voxels with a source
 radius below five 3-micrometre voxels are removed, the retained skeleton is
 mapped through the authors' published rigid plus B-spline Allen transform, and
@@ -25,6 +25,8 @@ from typing import Final, cast
 
 import numpy as np
 from numpy.typing import NDArray
+
+from mouse_brain_planner.paths import app_paths
 
 ASSET_SCHEMA_VERSION: Final = 1
 ASSET_FILENAME: Final = "vessap_bl6j1_major_vessels_50um_v1.npz"
@@ -278,9 +280,20 @@ def _expected_validation() -> dict[str, object]:
     }
 
 
-def bundled_asset_paths() -> tuple[Path, Path]:
-    asset_root = Path(__file__).resolve().parent.parent / "assets" / "vasculature"
+def default_asset_paths() -> tuple[Path, Path]:
+    """Return the expected paths for the user-installed VesSAP data package."""
+
+    asset_root = app_paths().data / "vasculature"
     return asset_root / ASSET_FILENAME, asset_root / MANIFEST_FILENAME
+
+
+def default_asset_is_available() -> bool:
+    """Return whether both external data files are regular, non-symlink files."""
+
+    return all(
+        path.is_file() and not path.is_symlink()
+        for path in default_asset_paths()
+    )
 
 
 def _read_and_validate_manifest(manifest_path: Path, asset_path: Path) -> None:
@@ -407,11 +420,11 @@ def load_vessap_major_vessels(
     asset_path: str | Path | None = None,
     manifest_path: str | Path | None = None,
 ) -> VesSAPMajorVesselGraph:
-    """Load and freeze the exact reviewed display derivative."""
+    """Load and freeze the exact externally installed display derivative."""
 
-    bundled_asset, bundled_manifest = bundled_asset_paths()
-    asset = bundled_asset if asset_path is None else Path(asset_path)
-    manifest = bundled_manifest if manifest_path is None else Path(manifest_path)
+    default_asset, default_manifest = default_asset_paths()
+    asset = default_asset if asset_path is None else Path(asset_path)
+    manifest = default_manifest if manifest_path is None else Path(manifest_path)
     _read_and_validate_manifest(manifest, asset)
     _validate_zip_members(asset)
     points, radii, offsets, source_runs = _load_arrays(asset)

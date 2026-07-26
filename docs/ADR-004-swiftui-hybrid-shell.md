@@ -80,20 +80,19 @@ process decision, is:
   complete 10 mm shaft while slice/traversal analysis uses only the implanted surface-to-tip path;
 - no separate target-registration, subject-calibration, or geometry-checkbox prerequisite for a
   v4 direct plan; legacy v1–v3 records retain their original archived semantics;
-- a VesSAP BL6J-no1 diameter-≥30 µm reference overlaid in all five views, with the older
-  LAMBADA P60_606 derivative retained only as rejected evidence; and
+- an optional external VesSAP BL6J-no1 diameter-≥30 µm reference overlaid in all five views; and
 - no reference-vessel analysis capability.
 
 Region export uses a two-phase boundary: Python generates and hashes content without mutation,
 the native client performs an atomic file write, and only a matching confirmation records the
 `exported` audit event. Cancelling the save panel or a failed write leaves the project unchanged.
 
-The service advertises `auditedReferenceMajorVessels` and serves the exact VesSAP display
-geometry after source/transform/asset checks. It omits
+When the external data package is installed, the service advertises
+`auditedReferenceMajorVessels` and serves VesSAP display geometry after
+source/transform/asset checks. It omits
 `radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.analyze` fails with
 `VESSEL_ANALYSIS_UNAVAILABLE`. The source is one cleared ex-vivo C57BL/6J reference with no
-published subject-registration or tissue-distortion error bounds. The older LAMBADA rejection
-remains bound to its canonical report and cannot be bypassed or mirrored into VesSAP.
+published subject-registration or tissue-distortion error bounds.
 
 Population density and subject-image registration remain archived compatibility code and
 persisted data. The primary bridge does not register their methods or capabilities, and the

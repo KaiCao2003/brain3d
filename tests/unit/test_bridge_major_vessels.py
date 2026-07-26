@@ -21,8 +21,6 @@ from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.project_models import PlannerProject
 from mouse_brain_planner.vasculature.vessap_major_vessels import (
     ASSET_SHA256,
-    EXPECTED_POINT_COUNT,
-    EXPECTED_RUN_COUNT,
     EXTRACTION_ALGORITHM_VERSION,
     MANDATORY_LIMITATIONS,
     REGISTRATION_TRANSFORM_ID,
@@ -31,7 +29,6 @@ from mouse_brain_planner.vasculature.vessap_major_vessels import (
     VesSAPMajorVesselError,
     VesSAPMajorVesselGraph,
     VesSAPMajorVesselProvenance,
-    load_vessap_major_vessels,
 )
 
 
@@ -197,13 +194,17 @@ def test_registration_declares_display_capability_without_loading_geometry() -> 
     assert load_count == 0
 
 
-def test_planning_session_declares_display_only_major_vessels() -> None:
+def test_planning_session_omits_external_vessel_capability_when_data_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     from tests.integration.test_bridge_probe_planning import _probe_dispatcher
 
+    monkeypatch.setenv("MOUSE_BRAIN_PLANNER_DATA_DIR", str(tmp_path))
     dispatcher, _session = _probe_dispatcher()
     hello = _call(dispatcher, "hello", client="planning-registration-test")
     capabilities = _mapping(hello["capabilities"])
-    assert capabilities["auditedReferenceMajorVessels"] is True
+    assert "auditedReferenceMajorVessels" not in capabilities
     assert "radiusAwareReferenceVesselAnalysis" not in capabilities
 
 
@@ -331,63 +332,6 @@ def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed(
     assert geometry["provenance"] == provenance
     assert geometry["limitations"] == list(MANDATORY_LIMITATIONS)
     assert load_count == 1
-
-
-def test_real_bundled_graph_round_trips_through_bridge_buffers(
-    qualified_test_reference: None,
-) -> None:
-    dispatcher = _dispatcher_with_atlas(_exact_atlas())
-    graph = load_vessap_major_vessels()
-    register_major_vessel_handlers(
-        dispatcher,
-        get_project=lambda: pytest.fail("project not expected"),
-        get_revision=lambda: 0,
-        replace_project=_unexpected_project_replace,
-        graph_loader=lambda: graph,
-    )
-
-    geometry = _call(dispatcher, "vessel.major.reference.geometry")
-    assert geometry["pointCount"] == EXPECTED_POINT_COUNT
-    assert geometry["runCount"] == EXPECTED_RUN_COUNT
-    assert geometry["segmentCount"] == EXPECTED_POINT_COUNT - EXPECTED_RUN_COUNT
-    np.testing.assert_array_equal(
-        _decode_buffer(
-            geometry["pointsASRMicrometres"],
-            dtype=np.dtype("<f4"),
-            scalar_type="float32",
-            shape=(EXPECTED_POINT_COUNT, 3),
-        ),
-        graph.points_asr_um,
-    )
-    np.testing.assert_array_equal(
-        _decode_buffer(
-            geometry["radiiMicrometres"],
-            dtype=np.dtype("<f4"),
-            scalar_type="float32",
-            shape=(EXPECTED_POINT_COUNT,),
-        ),
-        graph.radii_um,
-    )
-    np.testing.assert_array_equal(
-        _decode_buffer(
-            geometry["runOffsets"],
-            dtype=np.dtype("<i8"),
-            scalar_type="int64",
-            shape=(EXPECTED_RUN_COUNT + 1,),
-        ),
-        graph.run_offsets,
-    )
-    np.testing.assert_array_equal(
-        _decode_buffer(
-            geometry["sourceEdgeIndices"],
-            dtype=np.dtype("<i4"),
-            scalar_type="int32",
-            shape=(EXPECTED_RUN_COUNT,),
-        ),
-        graph.source_edge_indices,
-    )
-    assert _mapping(geometry["provenance"])["derivedAssetSha256"] == ASSET_SHA256
-    assert geometry["limitations"] == list(MANDATORY_LIMITATIONS)
 
 
 def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary(

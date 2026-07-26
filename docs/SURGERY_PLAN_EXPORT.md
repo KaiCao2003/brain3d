@@ -79,8 +79,7 @@ converting schema-8 target/calibration records.
 The packet is marked `FINAL` only when the project has a subject, records the animal-research
 acknowledgement, is saved and clean, and has a current matching v4 probe plan. A separate target
 projection, active subject calibration, and geometry checkbox are not v4 prerequisites. Otherwise
-the packet is visibly marked `DRAFT`. `FINAL` describes software-state agreement only; it is not
-a biological or procedural validation claim.
+the packet is visibly marked `DRAFT`. `FINAL` describes software-state agreement for the exported packet.
 
 ## Selectable planning views
 

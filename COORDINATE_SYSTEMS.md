@@ -376,11 +376,6 @@ An ontology identity does not guarantee voxel or mesh geometry. In the reviewed 
 four 2D overlays contain zero selected pixels, and 3D reports that no reviewed geometry exists;
 no inferred surface is substituted.
 
-The archived LAMBADA P60_606 derivative is not displayed. Its exact qualification found
-supporting AP and DV orientation evidence but rejected biological ML/laterality and whole-brain
-coverage because the source is a hemisphere specimen and its graph has no persisted hemisphere
-binding. Numeric points on both sides of the atlas midpoint do not establish bilateral anatomy.
-No mirroring or display-axis guess is permitted.
 
 VesSAP remains one fixed cleared reference, not the current animal. The shared coordinate frame
 permits an overlay but does not supply subject registration, tissue-distortion, or inter-animal

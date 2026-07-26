@@ -135,9 +135,10 @@ resolved.
 
 ## Use the major-vessel display reference
 
-Brain3D automatically loads the pinned VesSAP `BL6J-no1` major-vessel layer after the reviewed
-25 µm atlas opens. It appears in Dorsal, Coronal, Sagittal, Horizontal, and 3D. The status panel
-identifies the specimen, source, CC BY-NC 4.0 license, segment count, and diameter threshold.
+When the external VesSAP `BL6J-no1` data package is installed, Brain3D loads the
+major-vessel layer after the 25 µm atlas opens. It appears in Dorsal, Coronal, Sagittal,
+Horizontal, and 3D. The status panel identifies the specimen, source, license, segment count, and
+diameter threshold.
 
 The source layer intentionally includes only nominal diameter ≥30 µm centerlines and uses a
 50 µm spatial reduction. The visible-diameter slider can be adjusted from 30–250 µm without
@@ -152,8 +153,7 @@ clearing-distortion, or inter-animal uncertainty bounds, so the backend rejects 
 
 Do not interpret a gap in the overlay as absence of a vessel or use it to approve a trajectory.
 For exact source files, hashes, transform validation, extraction, and limitations, see
-[VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md). The older LAMBADA P60_606 derivative
-remains archived and rejected; it is not mixed with or mirrored into this layer.
+[VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md).
 
 ## Export a prefilled surgery plan
 
