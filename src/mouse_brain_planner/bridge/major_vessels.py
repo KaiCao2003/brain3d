@@ -68,6 +68,7 @@ from mouse_brain_planner.vasculature.vessap_major_vessels import (
     SOURCE_VERSION,
     VesSAPMajorVesselError,
     VesSAPMajorVesselGraph,
+    default_asset_is_available,
     load_vessap_major_vessels,
 )
 
@@ -75,7 +76,7 @@ MAXIMUM_RETURNED_CONFLICTS: Final = 250
 MAXIMUM_PROFILE_DISTANCE_UM: Final = 10_000.0
 REFERENCE_PROFILE_ID: Final = "vessap-bl6j-no1-major-30um-v1"
 REFERENCE_POLICY: Final = (
-    "Display the bundled diameter >= 30 micrometre VesSAP reference only. "
+    "Display the configured external diameter >= 30 micrometre VesSAP reference only. "
     "Clearance classification is unavailable without published subject-registration "
     "and tissue-distortion uncertainty bounds."
 )
@@ -98,8 +99,9 @@ class MajorVesselReferenceBridge:
     _graph_cache: VesSAPMajorVesselGraph | None = field(default=None, init=False, repr=False)
     _analysis_cache: RadiusBearingVesselRuns | None = field(default=None, init=False, repr=False)
 
-    def register(self) -> None:
-        self.dispatcher.declare_capability("auditedReferenceMajorVessels")
+    def register(self, *, advertise_capability: bool = True) -> None:
+        if advertise_capability:
+            self.dispatcher.declare_capability("auditedReferenceMajorVessels")
         self.dispatcher.register("vessel.major.reference.get", self.reference_get)
         self.dispatcher.register("vessel.major.reference.geometry", self.reference_geometry)
         self.dispatcher.register("vessel.major.reference.analyze", self.reference_analyze)
@@ -429,7 +431,11 @@ def register_major_vessel_handlers(
         replace_project=replace_project,
         graph_loader=graph_loader,
     )
-    extension.register()
+    extension.register(
+        advertise_capability=(
+            graph_loader is not load_vessap_major_vessels or default_asset_is_available()
+        )
+    )
     return extension
 
 

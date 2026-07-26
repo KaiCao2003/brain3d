@@ -163,7 +163,7 @@ def analyze_probe_vessel_clearance(
         abs_tol=1e-9,
     ):
         raise VesselClearanceInputError(
-            "risk-profile diameter must equal the pointwise threshold used by the bundled asset"
+            "risk-profile diameter must equal the pointwise threshold used by the configured asset"
         )
 
     segments = _segments(vessels)

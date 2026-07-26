@@ -78,14 +78,14 @@ Pinpoint/Urchin AP/ML reference + loaded annotation
 selected Allen ontology identity
   → descendant annotation mask ─→ Dorsal/Coronal/Sagittal/Horizontal highlight
   └─→ reviewed mesh or explicit no-geometry result ─→ SceneKit 3D
-VesSAP BL6J-no1 → pinned transform + true-path 50 µm reduction
-                ├─→ five-view display geometry
-                └─→ VESSEL_ANALYSIS_UNAVAILABLE (no clearance)
-LAMBADA P60_606 → archived rejected evidence (no runtime payload)
+external VesSAP BL6J-no1 → manifest + digest validation
+                           ├─→ five-view display geometry
+                           └─→ VESSEL_ANALYSIS_UNAVAILABLE (no clearance)
 ```
 
-The runtime advertises `auditedReferenceMajorVessels`, verifies the VesSAP manifest/NPZ, and
-serves metadata plus binary display geometry. It does not advertise
+When the external files are installed, the runtime advertises
+`auditedReferenceMajorVessels`, verifies the VesSAP manifest/NPZ, and serves metadata plus
+binary display geometry. It does not advertise
 `radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.analyze` fails before project
 access. The UI cannot manufacture a clearance result from displayed geometry or pixels.
 
@@ -96,12 +96,6 @@ laterality, topology, bounds, and asset identity have display evidence, but subj
 clearing/inter-animal variation, and a qualified transformed vessel surface remain unbounded.
 See [the VesSAP derivation record](VESSAP_MAJOR_VESSELS.md).
 
-The P60_606 diameter-≥30 µm derivative remains archived evidence, not a primary vessel layer. Its AP
-and DV orientation evidence passed, but the source is a hemisphere specimen and the exact graph
-has no persisted biological hemisphere/laterality binding. Whole-brain coverage and ML polarity
-are unqualified; no mirroring is permitted. The digest-bound canonical rejection report is
-[`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
-SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 
 Population density and subject-image registration remain separate archived compatibility code and
 persisted data. Their methods/capabilities are not registered by the primary bridge, they remain
@@ -117,13 +111,11 @@ only after the native atomic write is confirmed.
 
 Atlas identity mismatch, changed bregma/annotation source evidence, failed v4 surface
 rederivation, failed legacy calibration QC, unknown coordinate frames, source/asset digest
-mismatch, a missing or changed manifest/qualification report, malformed geometry, and stale
+mismatch, a missing or changed external manifest, malformed geometry, and stale
 project or plan hashes fail closed. The app does not substitute another atlas, present the
-Pinpoint/Urchin convention as Allen ground truth, extrude a 2D density field into vessels, infer
-hemisphere, mirror P60_606, or treat either fixed reference as a subject measurement.
+Pinpoint/Urchin convention as Allen ground truth, extrude a 2D density field into vessels, infer anatomy from missing external data, or treat a fixed reference as a subject measurement.
 
 See [ADR-004](ADR-004-swiftui-hybrid-shell.md),
 [ADR-005](ADR-005-independent-slice-viewer.md), and
-[the Pinpoint interoperability decision](PINPOINT_INTEGRATION.md),
-[the VesSAP derivation record](VESSAP_MAJOR_VESSELS.md), and
-[the LAMBADA derivation record](LAMBADA_MAJOR_VESSELS.md).
+[the Pinpoint interoperability decision](PINPOINT_INTEGRATION.md), and
+[the VesSAP data contract](VESSAP_MAJOR_VESSELS.md).

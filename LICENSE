@@ -7,10 +7,5 @@ code. No permission is granted to copy, modify, publish, distribute, sublicense,
 original source code without separate written authorization from the applicable copyright
 holders.
 
-Third-party software and scientific data retain their own licenses and terms. See THIRD_PARTY.md.
-
-For clarity, the files
-`src/mouse_brain_planner/assets/vasculature/vessap_bl6j1_major_vessels_50um_v1.npz`,
-its adjacent manifest, and `VESSAP_DATA_LICENSE.txt` are adapted VesSAP data governed by
-Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0). They are excluded
-from the all-rights-reserved terms above and are not relicensed by this project.
+Third-party software and externally supplied scientific data retain their own licenses and terms.
+See THIRD_PARTY.md.

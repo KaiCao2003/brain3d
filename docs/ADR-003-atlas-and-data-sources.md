@@ -1,254 +1,48 @@
 # ADR-003: Atlas and external data sources
 
-- **Status:** Accepted
-- **Decision date:** 2026-07-21
-- **Applies to:** atlas discovery, download, cache, provenance, and external reference material
+- Status: Accepted
+- Date: 2026-07-26
 
-## Implementation update — 2026-07-23
+## Context
 
-The atlas decision is unchanged. A CC BY-NC 4.0 diameter-≥30 µm derivative of VesSAP
-`BL6J-no1` is now the display-only major-vessel reference in all five views. Exact coordinate,
-laterality, topology, source, transform, and asset evidence permits display but not subject
-clearance. The older LAMBADA P60_606 derivative remains archived and rejected. Population density
-and subject-image registration also remain archived backend paths and are absent from the primary
-UI. See [the VesSAP record](VESSAP_MAJOR_VESSELS.md) and
-[the LAMBADA record](LAMBADA_MAJOR_VESSELS.md).
+Brain3D needs one reproducible atlas identity and clear boundaries for third-party data. Atlas
+volumes, vascular datasets, and licensed documents should not be committed to the source
+repository.
 
 ## Decision
 
-Use [BrainGlobe AtlasAPI 2.3.1](https://pypi.org/project/brainglobe-atlasapi/2.3.1/)
-as the authoritative atlas access layer. `allen_mouse_25um` package version `1.2` is the only
-runtime-allowlisted identity in the current build, for both remote and local-only catalog views. The 10 µm
-identity is deferred until the lower-memory path is release-qualified; existing cache data is
-ignored and not deleted. Arbitrary BrainGlobe keys, non-mouse atlases, and future unreviewed
-versions fail closed. Other identities may be added through the same adapter only after their
-coordinates, version, schema, citation, data terms, and native acceptance evidence are reviewed.
+### Atlas
 
-Never silently substitute one resolution or atlas for another, and never combine annotation,
-reference, mesh, or coordinate metadata from different atlas versions. Every saved project
-records the atlas identifier, installed atlas version, resolution, shape, orientation, framework,
-source annotation, source URL, cache path, SHA-256 of the installed `metadata.json`, and
-application version. The current build does **not** claim to record the install time or a package-wide
-content digest.
+Use BrainGlobe AtlasAPI with the allowlisted `allen_mouse_25um` package version `1.2`.
+BrainGlobe arrays use `[AP,DV,ML]` order and the package's `asr` orientation. The application
+validates the package key, version, shape, resolution, orientation, metadata, and structures before
+use.
 
-## Atlas identity and coordinate metadata
+Atlas files are downloaded to the application data directory and are never added to the
+repository, application bundle, or project packages.
 
-As checked on 2026-07-21, BrainGlobe's
-[`last_versions.conf`](https://gin.g-node.org/brainglobe/atlases/raw/master/last_versions.conf)
-lists version `1.2` for `allen_mouse_25um`. The generator uses Allen
-CCF 2017 annotations (`annotation/ccf_2017`) and BrainGlobe orientation `asr`: array axes are
-`[AP,DV,ML]`, the origin lies toward anterior/superior/right, and increasing indices move toward
-posterior/inferior/left. Treat those values as discovered metadata, not permanent constants:
-the installed metadata written to a project is authoritative for reopening it.
+### Major-vessel display
 
-The Allen atlas generator and citation are recorded in
-[`allen_mouse.py`](https://github.com/brainglobe/brainglobe-atlasapi/blob/v2.3.1/atlas_scripts/allen_mouse.py).
-Scientific outputs using this atlas must cite Wang et al., *The Allen Mouse Brain Common
-Coordinate Framework: A 3D Reference Atlas*, Cell 2020,
-[doi:10.1016/j.cell.2020.04.007](https://doi.org/10.1016/j.cell.2020.04.007), together with the
-exact BrainGlobe atlas name and version.
+Keep the VesSAP loader and provenance checks, but require the NPZ and manifest to be installed in
+the application data directory:
 
-All UI and saved trajectories use an application-defined coordinate model. Conversion to atlas
-array indices, BrainGlobe axes, or any future iblatlas representation happens only at named
-adapter boundaries and is covered by round-trip tests.
+```text
+<data-dir>/vasculature/vessap_bl6j1_major_vessels_50um_v1.npz
+<data-dir>/vasculature/vessap_bl6j1_major_vessels_50um_v1.npz.manifest.json
+```
 
-## Memory policy
+The bridge advertises the display capability only when both external files are present. The data
+remains governed by CC BY-NC 4.0 and is not part of Brain3D's source-code license.
 
-AtlasAPI 2.3.1 loads complete TIFF arrays with `tifffile.imread`; it does not provide chunked
-array access in this stable release. The implementation is visible in
-[`core.py`](https://github.com/brainglobe/brainglobe-atlasapi/blob/v2.3.1/brainglobe_atlasapi/core.py#L122-L135),
-and its [descriptors](https://github.com/brainglobe/brainglobe-atlasapi/blob/v2.3.1/brainglobe_atlasapi/descriptors.py#L51-L57)
-declare uint16 reference and uint32 annotation arrays.
+### Documents
 
-| Atlas | Shape | Reference + annotation raw bytes | Approx. raw memory |
-|---|---:|---:|---:|
-| `allen_mouse_25um` | `528 × 320 × 456` | uint16 + uint32 | 0.462 GB / 0.43 GiB |
-
-These figures exclude Python objects, temporary copies, derived masks, and display meshes, so peak
-resident memory is higher. Load structures and meshes on demand, release intermediates promptly,
-and never create an unbounded resident full-volume copy merely for display. Adding another
-resolution is a separate product/validation decision; no silent substitution is allowed.
-
-[BrainGlobe AtlasAPI 3.0.0rc1](https://pypi.org/project/brainglobe-atlasapi/3.0.0rc1/)
-introduces a newer storage path, but it is a prerelease and is not the production dependency. The
-adapter boundary exists so a future chunked implementation can be evaluated without changing
-project coordinates or provenance.
-
-## Archived population vascular-density decision
-
-The optional population layer uses exactly Yongsoo Kim's *Cerebrovascular, pericyte, and
-neuronal cell type mapping data 2022*,
-[Mendeley Data v1, DOI 10.17632/stxvn5sv44.1](https://data.mendeley.com/datasets/stxvn5sv44/1),
-licensed CC BY 4.0 and associated with
-[Wu et al., Cell Reports 2022](https://doi.org/10.1016/j.celrep.2022.110978).
-
-Acquisition is fail-closed. The accepted archive is
-`NVU_mapping_Adult_mouse_brain (1).7z`, exactly 311,493,514 bytes, SHA-256
-`c715c92ad153bff7f676b883f47108f886147e5d6fcd4502bcc04a0f92ed98fe`. Only two exact members are
-streamed into application-owned staging: the vascular length-density NIfTI and its Allen template.
-Their names, sizes, SHA-256 values, NIfTI header evidence, and the derived-cache manifest are
-validated before an atomic promotion.
-
-The reviewed source contract is a 20 µm `(570,400,660)` `[ML,DV,AP]` field with values in
-`m/mm^3`, four fixed adult mice, and a 100 µm local window. The density NIfTI itself has unit
-zooms, unknown units, and no qform/sform, so the implementation validates that exact caveat and
-uses the pinned README/template contract rather than treating the header as authoritative. AP is
-reversed into BrainGlobe ASR, ML is deliberately symmetrized because source polarity is not
-documented, and the prepared result is a 50 µm `[AP,DV,ML]` scalar field. Preparation requires an
-exact target-atlas identity and template correlation of at least 0.99.
-
-The backend can produce a declared transparent AP-by-ML DV maximum projection with the source,
-atlas binding, units, display window, and limitations intact. That path is retained for archived
-work but is not requested by the primary SwiftUI workspace. This is a population scalar density,
-not individual vessel paths, not subject-specific anatomy, and not used for vessel analysis. The
-separate simulation-ready graph deposit `10.17632/mjtyry6v85.1` is rejected for planning
-integration: its documentation exposes raw specimen-space XYZ without a qualified axis
-orientation, laterality, Allen transform, or bregma relationship.
-
-## Archived LAMBADA major-vessel decision
-
-The archived evidence uses the atlas-registered P60_606 graph from Renier, de Launoit, and
-Skriabine's *Vascular graphs of the developing post-natal mouse brain*, Zenodo record
-`10.5281/zenodo.18876865`, CC BY 4.0. The repository bundles a deterministic compact derivative,
-not the 5.05 GB source archive or 12.28 GB extracted graph.
-
-Extraction keeps maximal consecutive in-bounds source-edge runs only where each point has radius
-≥15 µm. The manifest binds the source/archive identities, conversion from ClearMap to
-BrainGlobe `[AP,DV,ML]`, physical 25 µm scaling, output arrays/counts, asset SHA-256, and mandatory
-limitations. These checks establish deterministic derivation, not coordinate qualification.
-
-The exact qualification rerun found supporting AP and DV orientation evidence. It rejected the
-asset because the primary record describes hemisphere specimens and the exact graph does not
-persist a graph, vertex, or edge property that binds its numerical ML coordinates to biological
-hemisphere/laterality. Coordinates occurring on both sides of an array midpoint do not establish
-whole-brain coverage. No approved exact-specimen transform supports mirroring, so the application
-does not infer a side or mirror the derivative.
-
-No LAMBADA handler or capability is registered in the current runtime. The production
-`auditedReferenceMajorVessels` capability and reference metadata/geometry methods now belong
-exclusively to the separately qualified VesSAP display reference; they never load P60_606.
-`radiusAwareReferenceVesselAnalysis` remains absent. The canonical LAMBADA rejection report is
-[`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
-SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
-
-This remains a fixed cleared reference, not the animal being planned. The source omits pial and
-choroidal vessels; the derivative omits smaller vessels; artery/vein identity is unavailable;
-and biological variation, tissue distortion, registration error, and omitted vessels are not
-bounded. It cannot support a visual overlay, vessel conflict, or surgical-clearance claim.
-
-## VesSAP display-only major-vessel decision
-
-Use the official VesSAP `BL6J-no1` 3 µm skeleton/radius volumes and published Euler + B-spline
-Allen registration for a C57BL/6J population-reference display layer. Retain source skeleton
-points with radius ≥5 voxels, preserve only true 26-neighbour source adjacency, transform
-continuous coordinates with the mandatory ML reflection, and coalesce on a 50 µm display grid.
-The bundled NPZ, adjacent strict manifest, CC BY-NC 4.0 license text, and exact source/transform
-digests must remain together.
-
-The backend may advertise `auditedReferenceMajorVessels` and serve metadata/geometry only after
-all integrity checks pass. It must not advertise `radiusAwareReferenceVesselAnalysis`.
-Clearance analysis fails with `VESSEL_ANALYSIS_UNAVAILABLE` before reading or mutating project
-state. The display must identify one fixed cleared ex-vivo specimen, omitted capillaries, and the
-absence of subject-registration/tissue-distortion bounds.
-
-This decision does not supersede the LAMBADA rejection or authorize mixing/mirroring datasets.
-The detailed transform, validation statistics, counts, and digests are in
-[VESSAP_MAJOR_VESSELS.md](VESSAP_MAJOR_VESSELS.md).
-
-## Cache, download, and offline behavior
-
-Atlas data is user cache/application data and is **not bundled inside the application**. Resolve
-paths with platformdirs under the user's macOS Application Support/cache directories. Set
-`BRAINGLOBE_CONFIG_DIR` before the first `brainglobe_atlasapi` import, because version 2.3.1
-reads it during module initialization; pass the application-owned atlas and intermediate-download
-directories explicitly where the API permits. The relevant behavior is documented in
-[`config.py`](https://github.com/brainglobe/brainglobe-atlasapi/blob/v2.3.1/brainglobe_atlasapi/config.py#L16-L25).
-
-Downloads run outside the GUI thread. The supported SwiftUI shell currently shows indeterminate
-download/preparation progress and does not expose a cancellation control; cancellation and
-quantitative progress remain future UI work. Exact-version acquisition uses BrainGlobe inside
-unique application-owned archive and atlas staging directories;
-the adapter parses metadata and structures and inspects reference/annotation TIFF headers to
-validate reviewed identity, species, package version, orientation, resolution, hierarchy,
-uint16/uint32 types, volume shapes, and path containment without loading whole arrays. Only
-packages passing that check receive a catalog `downloaded` state. The staged package is then
-atomically renamed into the visible cache. Existing valid versions and valid concurrent targets
-are preserved. An invalid same-name target is atomically moved beneath the app-owned
-`atlases/quarantine/` directory before promotion, so evidence remains recoverable and the valid
-replacement prevents a redownload loop.
-Cached-only open uses BrainGlobe's low-level local reader, cannot call its downloader, and must
-validate the exact requested version. Cache-removal and quarantine-management UI are deferred.
-
-Catalog work is invoked only by explicit native/CLI acquisition operations; ordinary atlas open
-is cache-only.
-Production does not call AtlasAPI 2.3.1's timeout-less catalog helper or abandon it in a daemon
-thread. The adapter fetches the same official `last_versions.conf` endpoint directly with a short
-socket timeout, a 15-second total deadline, cooperative checks between bounded reads, and a 1 MiB
-response limit. A validated response replaces the app-owned cache atomically; network or deadline
-failure falls back to a previously validated cached catalog. Cancellation returns without leaving
-catalog work running in another thread.
-
-Stable AtlasAPI downloads do not publish or enforce a cryptographic expected hash for each
-atlas archive. The application records the SHA-256 of the installed `metadata.json` for exact metadata
-identity. The separately measured whole-file hashes in `SCIENTIFIC_VALIDATION.md` are validation
-evidence, not persisted project fields and not upstream authentication. A future package-wide
-integrity feature must define and version its manifest before claiming corruption or content
-drift detection. Structural JSON/TIFF-header validation detects malformed or internally
-inconsistent packages, not anatomically plausible tampering. Pooch may be used for other external
-files only when an authoritative expected hash is available.
-
-## Code, data, and prior art are separate
-
-| Item | Classification | License/terms decision |
-|---|---|---|
-| BrainGlobe AtlasAPI | Executed dependency code | BSD-3-Clause; pin and attribute it |
-| Allen Mouse CCF data obtained through BrainGlobe | Downloaded scientific data | Governed by the [Allen Institute Terms of Use](https://alleninstitute.org/legal/terms-of-use), not by AtlasAPI's BSD license |
-| brainrender 2.2.0 | Prior-art concept/API reference only | BSD-3-Clause; not a runtime dependency |
-| iblatlas 1.2.0 | Prior-art coordinate/trajectory reference only | MIT; not a runtime dependency; do not install its PyQt5 GUI extra |
-| Neuropixels Trajectory Explorer v2.0.0 | Prior-art workflow reference only | GPL-3.0; no copied code or assets |
-| Pinpoint v2.0.0 | Prior-art workflow reference only | GPL-3.0; no copied code or assets |
-| cortex-lab/allenCCF and SHARP-Track | Prior-art workflow reference only | No repository license found; no copied code or assets |
-| Kim 2022 population vascular length-density data, DOI `10.17632/stxvn5sv44.1` | Optional downloaded scientific data | Mendeley Data v1, CC BY 4.0; exact archive/member identities are pinned. Archived backend preparation only; never vessel paths, a subject layer, or clearance geometry. |
-| LAMBADA P60_606 vascular graph, DOI `10.5281/zenodo.18876865` | Archived derived scientific evidence | CC BY 4.0; exact source and derivative identities are pinned. Coordinate qualification is rejected, so it is not displayed, served, mirrored, or analyzed. |
-| VesSAP BL6J-no1 whole-brain vasculature | Bundled display-only derived scientific data | CC BY-NC 4.0; exact source/transform/asset identities are pinned. It is displayed in all five views but cannot support subject clearance, vessel absence, suitability, or safety. |
-| Wu et al. simulation-ready vascular tracing data, DOI `10.17632/mjtyry6v85.1` | Rejected for planning integration | Version 1 is CC BY 4.0 and documents four traced adult-mouse graphs in MATLAB format, but the documented coordinates are raw specimen-space XYZ with no qualified axis orientation, laterality, Allen transform, or bregma relationship. No graph is integrated or bundled. |
-| VesselGraph | Prior-art vascular graph/data reference only | Software is MIT; data is CC BY-NC 4.0. No code, models, or data copied. The noncommercial restriction prevents treating it as an unrestricted distributable default. |
-| VesSAP repository code | Reviewed derivation/workflow reference only; not a runtime dependency | Repository code is MIT and was not copied. The separately licensed bundled BL6J-no1 data derivative is the CC BY-NC 4.0 artifact documented in the row above. |
-
-The Allen terms currently restrict covered Content to noncommercial research unless otherwise
-stated. The application must show the source and terms before first download, retain attribution,
-and avoid redistributing the atlas inside the `.app` or an installer. Commercial distribution,
-hosted redistribution, or a change in Allen terms requires legal review before release.
-
-Pinpoint remains a workflow reference rather than a runtime component. The hosted Unity WebGL
-application does not provide a supported bidirectional contract for exact probe identity,
-coordinate/transform provenance, camera/region state, or the VesSAP overlay. Brain3D uses its
-existing typed BrainGlobe endpoints for the complete ontology and lazy meshes instead. See
-[the Pinpoint interoperability decision](PINPOINT_INTEGRATION.md).
-
-The archived `stxvn5sv44.1` density and rejected `mjtyry6v85.1` vessel graphs are distinct
-deposits and must never be conflated. A new source still needs a stable URL, version, coordinate
-registration, citation, redistribution terms, integrity strategy, scientific semantics, and
-fail-closed UI labeling before it can be displayed. Visual ideas from prior art may inform
-independently written code, but repository code, meshes, screenshots, icons, and other assets
-must not be copied unless their license is explicitly compatible and the reuse is recorded in
-`THIRD_PARTY.md`.
+Protocol and reference-atlas PDFs are selected by the user in Settings. Brain3D reads them from
+their original locations and does not copy them into source control or the application bundle.
 
 ## Consequences
 
-- First use requires a network download; later use is offline from an application-owned cache.
-- Only the explicitly reviewed Allen mouse 25 µm package-v1.2 identity is discoverable or
-  openable in the current build.
-- 10 µm is deferred. Existing source or derived cache data is left untouched but cannot enter a
-  current project package.
-- The Mendeley density and subject-image workflows remain archived and absent from the primary UI.
-- VesSAP `BL6J-no1` is the only runtime major-vessel layer; it is display-only and separately
-  licensed CC BY-NC 4.0.
-- The LAMBADA derivative remains archived evidence and cannot render or enter analysis. Any future
-  vessel source needs a new qualification that binds trustworthy whole-brain coverage and
-  biological laterality without an inferred or mirrored hemisphere.
-- Project files carry enough provenance to enforce exact metadata identity and prevent silent
-  coordinate reinterpretation; the current build does not claim package-wide content-drift
-  detection.
-- Atlas upgrades, new external datasets, or copied prior-art material require a new review of
-  scientific provenance, terms, and `THIRD_PARTY.md` before implementation.
+- A clean checkout contains code, tests, fixtures, and documentation but no third-party datasets
+  or PDFs.
+- Users control acquisition and acceptance of external terms.
+- Missing optional data disables its capability without affecting atlas and probe planning.
+- Source identities and digests remain explicit at data-loading boundaries.
