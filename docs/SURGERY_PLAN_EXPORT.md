@@ -77,11 +77,11 @@ applicable, angles, depth, roll, probe model, source target, and calibration. Hi
 records remain load/review only. Schema 9 adds v4 without inventing a surface or silently
 converting schema-8 target/calibration records.
 
-The packet is marked `FINAL` only when the project has a subject, records the animal-research
-acknowledgement, is saved and clean, and has a current matching v4 probe plan. A separate target
-projection, active subject calibration, and geometry checkbox are not v4 prerequisites. Otherwise
-the packet is visibly marked `DRAFT`. `FINAL` describes software-state agreement only; it is not
-a biological or procedural validation claim.
+Export requires a subject, the animal-research acknowledgement, a saved and clean project, and a
+current matching v4 probe plan. A separate target projection, active subject calibration, and
+geometry checkbox are not v4 prerequisites. Project status and immutable export identities are
+stored as PDF metadata for machine verification; no document-state label or machine-audit footer
+is rendered on the pages.
 
 ## Selectable planning views
 
@@ -133,9 +133,19 @@ The final page can use either a coronal or sagittal historical plate:
 Plate coordinates are an explicit reviewed Figure 1–132 table; Brain3D does not infer uniform
 spacing. PDF page N is Figure N. Brain3D requires exactly 132 landscape-Letter pages, validates
 the figure and coordinate text on every page, and selects the nearest in-range plate. The last
-page preserves the historical plate and adds an identity summary. Probe trajectory geometry
-remains on the preceding Brain3D planning page; the exporter does not draw an unreviewed
-trajectory mark onto the atlas artwork.
+page preserves the complete historical page full-size, with its source dimensions and aspect ratio
+unchanged. Its nonzero source `MediaBox` origin is normalized exactly once before it is placed on
+the landscape-Letter output; the page is not cropped to its artwork bounds, rescaled, or repeatedly
+translated.
+
+Brain3D then adds one transparent, in-memory SVG/vector overlay. It contains one visible shaft path
+for NP2003 or four for NP2013, clipped only where the physical shaft leaves the historical page's
+plot bounds, and one readable coordinate row containing AP, ML, depth, signed angle, and layout.
+If several exact paths coincide in the selected 2D projection, their registered path data remain
+identical; the visible copies are spread symmetrically around that registered centroid and the
+same coordinate row explicitly says `coincident in view; shown spread`. The SVG uses the complete
+`792×612` viewBox and remains vector content when composited. No temporary SVG sidecar is written,
+and no atlas artwork is copied into the repository.
 
 ## Direct PDF assembly
 
@@ -145,9 +155,9 @@ an unreviewed Swift PDF package:
 1. Brain3D reads the prepared blank PDF and verifies two protocol pages plus one Letter-size
    atlas placeholder, with the expected protocol headings.
 2. Apple PDFKit and Core Graphics preserve pages 1–2 and add the prefilled date, animal record,
-   AP/ML/surface depth, signed A↔P angle, layout, and
-   `DRAFT`/`FINAL` fields to the first protocol page. The overlay is flattened into the page and
-   required text and page geometry are rechecked.
+   AP/ML/surface depth, signed A↔P angle, and layout to the first protocol page. The overlay is
+   flattened into the page and required text and page geometry are rechecked. No document-state
+   label or machine-audit footer is added.
 3. Each Brain3D planning page uses a bounded subject/plan identity line and a separate
    monospaced line containing the complete signed AP/ML and surface-depth text. The probe summary
    records the same signed angle and layout, plus the source-transcription review status.
@@ -155,19 +165,19 @@ an unreviewed Swift PDF package:
    text.
 4. Brain3D captures and hashes `MBSC_Figs_with_Layers.pdf`, validates all 132 pages, and selects
    the matching historical atlas page directly from that immutable PDF capture.
-5. Core Graphics redraws the selected atlas page with separate, non-overlapping rows for
-   coordinates, angle/layout, source-transcription review status, and surface provenance.
-   Brain3D checks the source hash before writing and verifies the output dimensions, figure
-   number, complete operator text, provenance text, and source-digest stamp.
+5. Core Graphics normalizes the selected page's nonzero `MediaBox` origin exactly once and draws
+   the complete historical page full-size without rescaling. A transparent, in-memory SVG/vector
+   layer adds one or four visible shaft paths and a single coordinate row containing AP, ML,
+   depth, signed angle, and layout. Regression tests parse and rasterize that same SVG rendering
+   path, require all expected shanks to remain visible, and check the coordinate-row bounds.
 6. PDFKit assembles the two protocol pages, the selected planning-view page or pages, and the
    one atlas page. The source template's page-3 sketch is a placeholder and is replaced rather
    than emitted.
-7. Core Graphics redraws every assembled page with a flattened audit stamp containing the
-   export class, subject, stable plan/implant ID, project revision, plan label, protocol-template
-   digest, vessel digest, v4 plan-input digest, annotation digest, bregma-source digest, and page
-   number. PDFKit then verifies every stamp, page size, page count, each planning page's ordered
-   view title and exact AP/ML/surface-depth text, and the final atlas identity before the packet
-   is atomically written.
+7. PDFKit verifies every page size, page count, each planning page's ordered view title and exact
+   AP/ML/surface-depth text, and the final atlas identity
+   before the packet is atomically written. Machine-audit values—including the export class,
+   subject, stable plan/implant ID, project revision, source digests, and page identities—are
+   stored in PDF metadata rather than rendered as a visible footer.
 
 The user-supplied source files are never rewritten. Word, Illustrator, Apple Events automation,
 and document-conversion subprocesses are not used.
@@ -198,20 +208,20 @@ Before rendering, Brain3D freezes one export capture containing:
 - VesSAP specimen/provenance and derived-asset SHA-256; and
 - the exact plan-centred slice frames or reconstructed 3D snapshot requested for the packet.
 
-The protocol PDF template and selected historical atlas plate are also SHA-256 hashed. Planning pages
-print shortened protocol, historical-atlas, and vessel source digests together with project
-revision and coordinates; the in-memory capture retains the full identities for validation.
-Brain3D rechecks the project, current v4 plan and surface evidence, selected probe, atlas, vessel
-asset, PDF source hashes, and dirty state before rendering and again before writing. Export cannot
-begin with an unresolved numeric probe draft. If any captured state changes, export fails instead of
-mixing revisions.
+The protocol PDF template and selected historical atlas plate are also SHA-256 hashed. The
+in-memory capture retains the full identities for validation, and the resulting PDF stores the
+machine-audit record in metadata only; source digests, internal IDs, and revision hashes are not
+drawn over the document. Brain3D rechecks the project, current v4 plan and surface evidence,
+selected probe, atlas, vessel asset, PDF source hashes, and dirty state before rendering and again
+before writing. Export cannot begin with an unresolved numeric probe draft. If any captured state
+changes, export fails instead of mixing revisions.
 
 ## Source ownership and redistribution
 
 The Headplate protocol PDF and Mouse Brain CD `MBSC_Figs_with_Layers.pdf` are user-supplied and
-remain governed by their source-owner terms. Neither is committed to this repository or copied
-into test fixtures. Brain3D's public builds do not contain them. An authorized lab-local build may
-copy the exact pinned atlas into its app bundle for automatic offline use; Brain3D records that
-artifact as `local-user-supplied`, and it must not be publicly redistributed without source-owner
-permission. A lab must have the rights to use its input documents and to distribute any resulting
-packet.
+remain governed by their source-owner terms. Neither the source atlas, extracted pages, rendered
+artwork, nor atlas-bearing test fixtures are committed to this repository. Brain3D's public builds
+do not contain them. An authorized lab-local build may copy the exact pinned atlas into its app
+bundle for automatic offline use; Brain3D records that artifact as `local-user-supplied`, and it
+must not be publicly redistributed without source-owner permission. A lab must have the rights to
+use its input documents and to distribute any resulting packet.

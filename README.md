@@ -25,7 +25,7 @@ release or a validation claim.
 | Direct implant definition | AP and ML locate user-facing Shank 1 at an exact local annotation-surface crossing; depth runs from that crossing to its distal target; one signed sagittal angle and one layout orientation |
 | Probes | The primary selector contains only `NP2003` (1 shank) and `NP2013` (4 shanks); exact source-pinned model snapshots; automatic committed edits and slice/3D overlays |
 | Vessels | VesSAP BL6J-no1 diameter-≥30 µm display reference overlaid in all five views; no capillary layer |
-| Surgery plan | Prefilled two-page protocol + selectable Dorsal/Coronal/Sagittal/Horizontal/3D planning pages + one coordinate-matched legacy atlas page |
+| Surgery plan | Prefilled two-page protocol + selectable Dorsal/Coronal/Sagittal/Horizontal/3D planning pages + one full historical page with an in-memory vector probe/coordinate overlay |
 | Reference analysis | Unavailable: clearance calls fail closed with `VESSEL_ANALYSIS_UNAVAILABLE`; geometry remains display-only |
 | Persistence | Schema-9 checksummed `.mouseplan` packages with revisions, provenance, migrations, backup recovery, v4 surface rederivation, and probe/model reprojection checks; legacy v1–v3 records remain preserved |
 
@@ -177,6 +177,15 @@ retain the saved atlas-location fallback in Settings. The
 implementation reads both PDFs directly, uses SceneKit for the 3D snapshot, and uses
 PDFKit/Core Graphics for overlays, assembly, and verification. It does not open Word,
 Illustrator, or another converter. Neither supplied PDF is copied into this public repository.
+The historical page remains full-size without cropping or rescaling after its nonzero `MediaBox`
+origin is normalized exactly once. A transparent in-memory SVG/vector layer adds exactly one
+visible shaft path for NP2003 or four for NP2013, clipped only at the historical page's plot
+bounds, plus one row containing AP, ML, depth, signed angle, and layout. If multiple shanks
+coincide in the selected 2D projection, their exact registered paths remain unchanged while the
+visible copies are symmetrically spread and the coordinate row says so. The SVG uses the full
+`792×612` viewBox and the export is covered by DOM, raster, and real-PDF regression checks. Project
+state, source digests, and internal audit identities are PDF
+metadata only—no document-state label or machine-audit footer is rendered.
 Each v4 planning page puts the complete AP/ML/local-surface-depth text on its own fixed coordinate
 line, separate from the bounded subject/plan identity, and prints the signed A↔P angle and layout.
 Brain3D verifies that full coordinate text and the expected view title on the rendered page and
@@ -284,8 +293,9 @@ ready download. Notarization and testing on a separate clean macOS 14 Apple Sili
 release-operator gates.
 
 The public app contains code and the display-only VesSAP derivative, but not the Allen atlas,
-user protocol PDF, or Mouse Brain atlas PDF. Allen data is still downloaded to the user's
-application cache when requested. An authorized lab-local build can set
+user protocol PDF, Mouse Brain atlas PDF, extracted atlas pages, or rendered atlas artwork. Allen
+data is still downloaded to the user's application cache when requested. An authorized lab-local
+build can set
 `BRAIN3D_LOCAL_LAB_BUILD=1` together with `BRAIN3D_MBSC_PDF` to include the exact reviewed Mouse
 Brain PDF; that local artifact must not be uploaded or
 redistributed without permission from the source owner. Public distribution must preserve the

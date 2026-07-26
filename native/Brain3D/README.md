@@ -56,8 +56,16 @@ page-3 sketch placeholder with the matched page from the consolidated 132-page
 `MBSC_Figs_with_Layers.pdf`. Configure the protocol PDF once in **Brain3D → Settings**. A lab-local
 build can include the reviewed atlas PDF and use it automatically; builds without it retain the
 saved atlas-location fallback. PDFKit/Core Graphics read the
-sources directly, merge the packet, and flatten an audit stamp onto every page. The original
-source files are never rewritten. Word, Illustrator, and Apple Events automation are not used.
+sources directly and merge the packet. The historical page is preserved full-size without
+cropping or rescaling after its nonzero `MediaBox` origin is normalized exactly once. A
+transparent, in-memory SVG/vector layer adds one visible shaft path for NP2003 or four for NP2013,
+clipped only at the historical page's plot bounds, and one coordinate row containing AP, ML,
+depth, signed angle, and layout. Coincident 2D paths are display-spread symmetrically around the
+unchanged registered centroid and disclosed in that same row. The full `792×612` SVG rendering
+path is covered by DOM, raster, and real-PDF regression checks. Machine-audit values
+are stored in PDF metadata only; no document-state label or audit footer is added. The
+original source files are never rewritten. Word, Illustrator, and Apple Events automation are not
+used.
 
 V4 export freezes and repeatedly revalidates the source-pinned bregma profile, AP/ML, annotation
 surface, depth, signed angle, layout, matching probe, atlas, vessel asset, project revision, and
@@ -70,7 +78,8 @@ path nor zero visible intersections establishes subject-specific location, vesse
 clearance, trajectory suitability, or safety. The packet is for non-human animal research only,
 not clinical use or qualified navigation.
 
-The protocol and Mouse Brain atlas sources are supplied by the user and are not redistributed
+The protocol and Mouse Brain atlas sources are supplied by the user. Neither atlas source files,
+extracted pages, rendered artwork, nor atlas-bearing test fixtures are committed or redistributed
 with Brain3D. See the full [surgery-plan export contract](../../docs/SURGERY_PLAN_EXPORT.md),
 including prerequisites, atlas matching, immutable provenance, and source-rights boundaries.
 

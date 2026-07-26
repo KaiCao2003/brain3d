@@ -54,9 +54,8 @@ struct SurgeryPlanExportTests {
             SurgeryPlanSurfaceAnglePresentation.text(-20)
                 == "A↔P -20.0° (P→A)"
         )
-        let audit = SurgeryPlanPacketRenderer.auditStamp(
+        let audit = SurgeryPlanPacketRenderer.auditManifest(
             prefill: prefill,
-            pageNumber: 1,
             pageCount: 4,
             targetId: "plan-1",
             vesselAssetSHA256: String(repeating: "3", count: 64),
@@ -90,89 +89,362 @@ struct SurgeryPlanExportTests {
         let snapshot = try await SurgeryAtlasPDFSource.shared.capture(figure39)
         #expect(snapshot.sourcePDF.starts(with: Data("%PDF-".utf8)))
         #expect(snapshot.sha256.count == 64)
-
-        let renderedPage = try SurgeryAtlasPageRenderer.overlay(
-            atlasPDF: snapshot.sourcePDF,
-            prefill: makePrefill(azimuthDegrees: 0, elevationDegrees: -90),
-            plate: figure39,
-            atlasSourceSHA256: snapshot.sha256
-        )
-        let renderedDocument = try #require(PDFDocument(data: renderedPage))
-        #expect(renderedDocument.pageCount == 1)
-        #expect(renderedDocument.string?.contains(figure39.displayName) == true)
-        #expect(
-            renderedDocument.string?.contains(
-                String(snapshot.sha256.prefix(16))
-            ) == true
-        )
+        let capturedDocument = try #require(PDFDocument(data: snapshot.sourcePDF))
+        #expect(capturedDocument.pageCount == 132)
     }
 
     @MainActor
-    @Test("Direct atlas page retains coordinates, angle, layout, review, and surface provenance")
-    func directAtlasPageRetainsSurfacePlan() throws {
+    @Test("Every page of the available 132-page atlas resolves its own coordinate map")
+    func everyAtlasPageResolvesCoordinateMap() throws {
+        let syntheticURL = try makeAtlasPDF()
+        defer { try? FileManager.default.removeItem(at: syntheticURL) }
+        var sources = [syntheticURL]
+        let realAtlasURL = URL(
+            fileURLWithPath:
+                "/Volumes/senzailab/Shared/Books/The Mouse Brain CD/MBSC_Figs_with_Layers.pdf"
+        )
+        if FileManager.default.isReadableFile(atPath: realAtlasURL.path) {
+            sources.append(realAtlasURL)
+        }
+
+        for sourceURL in sources {
+            let document = try #require(PDFDocument(url: sourceURL))
+            let plates = try SurgeryAtlasCatalog.plates(in: sourceURL)
+            #expect(document.pageCount == 132)
+            #expect(plates.count == 132)
+            for plate in plates {
+                let page = try #require(document.page(at: plate.figure - 1))
+                do {
+                    let map = try SurgeryAtlasCoordinateMap.historicalAtlas(
+                        page: page,
+                        plate: plate
+                    )
+                    #expect(map.orientation == plate.orientation)
+                    #expect(!map.plotRect.isEmpty)
+                    #expect(SurgeryAtlasCoordinateMap.viewBox.contains(map.plotRect))
+                    #expect(map.horizontalPointsPerMillimetre.isFinite)
+                    #expect(map.horizontalPointsPerMillimetre > 0)
+                    #expect(map.dvPointsPerMillimetre.isFinite)
+                    #expect(map.dvPointsPerMillimetre > 0)
+                } catch {
+                    Issue.record(
+                        "\(sourceURL.lastPathComponent) Figure \(plate.figure): \(error)"
+                    )
+                }
+            }
+        }
+    }
+
+    @MainActor
+    @Test("Direct atlas page retains source artwork and adds only the probe overlay")
+    func directAtlasPageRetainsSourceArtworkAndProbeOverlay() throws {
         let atlasPDF = try makeAtlasPDF()
         defer { try? FileManager.default.removeItem(at: atlasPDF) }
         let plate = try #require(
             SurgeryAtlasCatalog.canonicalPlates(sourceURL: atlasPDF)
                 .first { $0.figure == 39 }
         )
-        let prefill = makeSurfacePrefill(angleDegrees: -20, layoutDegrees: 90)
-        let sourceDigest = String(repeating: "a", count: 64)
+        let fixture = try makeOverlayFixture(
+            modelProductCode: "NP2013",
+            apMillimetres: -1.25,
+            mlMillimetres: -0.8,
+            depthMillimetres: 2.3,
+            angleDegrees: -20,
+            layoutDegrees: 90
+        )
         let rendered = try SurgeryAtlasPageRenderer.overlay(
             atlasPDF: Data(contentsOf: atlasPDF),
-            prefill: prefill,
-            plate: plate,
-            atlasSourceSHA256: sourceDigest
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: plate
         )
         let document = try #require(PDFDocument(data: rendered))
         let text = document.string ?? ""
-        let normalizedText = text
-            .split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
 
         #expect(document.pageCount == 1)
-        #expect(text.contains(prefill.targetCoordinateText))
-        #expect(text.contains("A↔P -20.0° (P→A)"))
-        #expect(text.contains("layout 90° CW"))
-        #expect(text.contains("source-transcribed-review-pending"))
-        #expect(text.contains("annotation 2222222222…"))
-        #expect(text.contains("Urchin@57be3cdc7d62"))
-        #expect(text.contains(String(sourceDigest.prefix(16))))
-        #expect(
-            prefill.probeReviewText.map(normalizedText.contains) == true
-        )
-        #expect(
-            prefill.surfaceProvenanceText.map(normalizedText.contains) == true
-        )
+        #expect(document.page(at: 0)?.bounds(for: .mediaBox).size == CGSize(width: 792, height: 612))
+        #expect(text.localizedCaseInsensitiveContains("Figure 39"))
+        #expect(text.localizedCaseInsensitiveContains("Bregma -0.94 mm"))
+        #expect(!text.contains("DRAFT"))
+        #expect(!text.contains("Brain3D-"))
+        #expect(!text.contains("source-transcribed-review-pending"))
+        #expect(!text.contains("annotation 2222222222"))
+        #expect(!text.contains("Urchin@57be3cdc7d62"))
+        #expect(!text.contains("Historical plate"))
     }
 
     @MainActor
-    @Test("Atlas identity box compacts a maximum-length provenance revision")
-    func directAtlasPageBoundsLongSurfaceProvenance() throws {
+    @Test("Direct atlas page never prints draft, provenance, or audit text")
+    func directAtlasPageOmitsDraftProvenanceAndAuditText() throws {
         let atlasPDF = try makeAtlasPDF()
         defer { try? FileManager.default.removeItem(at: atlasPDF) }
         let plate = try #require(
             SurgeryAtlasCatalog.canonicalPlates(sourceURL: atlasPDF)
                 .first { $0.figure == 39 }
         )
-        let prefill = makeSurfacePrefill(
+        let fixture = try makeOverlayFixture(
+            modelProductCode: "NP2013",
+            apMillimetres: -1.25,
+            mlMillimetres: -0.8,
+            depthMillimetres: 2.3,
+            angleDegrees: 0,
+            layoutDegrees: 0,
             bregmaSourceRevision: String(repeating: "r", count: 300)
         )
-        let provenance = try #require(prefill.surfaceProvenanceText)
+        let provenance = try #require(fixture.prefill.surfaceProvenanceText)
         #expect(provenance.contains("…#"))
         #expect(!provenance.contains(String(repeating: "r", count: 300)))
 
         let rendered = try SurgeryAtlasPageRenderer.overlay(
             atlasPDF: Data(contentsOf: atlasPDF),
-            prefill: prefill,
-            plate: plate,
-            atlasSourceSHA256: String(repeating: "a", count: 64)
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: plate
         )
         let document = try #require(PDFDocument(data: rendered))
         let normalizedText = (document.string ?? "")
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
-        #expect(normalizedText.contains(provenance))
+        #expect(!normalizedText.contains(provenance))
+        #expect(!normalizedText.localizedCaseInsensitiveContains("draft"))
+        #expect(!normalizedText.localizedCaseInsensitiveContains("provenance"))
+        #expect(!normalizedText.localizedCaseInsensitiveContains("audit"))
+        #expect(!normalizedText.contains("Brain3D-"))
+    }
+
+    @MainActor
+    @Test("Atlas overlay preserves nonzero MediaBox source corners")
+    func atlasOverlayPreservesNonzeroMediaBoxCorners() throws {
+        let atlasPDF = try makeAtlasPDF(
+            mediaBoxOrigin: CGPoint(x: 71.5, y: 198.5),
+            sentinelFigure: 39
+        )
+        defer { try? FileManager.default.removeItem(at: atlasPDF) }
+        let plate = try #require(
+            SurgeryAtlasCatalog.canonicalPlates(sourceURL: atlasPDF)
+                .first { $0.figure == 39 }
+        )
+        let fixture = try makeOverlayFixture(
+            modelProductCode: "NP2013",
+            apMillimetres: -1.25,
+            mlMillimetres: -0.8,
+            depthMillimetres: 2.3,
+            angleDegrees: 0,
+            layoutDegrees: 0
+        )
+        let rendered = try SurgeryAtlasPageRenderer.overlay(
+            atlasPDF: Data(contentsOf: atlasPDF),
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: plate
+        )
+        let document = try #require(PDFDocument(data: rendered))
+        let page = try #require(document.page(at: 0))
+        let topSelection = try #require(
+            document.findString("TOPLEFTSENTINEL", withOptions: []).first
+        )
+        let bottomSelection = try #require(
+            document.findString("BOTTOMRIGHTSENTINEL", withOptions: []).first
+        )
+        let topBounds = topSelection.bounds(for: page)
+        let bottomBounds = bottomSelection.bounds(for: page)
+
+        #expect(page.bounds(for: .mediaBox) == CGRect(x: 0, y: 0, width: 792, height: 612))
+        #expect(topBounds.minX >= 0)
+        #expect(topBounds.minX < 100)
+        #expect(topBounds.maxY > 520)
+        #expect(bottomBounds.maxX > 700)
+        #expect(bottomBounds.maxX <= 792)
+        #expect(bottomBounds.minY >= 0)
+        #expect(bottomBounds.minY < 80)
+    }
+
+    @Test("NP2003 and NP2013 emit complete one-line and four-line SVG overlays")
+    func probeOverlaySVGLineCountsAndCoordinateRow() throws {
+        let cases = [(model: "NP2003", count: 1), (model: "NP2013", count: 4)]
+        for testCase in cases {
+            let fixture = try makeOverlayFixture(
+                modelProductCode: testCase.model,
+                apMillimetres: -1.25,
+                mlMillimetres: -0.8,
+                depthMillimetres: 2.3,
+                angleDegrees: 0,
+                layoutDegrees: 0
+            )
+            let plate = try testAtlasPlate(.sagittal)
+            let map = try testCoordinateMap(.sagittal)
+            let overlay = try SurgeryAtlasProbeOverlay(
+                plan: fixture.plan,
+                prefill: fixture.prefill,
+                plate: plate,
+                coordinateMap: map
+            )
+            let xml = try XMLDocument(data: overlay.svgData, options: [])
+            let root = try #require(xml.rootElement())
+            let paths = try xml.nodes(
+                forXPath: "//*[local-name()='path' and starts-with(@id,'shank-')]"
+            )
+            let coordinateNodes = try xml.nodes(
+                forXPath: "//*[@id='probe-coordinates']"
+            )
+            let allTextNodes = try xml.nodes(
+                forXPath: "//*[local-name()='text']"
+            )
+
+            #expect(root.name == "svg")
+            #expect(root.attribute(forName: "width")?.stringValue == "792")
+            #expect(root.attribute(forName: "height")?.stringValue == "612")
+            #expect(root.attribute(forName: "viewBox")?.stringValue == "0 0 792 612")
+            #expect(paths.count == testCase.count)
+            #expect(overlay.shanks.count == testCase.count)
+            #expect(coordinateNodes.count == 1)
+            #expect(allTextNodes.count == 1)
+            #expect(try xml.nodes(forXPath: "//*[local-name()='line']").isEmpty)
+            #expect(try xml.nodes(forXPath: "//*[@id='layout-schematic']").isEmpty)
+            #expect(
+                coordinateNodes.first?.stringValue
+                    == "AP -1.250 mm · ML -0.800 mm · depth 2.300 mm · "
+                    + "angle +0.0° (vertical) · layout 0° sagittal"
+            )
+            #expect(!overlay.svgString.contains("<image"))
+            #expect(!overlay.svgString.localizedCaseInsensitiveContains("draft"))
+            #expect(!overlay.svgString.localizedCaseInsensitiveContains("provenance"))
+            #expect(!overlay.svgString.localizedCaseInsensitiveContains("audit"))
+            #expect(!overlay.svgString.contains("source-transcribed-review-pending"))
+            #expect(!overlay.svgString.contains("Brain3D-"))
+            #expect(
+                overlay.svgString.range(
+                    of: #"\b[0-9a-fA-F]{16,}\b"#,
+                    options: .regularExpression
+                ) == nil
+            )
+            #expect(!overlay.svgString.lowercased().contains("nan"))
+            #expect(!overlay.svgString.lowercased().contains("infinity"))
+
+            for (index, shank) in overlay.shanks.enumerated() {
+                #expect(shank.id == "shank-\(index + 1)")
+                #expect(!shank.svgPathData.isEmpty)
+                #expect(!shank.clippedSegments.isEmpty)
+                #expect(shank.projectedProximalEnd != shank.projectedSurfaceAnchor)
+                #expect(shank.projectedSurfaceAnchor != shank.projectedTip)
+                #expect(shank.projectedProximalEnd.y < map.plotRect.minY)
+                #expect(map.plotRect.contains(shank.projectedSurfaceAnchor))
+                #expect(map.plotRect.contains(shank.projectedTip))
+                #expect(pointIsFinite(shank.projectedProximalEnd))
+                #expect(pointIsFinite(shank.projectedSurfaceAnchor))
+                #expect(pointIsFinite(shank.projectedTip))
+            }
+        }
+    }
+
+    @Test("Negative ML and AP project page-right from the surface insertion site")
+    func probeOverlayCoordinateDirections() throws {
+        let fixture = try makeOverlayFixture(
+            modelProductCode: "NP2003",
+            apMillimetres: -1.25,
+            mlMillimetres: -0.8,
+            depthMillimetres: 2.3,
+            angleDegrees: 0,
+            layoutDegrees: 0
+        )
+        let coronalMap = try testCoordinateMap(.coronal)
+        let coronal = try SurgeryAtlasProbeOverlay(
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: testAtlasPlate(.coronal),
+            coordinateMap: coronalMap
+        )
+        let sagittalMap = try testCoordinateMap(.sagittal)
+        let sagittal = try SurgeryAtlasProbeOverlay(
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: testAtlasPlate(.sagittal),
+            coordinateMap: sagittalMap
+        )
+        let coronalShank = try #require(coronal.shanks.first)
+        let sagittalShank = try #require(sagittal.shanks.first)
+
+        #expect(coronalShank.projectedSurfaceAnchor.x > coronalMap.horizontalZeroX)
+        #expect(sagittalShank.projectedSurfaceAnchor.x > sagittalMap.horizontalZeroX)
+        #expect(abs(coronalShank.projectedSurfaceAnchor.x - 436) < 0.001)
+        #expect(abs(sagittalShank.projectedSurfaceAnchor.x - 458.5) < 0.001)
+        #expect(coronalShank.projectedTip.x == coronalShank.projectedSurfaceAnchor.x)
+        #expect(sagittalShank.projectedTip.x == sagittalShank.projectedSurfaceAnchor.x)
+        #expect(coronalShank.projectedTip.y > coronalShank.projectedSurfaceAnchor.y)
+        #expect(sagittalShank.projectedTip.y > sagittalShank.projectedSurfaceAnchor.y)
+    }
+
+    @MainActor
+    @Test("Collapsed four-shank projections display four centered paths without a legend")
+    func collapsedProjectionUsesCenteredDisplayOffsets() throws {
+        let fixture = try makeOverlayFixture(
+            modelProductCode: "NP2013",
+            apMillimetres: -1.25,
+            mlMillimetres: -0.8,
+            depthMillimetres: 2.3,
+            angleDegrees: 0,
+            layoutDegrees: 0
+        )
+        let coronal = try SurgeryAtlasProbeOverlay(
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: testAtlasPlate(.coronal),
+            coordinateMap: testCoordinateMap(.coronal)
+        )
+        let sagittal = try SurgeryAtlasProbeOverlay(
+            plan: fixture.plan,
+            prefill: fixture.prefill,
+            plate: testAtlasPlate(.sagittal),
+            coordinateMap: testCoordinateMap(.sagittal)
+        )
+        let coronalXML = try XMLDocument(data: coronal.svgData, options: [])
+        let coronalPaths = try coronalXML.nodes(
+            forXPath: "//*[local-name()='path' and starts-with(@id,'shank-')]"
+        ).compactMap { $0 as? XMLElement }
+        let offsets = try coronalPaths.map { path -> CGPoint in
+            let x = try #require(
+                Double(path.attribute(forName: "data-display-offset-x")?.stringValue ?? "")
+            )
+            let y = try #require(
+                Double(path.attribute(forName: "data-display-offset-y")?.stringValue ?? "")
+            )
+            return CGPoint(x: x, y: y)
+        }
+
+        #expect(coronal.projectedPathsCollapse)
+        #expect(coronal.shanks.count == 4)
+        #expect(Set(coronal.shanks.map(\.svgPathData)).count == 1)
+        #expect(coronalPaths.count == 4)
+        #expect(
+            Set(coronalPaths.compactMap {
+                $0.attribute(forName: "d")?.stringValue
+            }).count == 1
+        )
+        #expect(
+            Set(coronalPaths.compactMap {
+                $0.attribute(forName: "transform")?.stringValue
+            }).count == 4
+        )
+        #expect(
+            coronalPaths.allSatisfy {
+                $0.attribute(forName: "data-projection-display")?.stringValue
+                    == "offset-only"
+            }
+        )
+        #expect(offsets.allSatisfy { $0.x.isFinite && $0.y.isFinite })
+        #expect(abs(offsets.reduce(0) { $0 + $1.x }) < 0.001)
+        #expect(abs(offsets.reduce(0) { $0 + $1.y }) < 0.001)
+        #expect(try coronalXML.nodes(forXPath: "//*[@id='layout-schematic']").isEmpty)
+        #expect(try coronalXML.nodes(forXPath: "//*[local-name()='line']").isEmpty)
+        #expect(try coronalXML.nodes(forXPath: "//*[local-name()='text']").count == 1)
+        #expect(!coronal.svgString.contains("4-shank layout only"))
+        #expect(!coronal.svgString.contains("Layout only — not registered"))
+        #expect(
+            try rasterizedProbePalettePixelCounts(coronal)
+                .allSatisfy { $0 > 100 }
+        )
+        #expect(!sagittal.projectedPathsCollapse)
+        #expect(!sagittal.svgString.contains("layout-schematic"))
     }
 
     @MainActor
@@ -1236,7 +1508,7 @@ struct SurgeryPlanExportTests {
     }
 
     @MainActor
-    @Test("Every flattened packet page carries stable audit identity")
+    @Test("Packet preserves every page and stores audit identity only in metadata")
     func packetAuditStamp() throws {
         let protocolPDF = try labeledPDF(
             ["protocol-1", "protocol-2"],
@@ -1275,34 +1547,37 @@ struct SurgeryPlanExportTests {
             atlasSourceSHA256: atlasDigest
         )
         let document = try #require(PDFDocument(data: stamped))
+        let manifest = SurgeryPlanPacketRenderer.auditManifest(
+            prefill: prefill,
+            pageCount: document.pageCount,
+            targetId: targetId,
+            vesselAssetSHA256: vesselDigest,
+            protocolTemplateSHA256: protocolDigest,
+            atlasSourceSHA256: atlasDigest
+        )
 
         #expect(document.pageCount == 4)
+        #expect(
+            SurgeryPlanPacketRenderer.auditMetadata(
+                document,
+                contains: manifest
+            )
+        )
+        let preservedAnnotationContents = [
+            "protocol-1",
+            "protocol-2",
+            "planning-sagittal",
+            "atlas-final",
+        ]
         for index in 0 ..< document.pageCount {
             let page = try #require(document.page(at: index))
-            let stamp = SurgeryPlanPacketRenderer.auditStamp(
-                prefill: prefill,
-                pageNumber: index + 1,
-                pageCount: document.pageCount,
-                targetId: targetId,
-                vesselAssetSHA256: vesselDigest,
-                protocolTemplateSHA256: protocolDigest,
-                atlasSourceSHA256: atlasDigest
-            )
             let text = page.string ?? ""
-            #expect(
-                SurgeryPlanPacketRenderer.auditText(
-                    text,
-                    contains: stamp
-                )
-            )
-            #expect(text.contains("Brain3D-DRAFT"))
-            #expect(text.contains("TID:\(targetId)"))
-            #expect(text.contains("R:9"))
-            #expect(text.contains("V:ffffffffffff"))
-            #expect(text.contains("P:eeeeeeeeeeee"))
-            #expect(text.contains("A:dddddddddddd"))
-            #expect(text.contains("H:"))
-            #expect(page.annotations.isEmpty)
+            #expect(!text.contains("DRAFT"))
+            #expect(!text.contains("Brain3D-"))
+            #expect(!text.contains("TID:"))
+            #expect(!text.contains("H:"))
+            #expect(page.annotations.count == 1)
+            #expect(page.annotations.first?.contents == preservedAnnotationContents[index])
             let expectedSize = index < 2
                 ? CGSize(width: 612, height: 792)
                 : CGSize(width: 792, height: 612)
@@ -1311,7 +1586,7 @@ struct SurgeryPlanExportTests {
     }
 
     @MainActor
-    @Test("All five rendered planning views retain their packet audit identity")
+    @Test("All five planning views retain content while audit stays in metadata")
     func allPlanningViewsRetainPacketAuditIdentity() throws {
         let protocolPDF = try vectorTextPDF(
             ["Surgery Record", "Surgery procedure"],
@@ -1394,53 +1669,32 @@ struct SurgeryPlanExportTests {
             let text = planningPage.string ?? ""
             #expect(
                 text.contains(
-                    "FINAL · Surgery planning view — \(view.rawValue)"
+                    "Surgery planning view — \(view.rawValue)"
                 )
             )
             #expect(text.contains(prefill.targetCoordinateText))
         }
+        let manifest = SurgeryPlanPacketRenderer.auditManifest(
+            prefill: prefill,
+            pageCount: document.pageCount,
+            targetId: targetId,
+            vesselAssetSHA256: vesselDigest,
+            protocolTemplateSHA256: protocolDigest,
+            atlasSourceSHA256: atlasDigest
+        )
+        #expect(
+            SurgeryPlanPacketRenderer.auditMetadata(
+                document,
+                contains: manifest
+            )
+        )
         for index in 0 ..< document.pageCount {
             let page = try #require(document.page(at: index))
-            let stamp = SurgeryPlanPacketRenderer.auditStamp(
-                prefill: prefill,
-                pageNumber: index + 1,
-                pageCount: document.pageCount,
-                targetId: targetId,
-                vesselAssetSHA256: vesselDigest,
-                protocolTemplateSHA256: protocolDigest,
-                atlasSourceSHA256: atlasDigest
-            )
-            #expect(
-                SurgeryPlanPacketRenderer.auditText(
-                    page.string,
-                    contains: stamp
-                )
-            )
-            let wrongPageStamp = SurgeryPlanPacketRenderer.auditStamp(
-                prefill: prefill,
-                pageNumber: index == 0 ? 2 : 1,
-                pageCount: document.pageCount,
-                targetId: targetId,
-                vesselAssetSHA256: vesselDigest,
-                protocolTemplateSHA256: protocolDigest,
-                atlasSourceSHA256: atlasDigest
-            )
-            #expect(
-                !SurgeryPlanPacketRenderer.auditText(
-                    page.string,
-                    contains: wrongPageStamp
-                )
-            )
             let text = page.string ?? ""
-            #expect(text.contains("Brain3D-FINAL"))
-            #expect(text.contains("S:brain3d-ui-e2e-20260723"))
-            #expect(text.contains("TID:\(targetId)"))
-            #expect(text.contains("R:9"))
-            #expect(text.contains("V:ffffffffffff"))
-            #expect(text.contains("P:eeeeeeeeeeee"))
-            #expect(text.contains("A:dddddddddddd"))
-            #expect(text.contains("Pg:\(index + 1)/8"))
-            #expect(text.contains("H:"))
+            #expect(!text.contains("DRAFT"))
+            #expect(!text.contains("Brain3D-"))
+            #expect(!text.contains("TID:"))
+            #expect(!text.contains("H:"))
         }
         let safetySelections = document.findString(
             "Animal research only",
@@ -1449,36 +1703,43 @@ struct SurgeryPlanExportTests {
         #expect(safetySelections.count == SurgeryPlanView.allCases.count)
         for selection in safetySelections {
             let page = try #require(selection.pages.first)
-            #expect(selection.bounds(for: page).minY >= 22)
+            #expect(selection.bounds(for: page).minY >= 0)
         }
     }
 
     private func makeSurfacePrefill(
         angleDegrees: Double = 20,
         layoutDegrees: Int = 90,
-        bregmaSourceRevision: String = "Urchin@57be3cdc7d62"
+        bregmaSourceRevision: String = "Urchin@57be3cdc7d62",
+        apMillimetres: Double = -1.25,
+        mlMillimetres: Double = 0.8,
+        depthMillimetres: Double = 2.3,
+        modelProductCode: String = "NP2013"
     ) -> SurgeryPlanPrefill {
-        SurgeryPlanPrefill(
+        let isFourShank = modelProductCode == "NP2013"
+        return SurgeryPlanPrefill(
             exportClass: .draft,
             date: "2026-07-25",
             projectTitle: "m13 planning",
             projectRevision: 1,
             subjectId: "m13",
-            targetLabel: "NP2013",
-            apMillimetres: -1.25,
-            mlMillimetres: 0.8,
+            targetLabel: modelProductCode,
+            apMillimetres: apMillimetres,
+            mlMillimetres: mlMillimetres,
             dvMillimetres: nil,
             cageId: "",
             mouseNumber: "",
             weightGrams: "",
             operatorName: "",
-            probePlanName: "NP2013",
-            probeModelName: "Neuropixels 2.0 — NP2013 · 4 shanks",
-            insertionDepthMillimetres: 2.3,
+            probePlanName: modelProductCode,
+            probeModelName: isFourShank
+                ? ProbePlanningContract.neuropixels2StandardFourShankDisplayName
+                : ProbePlanningContract.neuropixels2SingleShankDisplayName,
+            insertionDepthMillimetres: depthMillimetres,
             azimuthDegrees: 180,
             elevationDegrees: -70,
             axialRotationDegrees: 180,
-            surfaceDepthMillimetres: 2.3,
+            surfaceDepthMillimetres: depthMillimetres,
             sagittalAngleDegrees: angleDegrees,
             probeLayoutRotationDegrees: layoutDegrees,
             probeVerificationStatus: "source-transcribed-review-pending",
@@ -1495,6 +1756,326 @@ struct SurgeryPlanExportTests {
                 ProbePlanningContract.surfaceBregmaSourceSHA256,
             draftReason: "test"
         )
+    }
+
+    private func makeOverlayFixture(
+        modelProductCode: String,
+        apMillimetres: Double,
+        mlMillimetres: Double,
+        depthMillimetres: Double,
+        angleDegrees: Double,
+        layoutDegrees: Int,
+        bregmaSourceRevision: String = "Urchin@57be3cdc7d62"
+    ) throws -> (plan: ProbePlanDetail, prefill: SurgeryPlanPrefill) {
+        let isFourShank = modelProductCode == "NP2013"
+        let shankCount = isFourShank ? 4 : 1
+        let bregmaAP = 5_200.0
+        let bregmaDV = 332.0
+        let bregmaML = 5_700.0
+        let surfaceAP = bregmaAP - apMillimetres * 1_000
+        let surfaceDV = bregmaDV + 200
+        let surfaceML = bregmaML - mlMillimetres * 1_000
+        let angleRadians = angleDegrees * .pi / 180
+        let inwardAP = sin(angleRadians)
+        let inwardDV = cos(angleRadians)
+        let totalLengthMillimetres = 10.0
+
+        func point(
+            ap: Double,
+            dv: Double,
+            ml: Double,
+            insideAtlas: Bool
+        ) -> [String: Any] {
+            [
+                "apMicrometres": ap,
+                "dvMicrometres": dv,
+                "mlMicrometres": ml,
+                "insideAtlas": insideAtlas,
+                "voxelIndex": insideAtlas
+                    ? ["ap": 1, "dv": 1, "ml": 1]
+                    : NSNull(),
+            ]
+        }
+
+        let shanks: [[String: Any]] = (0 ..< shankCount).map { index in
+            let offsetMicrometres = Double(index) * 250
+            let shankSurfaceAP = surfaceAP
+                + (layoutDegrees == 0 ? offsetMicrometres : 0)
+            let shankSurfaceML = surfaceML
+                - (layoutDegrees == 90 ? offsetMicrometres : 0)
+            let tipAP = shankSurfaceAP
+                + inwardAP * depthMillimetres * 1_000
+            let tipDV = surfaceDV
+                + inwardDV * depthMillimetres * 1_000
+            let proximalAP = shankSurfaceAP
+                + inwardAP * (depthMillimetres - totalLengthMillimetres) * 1_000
+            let proximalDV = surfaceDV
+                + inwardDV * (depthMillimetres - totalLengthMillimetres) * 1_000
+            let surfacePoint = point(
+                ap: shankSurfaceAP,
+                dv: surfaceDV,
+                ml: shankSurfaceML,
+                insideAtlas: true
+            )
+            return [
+                "shankId": "shank-\(index)",
+                "entry": surfacePoint,
+                "surfaceEntry": surfacePoint,
+                "tip": point(
+                    ap: tipAP,
+                    dv: tipDV,
+                    ml: shankSurfaceML,
+                    insideAtlas: true
+                ),
+                "proximalEnd": point(
+                    ap: proximalAP,
+                    dv: proximalDV,
+                    ml: shankSurfaceML,
+                    insideAtlas: false
+                ),
+                "totalLengthMicrometres": totalLengthMillimetres * 1_000,
+                "widthMicrometres": 70.0,
+                "thicknessMicrometres": 24.0,
+                "conservativeEnvelopeRadiusMicrometres": hypot(35.0, 12.0),
+                "envelopeDefinition":
+                    "circumscribed-radius-of-rectangular-cross-section",
+            ]
+        }
+        let firstShank = try #require(shanks.first)
+        let firstSurface = try #require(firstShank["surfaceEntry"] as? [String: Any])
+        let firstTip = try #require(firstShank["tip"] as? [String: Any])
+        let prefill = makeSurfacePrefill(
+            angleDegrees: angleDegrees,
+            layoutDegrees: layoutDegrees,
+            bregmaSourceRevision: bregmaSourceRevision,
+            apMillimetres: apMillimetres,
+            mlMillimetres: mlMillimetres,
+            depthMillimetres: depthMillimetres,
+            modelProductCode: modelProductCode
+        )
+        let modelId = isFourShank
+            ? ProbePlanningContract.neuropixels2StandardFourShankModelId
+            : ProbePlanningContract.neuropixels2SingleShankModelId
+        let modelDisplayName = isFourShank
+            ? ProbePlanningContract.neuropixels2StandardFourShankDisplayName
+            : ProbePlanningContract.neuropixels2SingleShankDisplayName
+        let plan = try decode(
+            ProbePlanDetail.self,
+            [
+                "planId": "55555555-5555-4555-8555-555555555555",
+                "planVersion": 1,
+                "name": "\(modelProductCode) overlay fixture",
+                "targetId": NSNull(),
+                "targetLabel": modelProductCode,
+                "modelId": modelId,
+                "modelVersion": ProbePlanningContract.neuropixels2ModelVersion,
+                "modelDisplayName": modelDisplayName,
+                "verificationStatus":
+                    ProbePlanningContract.sourceTranscribedReviewPendingStatus,
+                "inputSha256": String(repeating: "1", count: 64),
+                "placementMode": ProbePlacementMode.atlasSurfaceAPML.rawValue,
+                "calibrationId": NSNull(),
+                "calibrationVersion": NSNull(),
+                "regionAnalysisAvailable": false,
+                "regionAnalysisSha256": NSNull(),
+                "usableForNavigation": false,
+                "sourceTarget": NSNull(),
+                "manipulatorInput": NSNull(),
+                "placementInput": NSNull(),
+                "surfaceRelativeInput": [
+                    "mode": ProbePlacementMode.atlasSurfaceAPML.rawValue,
+                    "bregmaReference": [
+                        "referenceId": ProbePlanningContract.surfaceBregmaReferenceId,
+                        "atlasIdentifier": SafetyPolicy.supportedAtlasIdentifier,
+                        "atlasVersion": SafetyPolicy.supportedAtlasVersion,
+                        "frameId": ProbePlanningContract.atlasFrameId,
+                        "componentOrder": ["AP", "DV", "ML"],
+                        "units": "micrometre",
+                        "apMicrometres": bregmaAP,
+                        "dvMicrometres": bregmaDV,
+                        "mlMicrometres": bregmaML,
+                        "sourceTitle": "Pinned bregma fixture",
+                        "sourceUrl": "https://example.invalid/bregma",
+                        "sourceRevision": bregmaSourceRevision,
+                        "sourceSha256":
+                            ProbePlanningContract.surfaceBregmaSourceSHA256,
+                        "retrievedOn": "2026-07-25",
+                        "limitation": "Synthetic test fixture",
+                    ],
+                    "insertionAPMillimetres": apMillimetres,
+                    "insertionMLMillimetres": mlMillimetres,
+                    "surfaceDepthMillimetres": depthMillimetres,
+                    "sagittalAngleDegrees": angleDegrees,
+                    "probeLayoutRotationDegrees": layoutDegrees,
+                    "surfaceEntry": [
+                        "atlasIdentifier": SafetyPolicy.supportedAtlasIdentifier,
+                        "atlasVersion": SafetyPolicy.supportedAtlasVersion,
+                        "frameId": ProbePlanningContract.atlasFrameId,
+                        "componentOrder": ["AP", "DV", "ML"],
+                        "units": "micrometre",
+                        "apMicrometres": surfaceAP,
+                        "dvMicrometres": surfaceDV,
+                        "mlMicrometres": surfaceML,
+                    ],
+                    "surfaceDVIndex": 1,
+                    "surfaceDVResolutionMicrometres": 25.0,
+                    "annotationSource": "synthetic test fixture",
+                    "annotationSha256": String(repeating: "2", count: 64),
+                    "surfaceDefinitionVersion":
+                        ProbePlanningContract.surfaceDefinitionVersion,
+                    "apSignConvention": ProbePlanningContract.surfaceAPSignConvention,
+                    "mlSignConvention": ProbePlanningContract.surfaceMLSignConvention,
+                    "depthConvention": ProbePlanningContract.surfaceDepthConvention,
+                    "angleConvention": ProbePlanningContract.surfaceAngleConvention,
+                    "layoutConvention": ProbePlanningContract.surfaceLayoutConvention,
+                ],
+                "placement": [
+                    "placementId": "66666666-6666-4666-8666-666666666666",
+                    "method": ProbePlanningContract.surfacePlacementMethod,
+                    "azimuthDegrees": 0.0,
+                    "elevationDegrees": -90.0 + abs(angleDegrees),
+                    "insertionDepthMicrometres": depthMillimetres * 1_000,
+                    "axialRotationDegrees": Double(layoutDegrees),
+                    "angleConvention": ProbePlanningContract.angleConvention,
+                    "inwardDirection": direction(
+                        ap: inwardAP,
+                        ml: 0,
+                        dv: inwardDV
+                    ),
+                    "localLateralDirection": direction(ap: 0, ml: 1, dv: 0),
+                    "localNormalDirection": direction(ap: -1, ml: 0, dv: 0),
+                    "modelToPlacementUniformScale": 1.0,
+                    "canonicalFrame": [
+                        "frameId": "ATLAS_CANONICAL_AP_ML_DV_UM:test",
+                        "componentOrder": ["AP", "ML", "DV"],
+                        "units": "micrometre",
+                        "apPositiveDirection": "anterior",
+                        "mlPositiveDirection": "right",
+                        "dvPositiveDirection": "dorsal/up",
+                        "entry": canonicalPoint(ap: 0, ml: 0, dv: 0),
+                        "target": canonicalPoint(
+                            ap: inwardAP * depthMillimetres * 1_000,
+                            ml: 0,
+                            dv: inwardDV * depthMillimetres * 1_000
+                        ),
+                        "tip": canonicalPoint(
+                            ap: inwardAP * depthMillimetres * 1_000,
+                            ml: 0,
+                            dv: inwardDV * depthMillimetres * 1_000
+                        ),
+                    ],
+                    "atlasFrame": [
+                        "frameId": ProbePlanningContract.atlasFrameId,
+                        "componentOrder": ["AP", "DV", "ML"],
+                        "units": "micrometre",
+                        "origin": "anterior/superior/right atlas corner",
+                        "entry": firstSurface,
+                        "target": firstTip,
+                        "tip": firstTip,
+                    ],
+                ],
+                "shanks": shanks,
+                "recordingSites": [],
+                "provenance": [
+                    "calibrationId": NSNull(),
+                    "calibrationVersion": NSNull(),
+                    "calibrationSha256": NSNull(),
+                    "atlasMetadataSha256": String(repeating: "3", count: 64),
+                    "projectionSha256": String(repeating: "4", count: 64),
+                    "planningAlgorithmVersion":
+                        ProbePlanningContract.surfacePlanningAlgorithmVersion,
+                    "planInputSha256": String(repeating: "1", count: 64),
+                    "catalogVersion": ProbePlanningContract.catalogVersion,
+                ],
+                "warning": "Animal research planning only",
+            ]
+        )
+        return (plan, prefill)
+    }
+
+    private func testAtlasPlate(
+        _ orientation: SurgeryAtlasOrientation
+    ) throws -> SurgeryAtlasPlate {
+        let figure = orientation == .coronal ? 39 : 101
+        return try #require(
+            SurgeryAtlasCatalog.canonicalPlates(
+                sourceURL: URL(fileURLWithPath: "/tmp/atlas.pdf")
+            ).first { $0.figure == figure }
+        )
+    }
+
+    private func testCoordinateMap(
+        _ orientation: SurgeryAtlasOrientation
+    ) throws -> SurgeryAtlasCoordinateMap {
+        try SurgeryAtlasCoordinateMap(
+            orientation: orientation,
+            plotRect: CGRect(x: 40, y: 40, width: 712, height: 532),
+            horizontalZeroX: 396,
+            dvZeroY: 80,
+            horizontalPointsPerMillimetre: 50,
+            dvPointsPerMillimetre: 50
+        )
+    }
+
+    private func pointIsFinite(_ point: CGPoint) -> Bool {
+        point.x.isFinite && point.y.isFinite
+    }
+
+    @MainActor
+    private func rasterizedProbePalettePixelCounts(
+        _ overlay: SurgeryAtlasProbeOverlay
+    ) throws -> [Int] {
+        let width = 792
+        let height = 612
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](
+            repeating: 0,
+            count: bytesPerRow * height
+        )
+        let palette: [(red: UInt8, green: UInt8, blue: UInt8)] = [
+            (255, 0, 93),
+            (0, 108, 255),
+            (0, 168, 107),
+            (255, 122, 0),
+        ]
+        return try pixels.withUnsafeMutableBytes { bytes in
+            let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue
+                | CGImageAlphaInfo.premultipliedLast.rawValue
+            let context = try #require(
+                CGContext(
+                    data: bytes.baseAddress,
+                    width: width,
+                    height: height,
+                    bitsPerComponent: 8,
+                    bytesPerRow: bytesPerRow,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: bitmapInfo
+                )
+            )
+            context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+            try overlay.drawSVG(
+                in: CGRect(x: 0, y: 0, width: width, height: height),
+                context: context
+            )
+            context.flush()
+
+            var counts = Array(repeating: 0, count: palette.count)
+            let tolerance = 12
+            for index in stride(from: 0, to: bytes.count, by: 4) {
+                guard bytes[index + 3] > 220 else { continue }
+                let red = Int(bytes[index])
+                let green = Int(bytes[index + 1])
+                let blue = Int(bytes[index + 2])
+                for (paletteIndex, target) in palette.enumerated()
+                where abs(red - Int(target.red)) <= tolerance
+                    && abs(green - Int(target.green)) <= tolerance
+                    && abs(blue - Int(target.blue)) <= tolerance
+                {
+                    counts[paletteIndex] += 1
+                }
+            }
+            return counts
+        }
     }
 
     private func makePrefill(
@@ -1561,7 +2142,10 @@ struct SurgeryPlanExportTests {
     }
 
     @MainActor
-    private func makeAtlasPDF() throws -> URL {
+    private func makeAtlasPDF(
+        mediaBoxOrigin: CGPoint = .zero,
+        sentinelFigure: Int? = nil
+    ) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(
             "Brain3D-SurgeryAtlasTests-\(UUID().uuidString).pdf"
         )
@@ -1583,9 +2167,10 @@ struct SurgeryPlanExportTests {
                 )
             }
         }
-        try vectorTextPDF(
+        try atlasGridPDF(
             labels,
-            size: CGSize(width: 792, height: 612)
+            mediaBoxOrigin: mediaBoxOrigin,
+            sentinelFigure: sentinelFigure
         ).write(to: url, options: .atomic)
         return url
     }
@@ -1959,6 +2544,106 @@ struct SurgeryPlanExportTests {
                 options: [.sortedKeys]
             )
         )
+    }
+
+    @MainActor
+    private func atlasGridPDF(
+        _ labels: [String],
+        mediaBoxOrigin: CGPoint = .zero,
+        sentinelFigure: Int? = nil
+    ) throws -> Data {
+        let output = NSMutableData()
+        var mediaBox = CGRect(
+            origin: mediaBoxOrigin,
+            size: CGSize(width: 792, height: 612)
+        )
+        let consumer = try #require(
+            CGDataConsumer(data: output as CFMutableData)
+        )
+        let context = try #require(
+            CGContext(consumer: consumer, mediaBox: &mediaBox, nil)
+        )
+        for (index, label) in labels.enumerated() {
+            context.beginPDFPage(nil)
+            let graphics = NSGraphicsContext(cgContext: context, flipped: false)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current = graphics
+            NSColor.white.setFill()
+            mediaBox.fill()
+            NSAttributedString(
+                string: label,
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 18),
+                    .foregroundColor: NSColor.black,
+                ]
+            ).draw(
+                at: CGPoint(
+                    x: mediaBox.minX + 36,
+                    y: mediaBox.maxY - 44
+                )
+            )
+            NSAttributedString(
+                string: "Bregma",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 9),
+                    .foregroundColor: NSColor.black,
+                ]
+            ).draw(
+                at: CGPoint(
+                    x: mediaBox.minX + 374,
+                    y: mediaBox.maxY - 24
+                )
+            )
+            for (value, yOffset) in [("0", 120.0), ("1", 170.0)] {
+                NSAttributedString(
+                    string: value,
+                    attributes: [
+                        .font: NSFont.monospacedDigitSystemFont(
+                            ofSize: 9,
+                            weight: .regular
+                        ),
+                        .foregroundColor: NSColor.black,
+                    ]
+                ).draw(
+                    at: CGPoint(
+                        x: mediaBox.maxX - 8,
+                        y: mediaBox.maxY - yOffset
+                    )
+                )
+            }
+            if sentinelFigure == index + 1 {
+                NSAttributedString(
+                    string: "TOPLEFTSENTINEL",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 9),
+                        .foregroundColor: NSColor.black,
+                    ]
+                ).draw(
+                    at: CGPoint(
+                        x: mediaBox.minX + 18,
+                        y: mediaBox.maxY - 70
+                    )
+                )
+                NSAttributedString(
+                    string: "BOTTOMRIGHTSENTINEL",
+                    attributes: [
+                        .font: NSFont.systemFont(ofSize: 9),
+                        .foregroundColor: NSColor.black,
+                    ]
+                ).draw(
+                    at: CGPoint(
+                        x: mediaBox.maxX - 135,
+                        y: mediaBox.minY + 18
+                    )
+                )
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            context.endPDFPage()
+        }
+        context.closePDF()
+        let data = output as Data
+        #expect(PDFDocument(data: data)?.pageCount == labels.count)
+        return data
     }
 
     @MainActor

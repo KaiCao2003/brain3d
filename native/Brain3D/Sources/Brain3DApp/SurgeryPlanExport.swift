@@ -888,7 +888,6 @@ enum SurgeryProtocolPDFRenderer {
               verified.pageCount == SurgeryProtocolPDFTemplate.protocolPageCount,
               let verifiedText = verified.string,
               [
-                  prefill.exportClass.rawValue,
                   prefill.date,
                   protocolSubjectLine(prefill.subjectId),
               ].allSatisfy(verifiedText.contains),
@@ -902,12 +901,6 @@ enum SurgeryProtocolPDFRenderer {
     }
 
     private static func drawProtocolPrefill(_ prefill: SurgeryPlanPrefill) {
-        field(
-            prefill.exportClass.rawValue,
-            rect: CGRect(x: 142, y: 714, width: 70, height: 15),
-            font: .systemFont(ofSize: 9, weight: .bold),
-            color: prefill.exportClass == .draft ? .systemOrange : .systemGreen
-        )
         field(
             prefill.date,
             rect: CGRect(x: 451, y: 708, width: 78, height: 15),
@@ -1320,10 +1313,10 @@ enum SurgeryPlanningPageRenderer {
         mediaBox.fill()
 
         draw(
-            "\(prefill.exportClass.rawValue) · Surgery planning view — \(artifact.view.rawValue)",
+            "Surgery planning view — \(artifact.view.rawValue)",
             at: CGPoint(x: 38, y: 568),
             font: .systemFont(ofSize: 17, weight: .bold),
-            color: prefill.exportClass == .draft ? .systemOrange : .black
+            color: .black
         )
         let planningIdentity = fittedPlanningIdentityText(
             subjectId: prefill.subjectId,
@@ -1443,9 +1436,7 @@ enum SurgeryPlanningPageRenderer {
         context.endPDFPage()
         context.closePDF()
         let data = output as Data
-        let expectedTitle =
-            "\(prefill.exportClass.rawValue) · Surgery planning view — "
-                + artifact.view.rawValue
+        let expectedTitle = "Surgery planning view — " + artifact.view.rawValue
         guard let verified = PDFDocument(data: data),
               verified.pageCount == 1,
               let verifiedPage = verified.page(at: 0),
@@ -1660,49 +1651,37 @@ actor SurgeryAtlasPDFSource {
 enum SurgeryAtlasPageRenderer {
     static func overlay(
         atlasPDF: Data,
+        plan: ProbePlanDetail,
         prefill: SurgeryPlanPrefill,
-        plate: SurgeryAtlasPlate,
-        atlasSourceSHA256: String
+        plate: SurgeryAtlasPlate
     ) throws -> Data {
         guard let source = PDFDocument(data: atlasPDF),
               source.pageCount == 132,
               let page = source.page(at: plate.figure - 1),
               SurgeryAtlasPDFSource.isLandscapeLetter(
                   page.bounds(for: .mediaBox).size
+              ),
+              SurgeryAtlasPDFSource.validatesPageText(
+                  page.string ?? "",
+                  plate: plate
               )
         else {
             throw SurgeryPlanExportError.invalidAtlasPage(
                 "Could not read page \(plate.figure) from the consolidated PDF."
             )
         }
-        let reviewRect = CGRect(x: 50, y: 518, width: 690, height: 13)
-        let reviewFont: NSFont?
-        if let review = prefill.probeReviewText {
-            reviewFont = try fittedSingleLineFont(
-                for: review,
-                baseFont: .systemFont(ofSize: 6.8, weight: .semibold),
-                minimumFontSize: 5.5,
-                maximumWidth: reviewRect.width,
-                field: "probe review"
-            )
-        } else {
-            reviewFont = nil
-        }
-        let provenanceRect = CGRect(x: 50, y: 503, width: 690, height: 13)
-        let provenanceFont: NSFont?
-        if let provenance = prefill.surfaceProvenanceText {
-            provenanceFont = try fittedSingleLineFont(
-                for: provenance,
-                baseFont: .monospacedSystemFont(ofSize: 5.8, weight: .regular),
-                minimumFontSize: 4.8,
-                maximumWidth: provenanceRect.width,
-                field: "surface provenance"
-            )
-        } else {
-            provenanceFont = nil
-        }
+        let coordinateMap = try SurgeryAtlasCoordinateMap.historicalAtlas(
+            page: page,
+            plate: plate
+        )
+        let probeOverlay = try SurgeryAtlasProbeOverlay(
+            plan: plan,
+            prefill: prefill,
+            plate: plate,
+            coordinateMap: coordinateMap
+        )
         let output = NSMutableData()
-        var mediaBox = CGRect(x: 0, y: 0, width: 792, height: 612)
+        var mediaBox = SurgeryAtlasCoordinateMap.viewBox
         guard let consumer = CGDataConsumer(data: output as CFMutableData),
               let context = CGContext(
                   consumer: consumer,
@@ -1715,66 +1694,11 @@ enum SurgeryAtlasPageRenderer {
             )
         }
         context.beginPDFPage(nil)
-        let sourceBox = page.bounds(for: .mediaBox)
-        context.saveGState()
-        context.translateBy(x: -sourceBox.minX, y: -sourceBox.minY)
+        // PDFKit normalizes the selected page's non-zero MediaBox origin while
+        // drawing. Applying a second translation here clips the historical
+        // artwork and removes the lower atlas labels.
         page.draw(with: .mediaBox, to: context)
-        context.restoreGState()
-        let graphics = NSGraphicsContext(cgContext: context, flipped: false)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = graphics
-
-        let box = NSBezierPath(
-            roundedRect: CGRect(x: 38, y: 486, width: 716, height: 100),
-            xRadius: 8,
-            yRadius: 8
-        )
-        NSColor(calibratedWhite: 0.98, alpha: 0.96).setFill()
-        NSColor(calibratedWhite: 0.72, alpha: 1).setStroke()
-        box.lineWidth = 1
-        box.fill()
-        box.stroke()
-        draw(
-            "\(prefill.exportClass.rawValue) · \(prefill.subjectId) · "
-                + "\(prefill.targetLabel) · \(plate.displayName)",
-            in: CGRect(x: 50, y: 563, width: 690, height: 16),
-            font: .systemFont(ofSize: 11, weight: .bold),
-            color: prefill.exportClass == .draft ? .systemOrange : .black
-        )
-        draw(
-            prefill.targetCoordinateText,
-            in: CGRect(x: 50, y: 548, width: 690, height: 13),
-            font: .monospacedSystemFont(ofSize: 8.0, weight: .semibold)
-        )
-        draw(
-            prefill.compactProbeText,
-            in: CGRect(x: 50, y: 533, width: 690, height: 13),
-            font: .monospacedSystemFont(ofSize: 7.6, weight: .medium)
-        )
-        if let review = prefill.probeReviewText, let reviewFont {
-            drawSingleLine(
-                review,
-                in: reviewRect,
-                font: reviewFont,
-                color: .systemOrange
-            )
-        }
-        if let provenance = prefill.surfaceProvenanceText, let provenanceFont {
-            drawSingleLine(
-                provenance,
-                in: provenanceRect,
-                font: provenanceFont,
-                color: NSColor(calibratedWhite: 0.32, alpha: 1)
-            )
-        }
-        draw(
-            "Historical plate \(atlasSourceSHA256.prefix(16))… · "
-                + "Coronal plate convention: Bregma = Interaural − 3.80 mm",
-            in: CGRect(x: 50, y: 489, width: 690, height: 12),
-            font: .monospacedSystemFont(ofSize: 6.5, weight: .regular),
-            color: NSColor(calibratedWhite: 0.32, alpha: 1)
-        )
-        NSGraphicsContext.restoreGraphicsState()
+        try probeOverlay.drawSVG(in: mediaBox, context: context)
         context.endPDFPage()
         context.closePDF()
 
@@ -1785,104 +1709,18 @@ enum SurgeryAtlasPageRenderer {
               verifiedPage.bounds(for: .mediaBox).size == mediaBox.size,
               data.count > 10_000,
               let verifiedText = verified.string,
-              contains("Figure \(plate.figure)", in: verifiedText),
-              contains(plate.coordinateLabel, in: verifiedText),
-              contains(prefill.targetCoordinateText, in: verifiedText),
-              contains(prefill.compactProbeText, in: verifiedText),
-              containsIfPresent(prefill.probeReviewText, in: verifiedText),
-              containsIfPresent(prefill.surfaceProvenanceText, in: verifiedText),
-              verifiedText.contains(String(atlasSourceSHA256.prefix(16)))
+              SurgeryAtlasPDFSource.validatesPageText(
+                  verifiedText,
+                  plate: plate
+              ),
+              !verifiedText.contains("Brain3D-DRAFT"),
+              !verifiedText.contains("Brain3D-FINAL")
         else {
             throw SurgeryPlanExportError.invalidAtlasPage(
-                "The identity-linked atlas output failed verification."
+                "The complete vector-overlay atlas page failed verification."
             )
         }
         return data
-    }
-
-    private static func draw(
-        _ text: String,
-        in rect: CGRect,
-        font: NSFont,
-        color: NSColor = .black
-    ) {
-        NSAttributedString(
-            string: text,
-            attributes: [.font: font, .foregroundColor: color]
-        ).draw(in: rect)
-    }
-
-    private static func drawSingleLine(
-        _ text: String,
-        in rect: CGRect,
-        font: NSFont,
-        color: NSColor
-    ) {
-        let attributed = NSAttributedString(
-            string: text,
-            attributes: [.font: font, .foregroundColor: color]
-        )
-        let size = attributed.size()
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: rect).addClip()
-        attributed.draw(
-            at: CGPoint(
-                x: rect.minX,
-                y: rect.midY - size.height / 2
-            )
-        )
-        NSGraphicsContext.restoreGraphicsState()
-    }
-
-    private static func fittedSingleLineFont(
-        for text: String,
-        baseFont: NSFont,
-        minimumFontSize: CGFloat,
-        maximumWidth: CGFloat,
-        field: String
-    ) throws -> NSFont {
-        let measuredWidth = NSAttributedString(
-            string: text,
-            attributes: [.font: baseFont]
-        ).size().width
-        let fittedPointSize = max(
-            minimumFontSize,
-            min(
-                baseFont.pointSize,
-                baseFont.pointSize * (maximumWidth * 0.98)
-                    / max(measuredWidth, 1)
-            )
-        )
-        let fittedFont = NSFontManager.shared.convert(
-            baseFont,
-            toSize: fittedPointSize
-        )
-        let fittedWidth = NSAttributedString(
-            string: text,
-            attributes: [.font: fittedFont]
-        ).size().width
-        guard fittedWidth <= maximumWidth else {
-            throw SurgeryPlanExportError.invalidAtlasPage(
-                "The \(field) text is too wide for the historical-atlas identity box."
-            )
-        }
-        return fittedFont
-    }
-
-    private static func contains(_ expected: String, in actual: String) -> Bool {
-        normalized(actual).contains(normalized(expected))
-    }
-
-    private static func containsIfPresent(
-        _ expected: String?,
-        in actual: String
-    ) -> Bool {
-        expected.map { contains($0, in: actual) } ?? true
-    }
-
-    private static func normalized(_ text: String) -> String {
-        text.split(whereSeparator: \.isWhitespace)
-            .joined(separator: " ")
     }
 }
 
@@ -1952,69 +1790,50 @@ enum SurgeryPlanPacketRenderer {
               source.pageCount >= 3
         else {
             throw SurgeryPlanExportError.pdfAssemblyFailed(
-                "The ordered packet could not be reopened for audit stamping."
+                "The ordered packet could not be reopened for audit metadata."
             )
         }
-        let output = PDFDocument()
-        for index in 0 ..< source.pageCount {
-            guard let page = source.page(at: index) else {
-                throw SurgeryPlanExportError.pdfAssemblyFailed(
-                    "Page \(index + 1) could not be read for audit stamping."
-                )
-            }
-            let stamp = auditStamp(
-                prefill: prefill,
-                pageNumber: index + 1,
-                pageCount: source.pageCount,
-                targetId: targetId,
-                vesselAssetSHA256: vesselAssetSHA256,
-                protocolTemplateSHA256: protocolTemplateSHA256,
-                atlasSourceSHA256: atlasSourceSHA256
-            )
-            let flattened: PDFPage
-            do {
-                flattened = try flattenedPage(
-                    page,
-                    stamp: stamp,
-                    prefill: prefill
-                )
-            } catch {
-                throw SurgeryPlanExportError.pdfAssemblyFailed(
-                    "Audit stamping failed on page \(index + 1): "
-                        + error.localizedDescription
-                )
-            }
-            output.insert(flattened, at: index)
+        let originalPageBounds = (0 ..< source.pageCount).compactMap {
+            source.page(at: $0)?.bounds(for: .mediaBox)
         }
-        guard let data = output.dataRepresentation(),
+        guard originalPageBounds.count == source.pageCount else {
+            throw SurgeryPlanExportError.pdfAssemblyFailed(
+                "The ordered packet contains an unreadable page."
+            )
+        }
+        let manifest = auditManifest(
+            prefill: prefill,
+            pageCount: source.pageCount,
+            targetId: targetId,
+            vesselAssetSHA256: vesselAssetSHA256,
+            protocolTemplateSHA256: protocolTemplateSHA256,
+            atlasSourceSHA256: atlasSourceSHA256
+        )
+        var attributes = source.documentAttributes ?? [:]
+        attributes[PDFDocumentAttribute.titleAttribute] =
+            "Brain3D surgery plan — \(prefill.subjectId)"
+        attributes[PDFDocumentAttribute.creatorAttribute] = "Brain3D"
+        attributes[PDFDocumentAttribute.subjectAttribute] = manifest
+        source.documentAttributes = attributes
+
+        guard let data = source.dataRepresentation(),
               let verified = PDFDocument(data: data),
               verified.pageCount == source.pageCount,
+              auditMetadata(verified, contains: manifest),
               (0 ..< verified.pageCount).allSatisfy({ index in
-                  auditText(
-                      verified.page(at: index)?.string,
-                      contains:
-                      auditStamp(
-                          prefill: prefill,
-                          pageNumber: index + 1,
-                          pageCount: verified.pageCount,
-                          targetId: targetId,
-                          vesselAssetSHA256: vesselAssetSHA256,
-                          protocolTemplateSHA256: protocolTemplateSHA256,
-                          atlasSourceSHA256: atlasSourceSHA256
-                      )
-                  )
+                  verified.page(at: index)?.bounds(for: .mediaBox)
+                      == originalPageBounds[index]
               })
         else {
             throw SurgeryPlanExportError.pdfAssemblyFailed(
-                "The stamped packet failed page-count or audit-text verification."
+                "The packet failed page-bound or audit-metadata verification."
             )
         }
         return data
     }
 
-    static func auditStamp(
+    static func auditManifest(
         prefill: SurgeryPlanPrefill,
-        pageNumber: Int,
         pageCount: Int,
         targetId: String,
         vesselAssetSHA256: String,
@@ -2034,132 +1853,26 @@ enum SurgeryPlanPacketRenderer {
         } else {
             surfaceIdentity = ""
         }
-        let identity = "Brain3D-\(prefill.exportClass.rawValue) | S:\(subject) | "
+        let identity = "Brain3D surgery-plan audit v1 | "
+            + "state:\(prefill.exportClass.rawValue.lowercased()) | S:\(subject) | "
             + "TID:\(stableTargetId) | R:\(prefill.projectRevision) | "
             + "V:\(vesselAssetSHA256.prefix(12)) | "
             + "P:\(protocolTemplateSHA256.prefix(12)) | "
             + "A:\(atlasSourceSHA256.prefix(12)) | "
             + surfaceIdentity
-            + "Pg:\(pageNumber)/\(pageCount)"
+            + "pages:\(pageCount)"
         let digest = LowercaseHex.encode(
             SHA256.hash(data: Data(identity.utf8)).prefix(8)
         )
         return "\(identity) | H:\(digest)"
     }
 
-    private static func flattenedPage(
-        _ page: PDFPage,
-        stamp: String,
-        prefill: SurgeryPlanPrefill
-    ) throws -> PDFPage {
-        let pageBox = page.bounds(for: .mediaBox)
-        let output = NSMutableData()
-        var mediaBox = CGRect(origin: .zero, size: pageBox.size)
-        guard let consumer = CGDataConsumer(data: output as CFMutableData),
-              let context = CGContext(
-                  consumer: consumer,
-                  mediaBox: &mediaBox,
-                  nil
-              )
-        else {
-            throw SurgeryPlanExportError.pdfAssemblyFailed(
-                "Could not create a flattened audit-stamped page."
-            )
-        }
-        context.beginPDFPage(nil)
-        let footerClearance: CGFloat = 22
-        let availableHeight = max(1, mediaBox.height - footerClearance)
-        let sourceScale = min(
-            mediaBox.width / pageBox.width,
-            availableHeight / pageBox.height
-        )
-        let sourceOffsetX = (mediaBox.width - pageBox.width * sourceScale) / 2
-        context.saveGState()
-        context.translateBy(x: sourceOffsetX, y: footerClearance)
-        context.scaleBy(x: sourceScale, y: sourceScale)
-        context.translateBy(x: -pageBox.minX, y: -pageBox.minY)
-        page.draw(with: .mediaBox, to: context)
-        context.restoreGState()
-
-        let graphics = NSGraphicsContext(cgContext: context, flipped: false)
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = graphics
-        let backgroundRect = CGRect(
-            x: 10,
-            y: 3,
-            width: max(1, mediaBox.width - 20),
-            height: 16
-        )
-        let background = NSBezierPath(
-            roundedRect: backgroundRect,
-            xRadius: 3,
-            yRadius: 3
-        )
-        NSColor(calibratedWhite: 1, alpha: 0.96).setFill()
-        NSColor(calibratedWhite: 0.65, alpha: 1).setStroke()
-        background.lineWidth = 0.5
-        background.fill()
-        background.stroke()
-        let textRect = CGRect(
-            x: backgroundRect.minX + 4,
-            y: backgroundRect.minY + 2,
-            width: backgroundRect.width - 8,
-            height: 12
-        )
-        guard let font = fittingAuditFont(
-            for: stamp,
-            maximumWidth: textRect.width
-        ) else {
-            NSGraphicsContext.restoreGraphicsState()
-            throw SurgeryPlanExportError.pdfAssemblyFailed(
-                "The audit identity is too wide for a readable footer."
-            )
-        }
-        NSAttributedString(
-            string: stamp,
-            attributes: [
-                .font: font,
-                .foregroundColor: prefill.exportClass == .draft
-                    ? NSColor.systemOrange
-                    : NSColor.black,
-            ]
-        ).draw(in: textRect)
-        NSGraphicsContext.restoreGraphicsState()
-        context.endPDFPage()
-        context.closePDF()
-
-        guard let document = PDFDocument(data: output as Data),
-              document.pageCount == 1,
-              let flattened = document.page(at: 0),
-              flattened.bounds(for: .mediaBox).size == mediaBox.size,
-              auditText(flattened.string, contains: stamp)
-        else {
-            throw SurgeryPlanExportError.pdfAssemblyFailed(
-                "The flattened page did not retain its audit identity."
-            )
-        }
-        return flattened
-    }
-
-    static func auditText(_ text: String?, contains stamp: String) -> Bool {
-        guard let text else { return false }
-        func normalized(_ value: String) -> String {
-            value.replacingOccurrences(
-                of: #"\s+"#,
-                with: " ",
-                options: .regularExpression
-            )
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        let normalizedText = normalized(text)
-        let components = stamp.components(separatedBy: " | ")
-        guard let identity = components.first,
-              let token = components.last(where: { $0.hasPrefix("H:") })
-        else {
-            return normalizedText.contains(normalized(stamp))
-        }
-        return normalizedText.contains(normalized(identity))
-            && normalizedText.contains(normalized(token))
+    static func auditMetadata(
+        _ document: PDFDocument,
+        contains manifest: String
+    ) -> Bool {
+        document.documentAttributes?[PDFDocumentAttribute.subjectAttribute]
+            as? String == manifest
     }
 
     private static func limitedAuditValue(
@@ -2174,27 +1887,6 @@ enum SurgeryPlanPacketRenderer {
         return String(singleLine.prefix(maximumCharacters - 1)) + "…"
     }
 
-    private static func fittingAuditFont(
-        for text: String,
-        maximumWidth: CGFloat
-    ) -> NSFont? {
-        var pointSize: CGFloat = 6.7
-        while pointSize >= 4 {
-            let font = NSFont.monospacedSystemFont(
-                ofSize: pointSize,
-                weight: .semibold
-            )
-            let width = NSAttributedString(
-                string: text,
-                attributes: [.font: font]
-            ).size().width
-            if width <= maximumWidth {
-                return font
-            }
-            pointSize -= 0.2
-        }
-        return nil
-    }
 }
 
 @MainActor
@@ -2297,11 +1989,16 @@ enum SurgeryPlanExporter {
             throw SurgeryPlanExportError.stateChangedDuringExport
         }
 
+        guard let probePlan = capture.probePlan else {
+            throw SurgeryPlanExportError.invalidAtlasPage(
+                "Create an NP2003 or NP2013 surface probe plan before export."
+            )
+        }
         let atlasPDF = try SurgeryAtlasPageRenderer.overlay(
             atlasPDF: atlasSource.sourcePDF,
+            plan: probePlan,
             prefill: prefill,
-            plate: atlasPlate,
-            atlasSourceSHA256: atlasSource.sha256
+            plate: atlasPlate
         )
         guard capture.isStillCurrent(in: model) else {
             throw SurgeryPlanExportError.stateChangedDuringExport
@@ -2369,20 +2066,17 @@ enum SurgeryPlanExporter {
                   artifacts: artifacts,
                   prefill: prefill
               ),
-              (0 ..< writtenDocument.pageCount).allSatisfy({ index in
-                  SurgeryPlanPacketRenderer.auditText(
-                      writtenDocument.page(at: index)?.string,
-                      contains: SurgeryPlanPacketRenderer.auditStamp(
-                          prefill: prefill,
-                          pageNumber: index + 1,
-                          pageCount: writtenDocument.pageCount,
-                          targetId: capture.target.targetId,
-                          vesselAssetSHA256: vesselSource.derivedAssetSha256,
-                          protocolTemplateSHA256: protocolTemplateSHA256,
-                          atlasSourceSHA256: atlasSource.sha256
-                      )
+              SurgeryPlanPacketRenderer.auditMetadata(
+                  writtenDocument,
+                  contains: SurgeryPlanPacketRenderer.auditManifest(
+                      prefill: prefill,
+                      pageCount: writtenDocument.pageCount,
+                      targetId: capture.target.targetId,
+                      vesselAssetSHA256: vesselSource.derivedAssetSha256,
+                      protocolTemplateSHA256: protocolTemplateSHA256,
+                      atlasSourceSHA256: atlasSource.sha256
                   )
-              })
+              )
         else {
             throw SurgeryPlanExportError.outputWriteFailed
         }
@@ -2699,8 +2393,7 @@ enum SurgeryPlanExporter {
         for (offset, artifact) in artifacts.enumerated() {
             guard let text = document.page(at: offset + 2)?.string,
                   text.contains(
-                      "\(prefill.exportClass.rawValue) · "
-                          + "Surgery planning view — \(artifact.view.rawValue)"
+                      "Surgery planning view — \(artifact.view.rawValue)"
                   ),
                   text.contains(prefill.targetCoordinateText)
             else {
