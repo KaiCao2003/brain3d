@@ -433,8 +433,7 @@ def register_major_vessel_handlers(
     )
     extension.register(
         advertise_capability=(
-            graph_loader is not load_vessap_major_vessels
-            or default_asset_is_available()
+            graph_loader is not load_vessap_major_vessels or default_asset_is_available()
         )
     )
     return extension

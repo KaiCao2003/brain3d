@@ -290,10 +290,7 @@ def default_asset_paths() -> tuple[Path, Path]:
 def default_asset_is_available() -> bool:
     """Return whether both external data files are regular, non-symlink files."""
 
-    return all(
-        path.is_file() and not path.is_symlink()
-        for path in default_asset_paths()
-    )
+    return all(path.is_file() and not path.is_symlink() for path in default_asset_paths())
 
 
 def _read_and_validate_manifest(manifest_path: Path, asset_path: Path) -> None:
