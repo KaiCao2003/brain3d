@@ -316,7 +316,7 @@ for _ in $(seq 1 100); do
     gui_bridge_pid="$(
         ps -axo ppid=,pid=,command= \
             | awk -v parent="$gui_app_pid" \
-                '$1 == parent && /Contents\/Resources\/Bridge\/brain3d-bridge$/ {print $2; exit}'
+                '$1 == parent && /Contents\/Resources\/Bridge\/brain3d-bridge$/ && !found {print $2; found=1}'
     )"
     [[ -n "$gui_bridge_pid" ]] && break
     sleep 0.1
