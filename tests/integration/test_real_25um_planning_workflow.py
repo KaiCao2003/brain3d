@@ -137,7 +137,7 @@ def _calibration_params(project_id: str, revision: int) -> dict[str, object]:
         "limitsSource": "Software integration-test thresholds; not a surgical SOP",
         "atlasTransformMethod": "rigid",
         "affineDistortionAcknowledged": False,
-        "notes": "Engineering QA fixture only; no animal or surgical validation claim",
+        "notes": "Engineering QA fixture",
     }
 
 
