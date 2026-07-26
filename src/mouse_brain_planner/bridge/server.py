@@ -734,6 +734,26 @@ def encode_rgb_png(rgb: NDArray[np.uint8], *, compression_level: int = 6) -> byt
     values = np.asarray(rgb)
     if values.dtype != np.dtype(np.uint8) or values.ndim != 3 or values.shape[2] != 3:
         raise TypeError("PNG input must be an 8-bit RGB array")
+    return _encode_png(values, color_type=2, compression_level=compression_level)
+
+
+def encode_rgba_png(rgba: NDArray[np.uint8], *, compression_level: int = 6) -> bytes:
+    """Encode a contiguous straight-alpha 8-bit RGBA image deterministically."""
+
+    values = np.asarray(rgba)
+    if values.dtype != np.dtype(np.uint8) or values.ndim != 3 or values.shape[2] != 4:
+        raise TypeError("PNG input must be an 8-bit RGBA array")
+    return _encode_png(values, color_type=6, compression_level=compression_level)
+
+
+def _encode_png(
+    values: NDArray[np.uint8],
+    *,
+    color_type: int,
+    compression_level: int,
+) -> bytes:
+    """Encode one validated RGB/RGBA array without an image-library dependency."""
+
     height, width, _ = values.shape
     if height <= 0 or width <= 0 or height > 100_000 or width > 100_000:
         raise ValueError("PNG dimensions must be in [1, 100000]")
@@ -747,7 +767,7 @@ def encode_rgb_png(rgb: NDArray[np.uint8], *, compression_level: int = 6) -> byt
     contiguous = np.ascontiguousarray(values)
     scanlines = b"".join(b"\x00" + contiguous[row].tobytes() for row in range(height))
     signature = b"\x89PNG\r\n\x1a\n"
-    header = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    header = struct.pack(">IIBBBBB", width, height, 8, color_type, 0, 0, 0)
     return (
         signature
         + _png_chunk(b"IHDR", header)

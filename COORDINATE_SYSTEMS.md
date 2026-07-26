@@ -9,10 +9,10 @@ provenance](docs/ADR-002-coordinate-conventions.md). This guide explains that de
 diagrams and worked examples for the current baseline,
 `brainglobe-atlasapi==2.3.1`.
 
-> **Not stereotaxically calibrated:** Atlas-native and renderer coordinates are not bregma
-> coordinates. The Allen CCF has no official, unique bregma. Until an explicit, versioned
-> calibration profile is selected, the planner must not label any origin as bregma or claim
-> correspondence to a physical skull.
+> **Population-atlas convention, not animal calibration:** Atlas-native and renderer coordinates
+> are not intrinsically bregma coordinates. The direct workflow uses one explicitly named,
+> source-pinned Pinpoint/Urchin bregma profile; the Allen CCF has no official, unique bregma.
+> That profile does not establish correspondence to the individual mouse or physical skull.
 
 ## Frames at a glance
 
@@ -22,13 +22,18 @@ diagrams and worked examples for the current baseline,
 | `BRAINGLOBE_VOXEL_INDEX_ASR` | `[AP, DV, ML]` | anterior, superior, right | posterior, inferior, left | integer index |
 | `BRAINGLOBE_PHYSICAL_ASR_UM` | `[AP, DV, ML]` | anterior, superior, right | posterior, inferior, left | µm |
 | `SURGERY_WORLD_RAS_UM` | `[ML, AP, DV]`, exposed to the renderer as `[x,y,z]` | selected anchor | right, anterior, dorsal | µm |
-| `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` | named `[AP, ML, DV]` | user-declared bregma | anterior, right, dorsal/up | mm |
-| `STEREOTAXIC_<profile>` | named `ml`, `ap`, `dv` fields | profile-defined landmark | profile-defined | internal µm; UI may show mm |
+| `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` | named `[AP, ML, DV]` | legacy v1–v3 user-declared bregma | anterior, right, dorsal/up | mm |
+| `STEREOTAXIC_<profile>` | named `ml`, `ap`, `dv` fields | legacy profile-defined landmark | profile-defined | internal µm; UI may show mm |
 
 Every point also carries `atlas_key` and `atlas_version`. A point from another atlas package is
 rejected rather than reinterpreted. Saved project provenance additionally records the SHA-256 of
 the installed atlas `metadata.json`; it does not yet contain a package-wide content manifest.
 `BrainGlobeAtlasSpace` itself currently enforces the point's key and package version.
+
+The v4 direct-plan input is not an unlabeled new point frame. It persists the named bregma
+reference, user AP/ML controls, resolved `BRAINGLOBE_PHYSICAL_ASR_UM` surface entry, annotation
+source and digest, surface-definition version, path depth, signed sagittal angle, and layout
+orientation as separate typed fields.
 
 ## BrainGlobe ASR array space
 
@@ -275,7 +280,7 @@ m = 5700 - 500 = 5200 µm
 The result exactly recovers the example atlas point. A production pick is then subjected to
 atlas identity, finiteness, and half-open physical bounds checks before annotation lookup.
 
-## Bregma and stereotaxic profiles
+## Bregma profile and direct surface-relative planning
 
 The Allen CCF was created from an average of 1,675 ex-cranio fixed brains. There is no single
 source skull and no Allen-provided uniquely correct bregma or lambda. Consequently:
@@ -287,45 +292,100 @@ ML midline         != a complete bregma calibration
 renderer anchor    != bregma unless a profile explicitly establishes it
 ```
 
-The UI nevertheless allows the user to preserve the standard surgical entry exactly as entered
-from bregma. Its signs are:
+The primary v4 UI uses a source-pinned Virtual Brain Lab Urchin/Pinpoint reference for the
+allowlisted `allen_mouse_25um` v1.2 package. The persisted reference is:
+
+```text
+reference ID: pinpoint-allen-mouse-25um-bregma-2025-11-04
+BrainGlobe physical [AP,DV,ML]: [5200,332,5700] µm
+source revision: Urchin commit 57be3cdc7d6230543ebbd367be1cbcf1a47862a5
+```
+
+The source URL and SHA-256 travel with every v4 plan. This makes the convention reproducible; it
+does not make it Allen-official ground truth or a registration to an individual mouse.
+
+The user controls AP and ML from that named reference with these signs:
 
 ```text
 AP+ anterior / forward      AP− posterior / back
 ML+ right                   ML− left
-DV+ dorsal / up             DV− deep / ventral
 ```
 
-For example, `[AP,ML,DV] = [-1.25,-0.70,-2.40] mm` records a point 1.25 mm posterior,
-0.70 mm left, and 2.40 mm deep/ventral from bregma. The stored frame ID is
-`BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED`. It deliberately has no atlas coordinate,
-`projected=false`, and `usable_for_navigation=false`.
+For user values `ap_mm` and `ml_mm`, the BrainGlobe ASR column is:
 
-This unprojected record does not contradict the absence of an official CCF bregma: it preserves
-the user's surgical-frame input without pretending to know the bregma/skull-to-atlas transform.
-The application must not place an atlas marker, calculate a trajectory, sample a region, or
-compare the target with a vascular overlay from that record alone.
+```text
+atlas_AP_um = 5200 - 1000 * ap_mm
+atlas_ML_um = 5700 - 1000 * ml_mm
+```
 
-A projected stereotaxic profile must name its source and version and store its landmark,
-affine/transform, axis signs, units, atlas identity, hash, voxel convention, and uncertainty.
-The IBL bregma estimate is an IBL convention and may only be offered as a named opt-in profile;
-it must not be silently presented as Allen ground truth. No tilt or DV scale is hidden in the
-base atlas-to-world transform.
+Thus positive AP moves toward the anterior/smaller-ASR side, while negative ML moves toward animal
+left/larger-ASR side. At that exact resolved AP/ML column, Brain3D searches the loaded
+annotation from superior to inferior. The entry DV is the superior boundary of the first voxel
+whose annotation ID is nonzero:
 
-Millimetre values in the UI are formatting conversions from a declared profile or frame. A
-unit conversion alone does not create stereotaxic calibration.
+```text
+surface_DV_um = first_nonzero_DV_index * 25 µm
+```
 
-## Dorsal display plane and rejected vessel overlay
+This is the declared `first-annotated-voxel-superior-boundary-v1` sampling rule. It is an
+annotation-derived population-atlas surface, not a measured pia, skull surface, or current-animal
+surface. The persisted entry is re-resolved against the loaded annotation and its recorded digest.
+
+For NP2003 and NP2013, this AP/ML-derived entry is the surface crossing of user-facing Shank 1
+(catalog ID `shank-0`), not the array midpoint or a point inside the brain. Depth is the strictly
+positive path length from that crossing to Shank 1's distal target. It is not a bregma-relative DV
+coordinate. In canonical `[AP,ML,DV]` directions, the inward direction for visible sagittal angle
+`θ` is:
+
+```text
+direction = [-sin(θ), 0, -cos(θ)]
+```
+
+So `θ = 0°` is inward/deep, `θ > 0°` advances anterior→posterior, and `θ < 0°` advances
+posterior→anterior. For NP2013, layout `0°` places the shank-spacing axis in the sagittal plane:
+Shank 1 is most anterior and the remaining shanks extend posterior. Layout `90°` rotates the whole
+array clockwise from dorsal: Shank 1 is animal-left-most and the remaining shanks extend toward
+animal right. Layout rotates the array, never individual shanks.
+
+Each NP2 shaft has a catalogued proximal-to-distal length of 10,000 µm. The 3D renderer uses that
+complete physical extent. If the requested insertion depth is `d`, the proximal endpoint is
+`10,000 − d` µm back from the Shank 1 surface crossing along the opposite of the inward direction,
+and can be outside the atlas. The distinct surface-to-tip segment remains the implanted path used
+for slice overlays, annotation traversal, and path analysis; the external proximal remainder is
+not silently counted as tissue traversal.
+
+Legacy v1–v3 records may still contain `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` targets and
+subject-specific calibration profiles. They retain their original projection and validation
+requirements. Their ML-positive-right sign matches the v4 `ML (+R / −L)` display, but their
+coordinate meaning remains different: a legacy value is an unprojected subject-stereotaxic
+target, while a v4 value locates an atlas-surface insertion column. No hidden tilt, DV scale, or
+other empirical correction is applied to either path.
+
+## Dorsal display plane and major-vessel overlay
 
 The current Dorsal view uses the atlas AP-by-ML grid for the atlas surface and selected probe.
-It does not display the archived LAMBADA P60_606 derivative. Coronal, sagittal, horizontal, and
-SceneKit 3D likewise receive no vessel geometry.
+It overlays both the annotation-derived selected-region mask and the digest-checked VesSAP
+BL6J-no1 diameter-≥30 µm display reference. Coronal, sagittal, horizontal, and SceneKit 3D
+consume the same selected ontology identity and BrainGlobe physical `[AP,DV,ML]` geometry;
+slices filter geometry to the current physical slab. The published specimen-to-Allen transform,
+reviewed ML reflection, source hashes, derivative digest, and display reduction are recorded in
+[VesSAP Major Vessels](docs/VESSAP_MAJOR_VESSELS.md).
 
-The exact qualification found supporting AP and DV orientation evidence but rejected biological
-ML/laterality and whole-brain coverage because the source is a hemisphere specimen and its graph
-has no persisted hemisphere binding. Numeric points on both sides of the atlas midpoint do not
-establish bilateral anatomy. No mirroring or display-axis guess is permitted; all reference
-geometry and analysis calls return `VESSEL_GEOMETRY_UNAVAILABLE`.
+An ontology identity does not guarantee voxel or mesh geometry. In the reviewed package,
+`RSPd4` (`545`) has neither annotation voxels nor an OBJ mesh. Its identity remains selected, the
+four 2D overlays contain zero selected pixels, and 3D reports that no reviewed geometry exists;
+no inferred surface is substituted.
+
+The archived LAMBADA P60_606 derivative is not displayed. Its exact qualification found
+supporting AP and DV orientation evidence but rejected biological ML/laterality and whole-brain
+coverage because the source is a hemisphere specimen and its graph has no persisted hemisphere
+binding. Numeric points on both sides of the atlas midpoint do not establish bilateral anatomy.
+No mirroring or display-axis guess is permitted.
+
+VesSAP remains one fixed cleared reference, not the current animal. The shared coordinate frame
+permits an overlay but does not supply subject registration, tissue-distortion, or inter-animal
+error bounds. The runtime therefore returns display geometry but rejects clearance analysis with
+`VESSEL_ANALYSIS_UNAVAILABLE`.
 
 Archived population-density and registered subject-image paths also use an AP-by-ML display grid,
 but they are absent from the primary UI and never substituted for a vessel graph. A population
@@ -363,4 +423,5 @@ order, anatomical directions, units, voxel-center convention, and source release
 - AllenSDK reference-space orientation: [Reference Space notebook](https://alleninstitute.github.io/AllenSDK/_static/examples/nb/reference_space.html)
 - Allen CCF 2020 assets and dimensions: [Allen Brain Cell Atlas CCF tutorial](https://alleninstitute.github.io/abc_atlas_access/notebooks/ccf_and_parcellation_annotation_tutorial.html)
 - Allen explanation of why the CCF has no bregma: [Allen Brain Map Community response](https://community.brain-map.org/t/why-doesnt-the-3d-mouse-brain-atlas-have-bregma-coordinates/158)
+- Pinned direct-plan bregma source: [Virtual Brain Lab Urchin `Utils.cs` at commit `57be3cdc`](https://github.com/VirtualBrainLab/Urchin/blob/57be3cdc7d6230543ebbd367be1cbcf1a47862a5/UnityClient/Packages/vbl.urchin/Scripts/Utils/Utils.cs)
 - CCFv3 publication: [Wang et al. 2020](https://doi.org/10.1016/j.cell.2020.04.007)

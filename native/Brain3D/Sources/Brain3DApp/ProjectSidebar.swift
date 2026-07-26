@@ -2,326 +2,127 @@ import AppKit
 import Brain3DCore
 import Foundation
 import SwiftUI
-import UniformTypeIdentifiers
 
-struct ProjectSidebar: View {
-    @ObservedObject var model: PlannerViewModel
-    let saveProject: () -> Void
-    let openProject: () -> Void
-    let reconnect: () -> Void
-    @State private var targetLabel = "Implant site 1"
-    @State private var targetAPMillimetres = ""
-    @State private var targetMLMillimetres = ""
-    @State private var targetDVMillimetres = ""
-    @State private var showingCalibrationSheet = false
-    @State private var probeName = ""
-    @State private var probeTargetId = ""
-    @State private var probePlacementMode: ProbePlacementMode = .stereotaxicTargetManipulator
-    @State private var probeEntryAP = ""
-    @State private var probeEntryML = ""
-    @State private var probeEntryDV = ""
-    @State private var probeAzimuth = ""
-    @State private var probeElevation = ""
-    @State private var probeDepth = ""
-    @State private var probeAxialRotation = ""
-    @State private var probeGeometryAcknowledged = false
-    @State private var showingProbeRegionInspector = false
-    @State private var showingMajorVesselConflictInspector = false
-    @State private var confirmingProbeRemoval = false
-    @State private var vesselAnalysisDraft = VesselAnalysisDraft()
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 14) {
-                    backendSection
-                    atlasSection
-                    implantTargetSection
-                    probeSection
-                    majorVesselsSection
-                }
-                .padding(16)
-            }
-        }
-        .background(.thinMaterial)
-        .sheet(isPresented: $showingCalibrationSheet) {
-            CalibrationSheet(model: model)
-        }
-        .sheet(isPresented: $showingProbeRegionInspector) {
-            if let plan = model.selectedProbePlan,
-               let analysis = model.selectedProbeRegionAnalysis
-            {
-                ProbeRegionInspectorSheet(plan: plan, analysis: analysis)
-            }
-        }
-        .sheet(isPresented: $showingMajorVesselConflictInspector) {
-            MajorVesselConflictInspectorSheet(model: model)
-        }
-        .confirmationDialog(
-            "Remove this probe plan and its region analysis?",
-            isPresented: $confirmingProbeRemoval,
-            titleVisibility: .visible
-        ) {
-            Button("Remove Probe Plan", role: .destructive) {
-                Task {
-                    if await model.removeSelectedProbePlan() {
-                        clearProbeDraft()
-                    }
-                }
-            }
-            Button("Cancel", role: .cancel) {}
-        }
-        .onChange(of: model.selectedProbePlan?.inputSha256, initial: true) {
-            _, _ in
-            populateProbeDraft()
-            populateVesselAnalysisDraftForCurrentPlan()
-        }
-        .onChange(of: model.backendState?.project?.projectId) { _, _ in
-            populateVesselAnalysisDraftForCurrentPlan()
-        }
-        .onChange(of: model.selectedProbeVesselAnalysis?.analysis.inputSha256) { _, _ in
-            guard let result = model.selectedProbeVesselAnalysis else { return }
-            populateVesselAnalysisDraft(from: result)
-        }
-        .onChange(of: vesselAnalysisDraft) { _, draft in
-            guard let result = model.selectedProbeVesselAnalysis,
-                  !draft.matches(result.analysis)
-            else { return }
-            model.invalidateMajorVesselAnalysis()
+enum ProbeCatalogPresentation {
+    static func containsNeuropixels2(_ models: [ProbeCatalogModel]) -> Bool {
+        models.contains { model in
+            isNeuropixels2(modelId: model.modelId)
         }
     }
 
-    private var probeSection: some View {
-        SidebarSection(title: "Probe", systemImage: "line.diagonal.arrow") {
-            Picker("Plan", selection: probePlanSelection) {
-                Text("New probe plan").tag("")
-                ForEach(model.probePlans) { plan in
-                    Text(plan.name).tag(plan.planId)
-                }
-            }
-            .disabled(model.probeOperationInProgress)
+    static func isNeuropixels2(modelId: String) -> Bool {
+        modelId == ProbePlanningContract.neuropixels2SingleShankModelId
+            || modelId == ProbePlanningContract.neuropixels2StandardFourShankModelId
+    }
 
-            Picker("Model", selection: probeModelSelection) {
-                if model.probeCatalog.isEmpty {
-                    Text("No model available").tag("")
-                }
-                ForEach(model.probeCatalog) { probe in
-                    Text(probe.displayName).tag(probe.id)
-                }
-            }
-            .disabled(model.probeCatalog.isEmpty || model.probeOperationInProgress)
+    static func simultaneousChannelCount(modelId: String) -> Int? {
+        switch modelId {
+        case ProbePlanningContract.neuropixels2SingleShankModelId:
+            ProbePlanningContract.neuropixels2SingleShankSimultaneousChannelCount
+        case ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            ProbePlanningContract.neuropixels2StandardFourShankSimultaneousChannelCount
+        default:
+            nil
+        }
+    }
+}
 
-            Picker("Target", selection: $probeTargetId) {
-                Text("Select implant target").tag("")
-                ForEach(model.implantTargets) { target in
-                    Text(target.label).tag(target.targetId)
-                }
-            }
+enum ProbeSurfaceEditorField: String, CaseIterable, Equatable, Sendable {
+    case model
+    case ap
+    case ml
+    case surfaceDepth
+    case anteriorPosteriorAngle
+    case layoutRotation
+}
 
-            Picker("Mode", selection: $probePlacementMode) {
-                ForEach(ProbePlacementMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-            .pickerStyle(.menu)
-            .controlSize(.small)
+enum ProbeSurfaceEditorPresentation {
+    static let visibleFields = ProbeSurfaceEditorField.allCases
+    static let apLabel = "AP (+A / −P)"
+    static let mlLabel = "ML (+R / −L)"
+    static let depthLabel = "Shank 1 depth from surface"
+    static let angleLabel = "A↔P angle (+ A→P)"
+    static let explicitActionTitle: String? = nil
 
-            TextField("Probe plan name", text: $probeName)
-                .textFieldStyle(.roundedBorder)
+    static func modelLabel(modelId: String) -> String? {
+        switch modelId {
+        case ProbePlanningContract.neuropixels2SingleShankModelId:
+            "NP2003 · 1 shank"
+        case ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            "NP2013 · 4 shank"
+        default:
+            nil
+        }
+    }
+}
 
-            if probePlacementMode.requiresEntryCoordinates {
-                probeEntryCoordinateFields
-            }
+enum ProbeLayoutRotation: String, CaseIterable, Identifiable, Sendable {
+    case sagittal = "0"
+    case clockwise90 = "90"
 
-            if probePlacementMode.requiresAnglesAndDepth {
-                probeNumberField(
-                    "Azimuth (°)",
-                    sign: "+ rotates anterior → right; − rotates toward left",
-                    text: $probeAzimuth
-                )
-                probeNumberField(
-                    "Elevation (°)",
-                    sign: "+ dorsal / up; − deep / ventral",
-                    text: $probeElevation
-                )
-                probeNumberField(
-                    "Insertion depth (µm)",
-                    sign: "Positive distance from entry toward tip",
-                    text: $probeDepth
-                )
-            }
-            probeNumberField(
-                "Axial rotation (°)",
-                sign: "Right-hand rotation about the entry → tip axis",
-                text: $probeAxialRotation
-            )
+    var id: String { rawValue }
 
-            if let probe = model.selectedProbeModel,
-               probe.requiresExplicitAcknowledgement
-            {
-                if let warning = probe.warning {
-                    Text(warning)
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.orange)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Toggle(
-                    probe.verificationStatus
-                        == ProbePlanningContract.sourceTranscribedReviewPendingStatus
-                        ? "I understand independent transcription review is pending"
-                        : "I acknowledge this synthetic software-test geometry",
-                    isOn: $probeGeometryAcknowledged
-                )
-                .font(.caption)
-            }
-
-            HStack {
-                if model.selectedProbePlan == nil {
-                    Button("Create plan", systemImage: "plus") {
-                        Task { _ = await createProbePlan() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canSubmitProbeDraft)
-                } else {
-                    Button("Update plan", systemImage: "checkmark") {
-                        Task { _ = await updateProbePlan() }
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!canSubmitProbeDraft)
-                    Button("Remove", systemImage: "trash", role: .destructive) {
-                        confirmingProbeRemoval = true
-                    }
-                    .disabled(!model.canRemoveSelectedProbePlan)
-                }
-            }
-            .controlSize(.small)
-
-            if let plan = model.selectedProbePlan {
-                Text(plan.requiresPlanningGeometryUpdate
-                    ? "v\(plan.planVersion) · legacy geometry hidden · update required"
-                    : "v\(plan.planVersion) · \(plan.modelDisplayName) · planning only · not navigation")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-                if plan.requiresPlanningGeometryUpdate {
-                    Label(
-                        "This legacy plan uses obsolete projection geometry. Review the restored inputs and choose Update plan to recompute it. Slice, 3D, region, and vessel analysis are disabled until then.",
-                        systemImage: "arrow.triangle.2.circlepath"
-                    )
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.orange)
-                    .fixedSize(horizontal: false, vertical: true)
-                }
-
-                HStack {
-                    Button("Analyze regions", systemImage: "list.bullet.indent") {
-                        Task { _ = await model.analyzeSelectedProbeRegions() }
-                    }
-                    .disabled(!model.canAnalyzeSelectedProbeRegions)
-
-                    if plan.hasCurrentPlanningGeometry,
-                       model.selectedProbeRegionAnalysis != nil
-                    {
-                        Button("Inspect…", systemImage: "tablecells") {
-                            showingProbeRegionInspector = true
-                        }
-                    }
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.small)
-
-                if plan.hasCurrentPlanningGeometry,
-                   model.selectedProbeRegionAnalysis != nil
-                {
-                    HStack {
-                        Button("Save CSV…") { saveProbeRegions(.csv) }
-                        Button("Save JSON…") { saveProbeRegions(.json) }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                }
-            }
-
-            if model.probeOperationInProgress {
-                ProgressView("Updating probe planning data…")
-                    .controlSize(.small)
-            }
-            if let error = model.probeOperationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+    var label: String {
+        switch self {
+        case .sagittal: "Sagittal"
+        case .clockwise90: "90° CW"
         }
     }
 
-    private var probePlanSelection: Binding<String> {
-        Binding(
-            get: { model.selectedProbePlanId ?? "" },
-            set: { planId in
-                if planId.isEmpty {
-                    Task {
-                        _ = await model.selectProbePlan(nil)
-                        clearProbeDraft()
-                    }
-                } else if planId != model.selectedProbePlanId {
-                    Task {
-                        if await model.selectProbePlan(planId) {
-                            populateProbeDraft()
-                        }
-                    }
-                }
-            }
-        )
+    var accessibilityValue: String {
+        switch self {
+        case .sagittal:
+            "The four-shank plane is parallel to sagittal; shank 1 is most anterior."
+        case .clockwise90:
+            "Rotated 90 degrees clockwise when viewed from dorsal; shank 1 is leftmost."
+        }
+    }
+}
+
+enum ProbeSurfaceDraftReadinessPolicy {
+    static func blockingReason(
+        planningUnavailableReason: String?,
+        hasSelectedModel: Bool,
+        ap: String,
+        ml: String,
+        surfaceDepth: String,
+        anteriorPosteriorAngle: String,
+        layoutRotation: String
+    ) -> String? {
+        if let planningUnavailableReason {
+            return planningUnavailableReason
+        }
+        guard hasSelectedModel else {
+            return "Choose NP2003 or NP2013."
+        }
+        guard validNumber(ap), validNumber(ml) else {
+            return "Enter valid AP and ML coordinates in millimetres."
+        }
+        guard let depth = try? CalibrationNumberInput.parse(
+            surfaceDepth,
+            field: "Depth from surface"
+        ),
+            depth > 0,
+            depth <= 10
+        else {
+            return "Enter a depth greater than 0 and no more than the 10 mm shank length."
+        }
+        guard validNumber(anteriorPosteriorAngle),
+              let angle = try? CalibrationNumberInput.parse(
+                  anteriorPosteriorAngle,
+                  field: "A↔P angle"
+              ),
+              abs(angle) < 90
+        else {
+            return "Enter an A↔P angle greater than −90° and less than 90°."
+        }
+        guard ProbeLayoutRotation(rawValue: normalized(layoutRotation)) != nil else {
+            return "Choose the sagittal or 90° clockwise probe layout."
+        }
+        return nil
     }
 
-    private var probeModelSelection: Binding<String> {
-        Binding(
-            get: { model.selectedProbeModel?.id ?? "" },
-            set: { identity in
-                guard let probe = model.probeCatalog.first(where: { $0.id == identity }) else {
-                    return
-                }
-                Task {
-                    _ = await model.loadProbeModel(
-                        modelId: probe.modelId,
-                        modelVersion: probe.modelVersion
-                    )
-                    probeGeometryAcknowledged = false
-                }
-            }
-        )
-    }
-
-    private var canSubmitProbeDraft: Bool {
-        model.canManageProbePlanning
-            && model.selectedProbeModel != nil
-            && !probeName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && !probeTargetId.isEmpty
-            && validProbeNumber(probeAxialRotation, range: -180 ... 180)
-            && entryFieldsAreValid
-            && angleAndDepthFieldsAreValid
-            && (model.selectedProbeModel.map {
-                !$0.requiresExplicitAcknowledgement || probeGeometryAcknowledged
-            } == true)
-    }
-
-    private var entryFieldsAreValid: Bool {
-        !probePlacementMode.requiresEntryCoordinates
-            || [probeEntryAP, probeEntryML, probeEntryDV].allSatisfy {
-                validProbeNumber($0)
-            }
-    }
-
-    private var angleAndDepthFieldsAreValid: Bool {
-        !probePlacementMode.requiresAnglesAndDepth
-            || (validProbeNumber(probeAzimuth, range: -180 ... 180)
-                && validProbeNumber(probeElevation, range: -90 ... 90)
-                && validProbeNumber(probeDepth, strictlyPositive: true))
-    }
-
-    private func validProbeNumber(
+    private static func validNumber(
         _ text: String,
         range: ClosedRange<Double>? = nil,
         strictlyPositive: Bool = false
@@ -332,201 +133,1177 @@ struct ProjectSidebar: View {
         return !strictlyPositive || value > 0
     }
 
-    private func probeNumberField(
-        _ label: String,
-        sign: String,
-        text: Binding<String>
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(label)
-                    .font(.caption.weight(.semibold))
-                TextField("", text: text)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-            }
-            Text(sign)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
+    private static func normalized(_ text: String) -> String {
+        guard let value = try? CalibrationNumberInput.parse(text, field: "Probe value")
+        else { return text }
+        return String(format: "%.12g", value == 0 ? 0 : value)
+    }
+}
+
+enum ProbeSurfacePlanningAvailabilityPolicy {
+    static func blockingReason(
+        connectionReady: Bool,
+        hasProject: Bool,
+        atlasReady: Bool = true,
+        serviceSupportsPlanning: Bool = true,
+        projectOperationInProgress: Bool,
+        probeOperationInProgress: Bool
+    ) -> String? {
+        if !connectionReady {
+            return "Connect to the planning service."
+        }
+        if !hasProject {
+            return "Open or create an animal plan."
+        }
+        if !atlasReady {
+            return "Wait for the Allen atlas to finish opening."
+        }
+        if !serviceSupportsPlanning {
+            return "The connected service does not support atlas-surface probe planning."
+        }
+        if projectOperationInProgress || probeOperationInProgress {
+            return "Wait for the current plan operation to finish."
+        }
+        return nil
+    }
+}
+
+enum ProbeOverlayPresentation {
+    private static let sliceOverlayText =
+        "Overlay active in Dorsal, Coronal, Sagittal, and Horizontal."
+
+    static func text(
+        threeDimensionalPhase: ThreeDimensionalLoadPhase,
+        sceneContainsCurrentPlan: Bool
+    ) -> String {
+        if threeDimensionalPhase == .ready, sceneContainsCurrentPlan {
+            return "Overlay active in Dorsal, Coronal, Sagittal, Horizontal, and 3D."
+        }
+        switch threeDimensionalPhase {
+        case .unavailable, .failed:
+            return "\(sliceOverlayText) 3D overlay unavailable."
+        case .loadingDescriptor, .loadingGeometry:
+            return "\(sliceOverlayText) 3D overlay pending."
+        case .ready:
+            return "\(sliceOverlayText) 3D overlay pending scene refresh."
         }
     }
+}
 
-    private var probeEntryCoordinateFields: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Entry from bregma (mm)")
-                .font(.caption.weight(.semibold))
-            HStack(spacing: 8) {
-                compactProbeNumberField("AP", text: $probeEntryAP)
-                compactProbeNumberField("ML", text: $probeEntryML)
-                compactProbeNumberField("DV", text: $probeEntryDV)
+struct ProbeDraftModelIdentity: Equatable, Sendable {
+    let modelId: String
+    let modelVersion: String
+}
+
+struct ProbeSurfaceDraftSnapshot: Equatable, Sendable {
+    let model: ProbeDraftModelIdentity?
+    let ap: String
+    let ml: String
+    let surfaceDepthMM: String
+    let sagittalAngle: String
+    let layoutRotation: String
+}
+
+enum ProbeSurfaceDraftComparisonPolicy {
+    static func snapshot(
+        modelId: String?,
+        modelVersion: String?,
+        ap: String,
+        ml: String,
+        surfaceDepthMM: String,
+        sagittalAngle: String,
+        layoutRotation: String
+    ) -> ProbeSurfaceDraftSnapshot {
+        let model: ProbeDraftModelIdentity? = if let modelId, let modelVersion {
+            ProbeDraftModelIdentity(modelId: modelId, modelVersion: modelVersion)
+        } else {
+            nil
+        }
+        return ProbeSurfaceDraftSnapshot(
+            model: model,
+            ap: normalizedNumber(ap),
+            ml: normalizedNumber(ml),
+            surfaceDepthMM: normalizedNumber(surfaceDepthMM),
+            sagittalAngle: normalizedNumber(sagittalAngle),
+            layoutRotation: normalizedNumber(layoutRotation)
+        )
+    }
+
+    static func hasUnappliedEdits(
+        current: ProbeSurfaceDraftSnapshot,
+        baseline: ProbeSurfaceDraftSnapshot?
+    ) -> Bool {
+        guard let baseline else { return true }
+        return current != baseline
+    }
+
+    private static func normalizedNumber(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        guard let value = try? CalibrationNumberInput.parse(
+            trimmed,
+            field: "Probe value"
+        ) else {
+            return "invalid:\(trimmed)"
+        }
+        let canonical = (value * 1_000_000).rounded() / 1_000_000
+        return "number:\(canonical == 0 ? 0 : canonical)"
+    }
+}
+
+struct ProbeDraftContext: Equatable, Sendable {
+    let projectId: String?
+    let planId: String?
+    let planInputSha256: String?
+}
+
+enum ProbeDraftSynchronizationPolicy {
+    static func shouldReplaceDraft(
+        existingContext: ProbeDraftContext?,
+        incomingContext: ProbeDraftContext,
+        hasUnappliedChanges: Bool
+    ) -> Bool {
+        guard existingContext != incomingContext else { return false }
+        return existingContext == nil || !hasUnappliedChanges
+    }
+}
+
+enum ProbeSurfaceAutoCommitTrigger: Equatable, Sendable {
+    case textChanged
+    case textSubmitted
+    case numericFocusLost
+    case modelChanged
+    case layoutChanged
+    case planningBecameReady
+}
+
+enum ProbeSurfaceAutoCommitAction: Equatable, Sendable {
+    case ignore
+    case endNumericEditing
+    case enqueueMutation
+}
+
+enum ProbeSurfaceAutoCommitPolicy {
+    static func action(
+        for trigger: ProbeSurfaceAutoCommitTrigger,
+        numericFieldIsFocused: Bool
+    ) -> ProbeSurfaceAutoCommitAction {
+        switch trigger {
+        case .textChanged:
+            .ignore
+        case .textSubmitted, .numericFocusLost:
+            .enqueueMutation
+        case .modelChanged, .layoutChanged:
+            numericFieldIsFocused ? .endNumericEditing : .enqueueMutation
+        case .planningBecameReady:
+            numericFieldIsFocused ? .ignore : .enqueueMutation
+        }
+    }
+}
+
+struct ProbeSurfaceAutoCommitRequest: Equatable, Sendable {
+    let model: ProbeDraftModelIdentity
+    let ap: String
+    let ml: String
+    let surfaceDepthMM: String
+    let sagittalAngle: String
+    let layoutRotation: String
+    let editableRevision: Int
+
+    var snapshot: ProbeSurfaceDraftSnapshot {
+        ProbeSurfaceDraftComparisonPolicy.snapshot(
+            modelId: model.modelId,
+            modelVersion: model.modelVersion,
+            ap: ap,
+            ml: ml,
+            surfaceDepthMM: surfaceDepthMM,
+            sagittalAngle: sagittalAngle,
+            layoutRotation: layoutRotation
+        )
+    }
+}
+
+struct ProbeSurfaceAutoCommitTicket: Equatable, Sendable {
+    let generation: Int
+    let request: ProbeSurfaceAutoCommitRequest
+}
+
+struct ProbeSurfaceAutoCommitQueue: Equatable, Sendable {
+    private(set) var newestGeneration = 0
+    private(set) var inFlight: ProbeSurfaceAutoCommitTicket?
+    private(set) var pending: ProbeSurfaceAutoCommitTicket?
+
+    /// Keeps at most one request in flight and one latest pending request.
+    /// Duplicate lifecycle notifications for the same edit do not trigger
+    /// redundant bridge mutations.
+    mutating func enqueue(_ request: ProbeSurfaceAutoCommitRequest) -> Bool {
+        if pending?.request == request || (pending == nil && inFlight?.request == request) {
+            return false
+        }
+        newestGeneration &+= 1
+        pending = ProbeSurfaceAutoCommitTicket(
+            generation: newestGeneration,
+            request: request
+        )
+        return inFlight == nil
+    }
+
+    mutating func beginNext() -> ProbeSurfaceAutoCommitTicket? {
+        guard inFlight == nil, let pending else { return nil }
+        self.pending = nil
+        inFlight = pending
+        return pending
+    }
+
+    func isLatest(_ ticket: ProbeSurfaceAutoCommitTicket) -> Bool {
+        ticket.generation == newestGeneration
+    }
+
+    @discardableResult
+    mutating func complete(_ ticket: ProbeSurfaceAutoCommitTicket) -> Bool {
+        guard inFlight == ticket else { return pending != nil }
+        inFlight = nil
+        return pending != nil
+    }
+}
+
+enum ProbeSurfaceAutoCommitCompletionPolicy {
+    static func mayPopulateDraft(
+        completed request: ProbeSurfaceAutoCommitRequest,
+        isLatestRequest: Bool,
+        currentEditableRevision: Int,
+        currentSnapshot: ProbeSurfaceDraftSnapshot
+    ) -> Bool {
+        isLatestRequest
+            && currentEditableRevision == request.editableRevision
+            && currentSnapshot == request.snapshot
+    }
+}
+
+struct ProbeNumericEditingBoundary: Equatable, Sendable {
+    private(set) var isEditing = false
+
+    mutating func beginEditing() {
+        isEditing = true
+    }
+
+    /// Returns true exactly once for each editing session. AppKit can deliver
+    /// more than one end notification while a text field is being removed or
+    /// its window is closing; only the first one is a probe commit boundary.
+    mutating func consumeEndEditing() -> Bool {
+        guard isEditing else { return false }
+        isEditing = false
+        return true
+    }
+}
+
+@MainActor
+final class ProbeSurfaceNumericEditingSession: ObservableObject {
+    private weak var activeControl: NSTextField?
+    private(set) var activeField: ProbeSurfaceEditorField?
+
+    var isEditing: Bool {
+        activeControl?.currentEditor() != nil
+    }
+
+    func beganEditing(
+        field: ProbeSurfaceEditorField,
+        control: NSTextField
+    ) {
+        activeField = field
+        activeControl = control
+    }
+
+    func endedEditing(
+        field: ProbeSurfaceEditorField,
+        control: NSTextField
+    ) {
+        guard activeField == field, activeControl === control else { return }
+        activeField = nil
+        activeControl = nil
+    }
+
+    /// Ends the actual AppKit field-editor session synchronously. This is used
+    /// before a segmented model/layout choice so its request can only be built
+    /// after the final numeric text has crossed the same authoritative commit
+    /// boundary as a pointer or Tab focus change.
+    @discardableResult
+    func endActiveEditing() -> Bool {
+        guard let control = activeControl else {
+            activeField = nil
+            return false
+        }
+        guard control.currentEditor() != nil else {
+            activeField = nil
+            activeControl = nil
+            return false
+        }
+        return control.window?.makeFirstResponder(nil) == true
+    }
+}
+
+@MainActor
+final class ProbeNumericTextFieldCoordinator: NSObject, NSTextFieldDelegate {
+    private var text: Binding<String>
+    private var onBeginEditing: (NSTextField) -> Void
+    private var onEndEditing: (NSTextField) -> Void
+    private var onCommit: () -> Void
+    private var boundary = ProbeNumericEditingBoundary()
+
+    init(
+        text: Binding<String>,
+        onBeginEditing: @escaping (NSTextField) -> Void,
+        onEndEditing: @escaping (NSTextField) -> Void,
+        onCommit: @escaping () -> Void
+    ) {
+        self.text = text
+        self.onBeginEditing = onBeginEditing
+        self.onEndEditing = onEndEditing
+        self.onCommit = onCommit
+    }
+
+    func update(
+        text: Binding<String>,
+        onBeginEditing: @escaping (NSTextField) -> Void,
+        onEndEditing: @escaping (NSTextField) -> Void,
+        onCommit: @escaping () -> Void
+    ) {
+        self.text = text
+        self.onBeginEditing = onBeginEditing
+        self.onEndEditing = onEndEditing
+        self.onCommit = onCommit
+    }
+
+    func controlTextDidBeginEditing(_ notification: Notification) {
+        guard let control = notification.object as? NSTextField else { return }
+        boundary.beginEditing()
+        onBeginEditing(control)
+    }
+
+    func controlTextDidChange(_ notification: Notification) {
+        guard let control = notification.object as? NSTextField else { return }
+        let currentText = control.stringValue
+        guard text.wrappedValue != currentText else { return }
+        text.wrappedValue = currentText
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) {
+        guard let control = notification.object as? NSTextField else { return }
+        synchronizeText(from: control)
+        guard boundary.consumeEndEditing() else { return }
+        onEndEditing(control)
+        onCommit()
+    }
+
+    func control(
+        _ control: NSControl,
+        textView: NSTextView,
+        doCommandBy commandSelector: Selector
+    ) -> Bool {
+        guard commandSelector == #selector(NSResponder.insertNewline(_:))
+                || commandSelector
+                    == #selector(NSResponder.insertNewlineIgnoringFieldEditor(_:)),
+              let textField = control as? NSTextField
+        else {
+            return false
+        }
+        synchronizeText(from: textField)
+        if textField.window?.makeFirstResponder(nil) != true {
+            finishEditing(textField)
+        }
+        return true
+    }
+
+    private func synchronizeText(from control: NSTextField) {
+        let currentText = control.stringValue
+        guard text.wrappedValue != currentText else { return }
+        text.wrappedValue = currentText
+    }
+
+    private func finishEditing(_ control: NSTextField) {
+        guard boundary.consumeEndEditing() else { return }
+        onEndEditing(control)
+        onCommit()
+    }
+}
+
+struct ProbeSurfaceNumericTextField: NSViewRepresentable {
+    @Binding var text: String
+    let placeholder: String
+    let accessibilityLabel: String
+    let accessibilityHint: String
+    let onBeginEditing: (NSTextField) -> Void
+    let onEndEditing: (NSTextField) -> Void
+    let onCommit: () -> Void
+
+    func makeCoordinator() -> ProbeNumericTextFieldCoordinator {
+        ProbeNumericTextFieldCoordinator(
+            text: $text,
+            onBeginEditing: onBeginEditing,
+            onEndEditing: onEndEditing,
+            onCommit: onCommit
+        )
+    }
+
+    func makeNSView(context: Context) -> NSTextField {
+        let textField = NSTextField(string: text)
+        textField.delegate = context.coordinator
+        textField.placeholderString = placeholder
+        textField.alignment = .right
+        textField.isBezeled = true
+        textField.isBordered = true
+        textField.drawsBackground = true
+        textField.bezelStyle = .roundedBezel
+        textField.focusRingType = .default
+        textField.usesSingleLineMode = true
+        textField.lineBreakMode = .byClipping
+        textField.font = .monospacedDigitSystemFont(
+            ofSize: NSFont.systemFontSize,
+            weight: .regular
+        )
+        textField.setAccessibilityLabel(accessibilityLabel)
+        textField.setAccessibilityHelp(accessibilityHint)
+        return textField
+    }
+
+    func updateNSView(_ textField: NSTextField, context: Context) {
+        context.coordinator.update(
+            text: $text,
+            onBeginEditing: onBeginEditing,
+            onEndEditing: onEndEditing,
+            onCommit: onCommit
+        )
+        textField.placeholderString = placeholder
+        textField.setAccessibilityLabel(accessibilityLabel)
+        textField.setAccessibilityHelp(accessibilityHint)
+        guard textField.currentEditor() == nil,
+              textField.stringValue != text
+        else {
+            return
+        }
+        textField.stringValue = text
+    }
+}
+
+@MainActor
+final class ProbeSurfaceAutoCommitCoordinator {
+    private var queue = ProbeSurfaceAutoCommitQueue()
+
+    func enqueue(_ request: ProbeSurfaceAutoCommitRequest) -> Bool {
+        queue.enqueue(request)
+    }
+
+    func beginNext() -> ProbeSurfaceAutoCommitTicket? {
+        queue.beginNext()
+    }
+
+    func isLatest(_ ticket: ProbeSurfaceAutoCommitTicket) -> Bool {
+        queue.isLatest(ticket)
+    }
+
+    @discardableResult
+    func complete(_ ticket: ProbeSurfaceAutoCommitTicket) -> Bool {
+        queue.complete(ticket)
+    }
+}
+
+@MainActor
+final class ProbeDraftSession: ObservableObject {
+    @Published var surfaceAP = "0" { didSet { noteEditableMutation() } }
+    @Published var surfaceML = "0" { didSet { noteEditableMutation() } }
+    @Published var surfaceDepthMM = "2.3" { didSet { noteEditableMutation() } }
+    @Published var sagittalAngle = "0" { didSet { noteEditableMutation() } }
+    @Published var layoutRotation = ProbeLayoutRotation.sagittal.rawValue {
+        didSet { noteEditableMutation() }
+    }
+    // These values are changed from the `didSet` observers above. Keeping
+    // them as separate `@Published` properties would emit nested
+    // `objectWillChange` notifications while SwiftUI is applying a text-field
+    // or segmented-control binding. AppKit reports that as "Publishing
+    // changes from within view updates" and the resulting undefined update
+    // order can drop a simultaneous 3D scene refresh. The edited field's own
+    // publication already invalidates observers, so the derived values remain
+    // ordinary stored state. Explicit state-only changes publish once through
+    // `setHasUnappliedChanges`.
+    private(set) var hasUnappliedChanges = false
+    private(set) var editableRevision = 0
+
+    var surfaceBaseline: ProbeSurfaceDraftSnapshot?
+    var pendingExplicitNewModel: ProbeDraftModelIdentity?
+    private(set) var synchronizedContext: ProbeDraftContext?
+    let autoCommitCoordinator = ProbeSurfaceAutoCommitCoordinator()
+    private var isReplacingEditableValues = false
+
+    func setHasUnappliedChanges(_ hasChanges: Bool) {
+        guard hasUnappliedChanges != hasChanges else { return }
+        objectWillChange.send()
+        hasUnappliedChanges = hasChanges
+    }
+
+    private func noteEditableMutation() {
+        guard !isReplacingEditableValues else { return }
+        editableRevision &+= 1
+        // Each editable property is already @Published. Sending an additional
+        // objectWillChange from its didSet would be a nested publication while
+        // SwiftUI is applying the field binding.
+        hasUnappliedChanges = true
+    }
+
+    func replaceEditableValues(
+        ap: String,
+        ml: String,
+        surfaceDepthMM: String,
+        sagittalAngle: String,
+        layoutRotation: String
+    ) {
+        isReplacingEditableValues = true
+        surfaceAP = ap
+        surfaceML = ml
+        self.surfaceDepthMM = surfaceDepthMM
+        self.sagittalAngle = sagittalAngle
+        self.layoutRotation = layoutRotation
+        isReplacingEditableValues = false
+    }
+
+    func markSynchronized(with context: ProbeDraftContext) {
+        synchronizedContext = context
+    }
+
+    func discard() {
+        replaceEditableValues(
+            ap: "0",
+            ml: "0",
+            surfaceDepthMM: "2.3",
+            sagittalAngle: "0",
+            layoutRotation: ProbeLayoutRotation.sagittal.rawValue
+        )
+        surfaceBaseline = nil
+        pendingExplicitNewModel = nil
+        synchronizedContext = nil
+        setHasUnappliedChanges(false)
+    }
+}
+
+enum ProbeInputUnits {
+    static let micrometresPerMillimetre = 1_000.0
+
+    static func micrometres(fromMillimetres value: Double) -> Double {
+        value * micrometresPerMillimetre
+    }
+
+    static func millimetres(fromMicrometres value: Double) -> Double {
+        value / micrometresPerMillimetre
+    }
+}
+
+struct ProjectSidebar: View {
+    @ObservedObject var model: PlannerViewModel
+    @ObservedObject var draft: ProbeDraftSession
+    let saveProject: () -> Void
+    let openProject: () -> Void
+    let reconnect: () -> Void
+    @State private var showingSurgeryPlanExport = false
+    @StateObject private var numericEditingSession =
+        ProbeSurfaceNumericEditingSession()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 14) {
+                    projectSection
+                    probeSection
+                    majorVesselsSection
+                }
+                .padding(16)
             }
-            Text(
-                "+AP anterior · −AP posterior/back · +ML right · −ML left · "
-                    + "+DV dorsal/up · −DV deep/ventral"
+        }
+        .background(.thinMaterial)
+        .sheet(isPresented: $showingSurgeryPlanExport) {
+            SurgeryPlanExportSheet(
+                model: model,
+                hasUnappliedProbeEdits: hasUnappliedProbeEdits
             )
-            .font(.caption2)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+        }
+        .onChange(of: model.selectedProbePlan?.planId, initial: true) {
+            _, _ in
+            ViewUpdateMutationBoundary.perform {
+                synchronizeProbeDraft()
+            }
+        }
+        .onChange(of: model.selectedProbePlan?.inputSha256) {
+            _, _ in
+            ViewUpdateMutationBoundary.perform {
+                synchronizeProbeDraft()
+            }
+        }
+        .onChange(of: model.backendState?.project?.projectId) { _, _ in
+            ViewUpdateMutationBoundary.perform {
+                synchronizeProbeDraft()
+            }
+        }
+        .onChange(of: model.selectedProbeModel?.id, initial: true) { _, _ in
+            ViewUpdateMutationBoundary.perform {
+                let selectedIdentity = model.selectedProbeModel.map {
+                    ProbeDraftModelIdentity(
+                        modelId: $0.modelId,
+                        modelVersion: $0.modelVersion
+                    )
+                }
+                let isExplicitNewDraftSelection =
+                    draft.pendingExplicitNewModel == selectedIdentity
+                if model.selectedProbePlan == nil,
+                   !isExplicitNewDraftSelection,
+                   !draft.hasUnappliedChanges
+                {
+                    draft.surfaceBaseline = currentSurfaceProbeDraftSnapshot
+                    draft.setHasUnappliedChanges(false)
+                }
+                if isExplicitNewDraftSelection {
+                    requestProbeAutoCommit(.modelChanged)
+                }
+            }
+        }
+        .onChange(of: hasUnappliedProbeEdits, initial: true) { _, _ in
+            ViewUpdateMutationBoundary.perform {
+                // Re-read after crossing the boundary. Several field changes
+                // can arrive in one control transaction, and an older
+                // callback must not publish its captured derived value after
+                // the latest edit.
+                let currentHasChanges = hasUnappliedProbeEdits
+                draft.setHasUnappliedChanges(currentHasChanges)
+                if !currentHasChanges {
+                    synchronizeProbeDraft()
+                }
+            }
+        }
+        .onChange(of: draft.editableRevision) { _, _ in
+            ViewUpdateMutationBoundary.perform {
+                let hasChanges = hasUnappliedProbeEdits
+                draft.setHasUnappliedChanges(hasChanges)
+                if !hasChanges {
+                    synchronizeProbeDraft()
+                }
+            }
+        }
+        .onChange(of: autoCommitReadinessFingerprint, initial: true) { _, _ in
+            requestProbeAutoCommit(.planningBecameReady)
         }
     }
 
-    private func compactProbeNumberField(
-        _ axis: String,
-        text: Binding<String>
+    private var probeSection: some View {
+        SidebarSection(title: "Neuropixels 2.0", systemImage: "line.diagonal.arrow") {
+            Picker("Probe", selection: probeModelSelection) {
+                if supportedProbeCatalog.isEmpty {
+                    Text("Unavailable").tag("")
+                }
+                ForEach(supportedProbeCatalog) { probe in
+                    Text(probePickerLabel(probe)).tag(probe.id)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(
+                supportedProbeCatalog.isEmpty
+                    || model.probeOperationInProgress
+            )
+            .accessibilityLabel("Neuropixels model")
+            .accessibilityHint("Choose NP2003 with one shank or NP2013 with four shanks.")
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Surface insertion site from bregma")
+                    .font(.caption.weight(.semibold))
+                HStack(spacing: 7) {
+                    surfaceProbeNumberField(
+                        .ap,
+                        ProbeSurfaceEditorPresentation.apLabel,
+                        unit: "mm",
+                        text: $draft.surfaceAP,
+                        accessibilityLabel: "Insertion AP in millimetres from bregma"
+                    )
+                    surfaceProbeNumberField(
+                        .ml,
+                        ProbeSurfaceEditorPresentation.mlLabel,
+                        unit: "mm",
+                        text: $draft.surfaceML,
+                        accessibilityLabel:
+                            "Surface insertion ML in millimetres from bregma; "
+                            + "positive right, negative left"
+                    )
+                }
+            }
+
+            surfaceProbeNumberField(
+                .surfaceDepth,
+                ProbeSurfaceEditorPresentation.depthLabel,
+                unit: "mm",
+                text: $draft.surfaceDepthMM,
+                accessibilityLabel:
+                    "Shank 1 depth from the insertion-site brain surface in millimetres",
+                accessibilityHint:
+                    "Enter the path length along shank 1 from its brain-surface insertion point "
+                    + "to its target."
+            )
+
+            surfaceProbeNumberField(
+                .anteriorPosteriorAngle,
+                ProbeSurfaceEditorPresentation.angleLabel,
+                unit: "°",
+                text: $draft.sagittalAngle,
+                accessibilityLabel: "Anterior posterior insertion angle in degrees",
+                accessibilityHint:
+                    "Positive advances from anterior to posterior; negative advances "
+                    + "from posterior to anterior."
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Probe layout")
+                    .font(.caption.weight(.semibold))
+                Picker("Probe layout", selection: probeLayoutSelection) {
+                    ForEach(ProbeLayoutRotation.allCases) { rotation in
+                        Text(rotation.label).tag(rotation.rawValue)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("Probe layout rotation")
+                .accessibilityValue(
+                    ProbeLayoutRotation(rawValue: draft.layoutRotation)?
+                        .accessibilityValue ?? "No valid layout selected."
+                )
+            }
+
+            if model.probeOperationInProgress {
+                ProgressView("Updating probe…")
+                    .controlSize(.small)
+            }
+            if draft.hasUnappliedChanges,
+               let reason = probeDraftBlockingReason,
+               !model.probeOperationInProgress
+            {
+                Label(reason, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let error = model.probeOperationError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var probeModelSelection: Binding<String> {
+        Binding(
+            get: {
+                if let pending = draft.pendingExplicitNewModel,
+                   let probe = supportedProbeCatalog.first(where: {
+                       $0.modelId == pending.modelId
+                           && $0.modelVersion == pending.modelVersion
+                   })
+                {
+                    return probe.id
+                }
+                return model.selectedProbeModel?.id ?? ""
+            },
+            set: { identity in
+                guard let probe = model.probeCatalog.first(where: { $0.id == identity }) else {
+                    return
+                }
+                let requestedIdentity = ProbeDraftModelIdentity(
+                    modelId: probe.modelId,
+                    modelVersion: probe.modelVersion
+                )
+                draft.pendingExplicitNewModel = requestedIdentity
+                ViewUpdateMutationBoundary.perform {
+                    numericEditingSession.endActiveEditing()
+                    requestProbeAutoCommit(
+                        .modelChanged,
+                        modelOverride: requestedIdentity
+                    )
+                }
+            }
+        )
+    }
+
+    private var probeLayoutSelection: Binding<String> {
+        Binding(
+            get: { draft.layoutRotation },
+            set: { rotation in
+                guard ProbeLayoutRotation(rawValue: rotation) != nil else { return }
+                ViewUpdateMutationBoundary.perform {
+                    numericEditingSession.endActiveEditing()
+                    draft.layoutRotation = rotation
+                    requestProbeAutoCommit(.layoutChanged)
+                }
+            }
+        )
+    }
+
+    private var editableSurfacePlan: ProbePlanDetail? {
+        guard let plan = model.selectedProbePlan,
+              plan.placementMode == .atlasSurfaceAPML,
+              plan.surfaceRelativeInput != nil
+        else { return nil }
+        return plan
+    }
+
+    private var hasUnappliedProbeEdits: Bool {
+        ProbeSurfaceDraftComparisonPolicy.hasUnappliedEdits(
+            current: currentSurfaceProbeDraftSnapshot,
+            baseline: draft.surfaceBaseline
+        )
+    }
+
+    private var currentSurfaceProbeDraftSnapshot: ProbeSurfaceDraftSnapshot {
+        let identity = effectiveProbeModelIdentity
+        return ProbeSurfaceDraftComparisonPolicy.snapshot(
+            modelId: identity?.modelId,
+            modelVersion: identity?.modelVersion,
+            ap: draft.surfaceAP,
+            ml: draft.surfaceML,
+            surfaceDepthMM: draft.surfaceDepthMM,
+            sagittalAngle: draft.sagittalAngle,
+            layoutRotation: draft.layoutRotation
+        )
+    }
+
+    private var effectiveProbeModelIdentity: ProbeDraftModelIdentity? {
+        draft.pendingExplicitNewModel
+            ?? model.selectedProbeModel.map {
+                ProbeDraftModelIdentity(
+                    modelId: $0.modelId,
+                    modelVersion: $0.modelVersion
+                )
+            }
+    }
+
+    private var probeDraftBlockingReason: String? {
+        ProbeSurfaceDraftReadinessPolicy.blockingReason(
+            planningUnavailableReason: directProbePlanningUnavailableReason,
+            hasSelectedModel: model.selectedProbeModel != nil,
+            ap: draft.surfaceAP,
+            ml: draft.surfaceML,
+            surfaceDepth: draft.surfaceDepthMM,
+            anteriorPosteriorAngle: draft.sagittalAngle,
+            layoutRotation: draft.layoutRotation
+        )
+    }
+
+    private var directProbePlanningUnavailableReason: String? {
+        ProbeSurfacePlanningAvailabilityPolicy.blockingReason(
+            connectionReady: model.connection.isReady,
+            hasProject: model.backendState?.project != nil,
+            atlasReady: model.atlasLoadPhase == .ready,
+            serviceSupportsPlanning: model.supportsAtlasSurfaceProbePlanning,
+            projectOperationInProgress: model.projectOperationInProgress,
+            probeOperationInProgress: model.probeOperationInProgress
+        )
+    }
+
+    private var supportedProbeCatalog: [ProbeCatalogModel] {
+        model.probeCatalog.filter {
+            ProbeCatalogPresentation.isNeuropixels2(modelId: $0.modelId)
+        }
+    }
+
+    private func probePickerLabel(_ probe: ProbeCatalogModel) -> String {
+        ProbeSurfaceEditorPresentation.modelLabel(modelId: probe.modelId)
+            ?? "Unsupported"
+    }
+
+    private func surfaceProbeNumberField(
+        _ field: ProbeSurfaceEditorField,
+        _ label: String,
+        unit: String,
+        text: Binding<String>,
+        accessibilityLabel: String,
+        accessibilityHint: String? = nil
     ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(axis)
+            Text("\(label) (\(unit))")
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.secondary)
-            TextField(axis, text: text)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-                .accessibilityLabel("Entry \(axis) in millimetres from bregma")
+            ProbeSurfaceNumericTextField(
+                text: text,
+                placeholder: unit,
+                accessibilityLabel: accessibilityLabel,
+                accessibilityHint: accessibilityHint ?? "Enter a decimal value.",
+                onBeginEditing: { control in
+                    numericEditingSession.beganEditing(
+                        field: field,
+                        control: control
+                    )
+                },
+                onEndEditing: { control in
+                    numericEditingSession.endedEditing(
+                        field: field,
+                        control: control
+                    )
+                },
+                onCommit: {
+                    requestProbeAutoCommit(.numericFocusLost)
+                }
+            )
+            .frame(maxWidth: .infinity, minHeight: 22)
         }
         .frame(maxWidth: .infinity)
     }
 
-    private func createProbePlan() async -> Bool {
-        guard let probe = model.selectedProbeModel else { return false }
-        return await model.createProbePlan(
-            name: probeName,
-            targetId: probeTargetId,
-            modelId: probe.modelId,
-            modelVersion: probe.modelVersion,
-            placementMode: probePlacementMode,
-            entryAPText: probeEntryAP,
-            entryMLText: probeEntryML,
-            entryDVText: probeEntryDV,
-            azimuthText: probeAzimuth,
-            elevationText: probeElevation,
-            insertionDepthText: probeDepth,
-            axialRotationText: probeAxialRotation,
-            customGeometryAcknowledged: probeGeometryAcknowledged
+    private func requestProbeAutoCommit(
+        _ trigger: ProbeSurfaceAutoCommitTrigger,
+        modelOverride: ProbeDraftModelIdentity? = nil
+    ) {
+        switch ProbeSurfaceAutoCommitPolicy.action(
+            for: trigger,
+            numericFieldIsFocused: numericEditingSession.isEditing
+        ) {
+        case .ignore:
+            return
+        case .endNumericEditing:
+            // AppKit may deliver a segmented-picker change before it publishes
+            // the text field's focus loss. Ending editing here makes the focus
+            // transition the sole commit boundary, so an atomic model/layout
+            // choice can never smuggle an intermediate "9" into a planned
+            // "90" numeric edit.
+            numericEditingSession.endActiveEditing()
+            return
+        case .enqueueMutation:
+            break
+        }
+        guard let identity = modelOverride ?? effectiveProbeModelIdentity else {
+            return
+        }
+        let request = ProbeSurfaceAutoCommitRequest(
+            model: identity,
+            ap: draft.surfaceAP,
+            ml: draft.surfaceML,
+            surfaceDepthMM: draft.surfaceDepthMM,
+            sagittalAngle: draft.sagittalAngle,
+            layoutRotation: draft.layoutRotation,
+            editableRevision: draft.editableRevision
+        )
+        guard draft.autoCommitCoordinator.enqueue(request) else { return }
+        ViewUpdateMutationBoundary.performAsync {
+            await drainProbeAutoCommitQueue()
+        }
+    }
+
+    private func drainProbeAutoCommitQueue() async {
+        while let ticket = draft.autoCommitCoordinator.beginNext() {
+            let succeeded = await performProbeAutoCommit(ticket)
+            if succeeded {
+                publishProbeAutoCommitCompletionIfCurrent(ticket)
+            }
+            let hasPending = draft.autoCommitCoordinator.complete(ticket)
+            if !hasPending { return }
+        }
+    }
+
+    private func performProbeAutoCommit(
+        _ ticket: ProbeSurfaceAutoCommitTicket
+    ) async -> Bool {
+        let request = ticket.request
+        let loadedIdentity = model.selectedProbeModel.map {
+            ProbeDraftModelIdentity(
+                modelId: $0.modelId,
+                modelVersion: $0.modelVersion
+            )
+        }
+        if loadedIdentity != request.model {
+            let loaded = await model.loadProbeModel(
+                modelId: request.model.modelId,
+                modelVersion: request.model.modelVersion
+            )
+            guard loaded else {
+                if draft.autoCommitCoordinator.isLatest(ticket),
+                   draft.pendingExplicitNewModel == request.model
+                {
+                    draft.pendingExplicitNewModel = nil
+                }
+                return false
+            }
+        }
+
+        // A later focus commit or atomic selector choice supersedes this
+        // request. Do not write its stale values after the model fetch.
+        guard draft.autoCommitCoordinator.isLatest(ticket) else { return false }
+
+        let executionUnavailableReason =
+            ProbeSurfacePlanningAvailabilityPolicy.blockingReason(
+                connectionReady: model.connection.isReady,
+                hasProject: model.backendState?.project != nil,
+                atlasReady: model.atlasLoadPhase == .ready,
+                serviceSupportsPlanning: model.supportsAtlasSurfaceProbePlanning,
+                projectOperationInProgress: model.projectOperationInProgress,
+                probeOperationInProgress: false
+            )
+        guard ProbeSurfaceDraftReadinessPolicy.blockingReason(
+            planningUnavailableReason: executionUnavailableReason,
+            hasSelectedModel: true,
+            ap: request.ap,
+            ml: request.ml,
+            surfaceDepth: request.surfaceDepthMM,
+            anteriorPosteriorAngle: request.sagittalAngle,
+            layoutRotation: request.layoutRotation
+        ) == nil else {
+            return false
+        }
+
+        if editableSurfacePlan != nil,
+           draft.surfaceBaseline == request.snapshot
+        {
+            return true
+        }
+        return if editableSurfacePlan == nil {
+            await createProbePlan(request: request)
+        } else {
+            await updateProbePlan(request: request)
+        }
+    }
+
+    private func publishProbeAutoCommitCompletionIfCurrent(
+        _ ticket: ProbeSurfaceAutoCommitTicket
+    ) {
+        guard ProbeSurfaceAutoCommitCompletionPolicy.mayPopulateDraft(
+            completed: ticket.request,
+            isLatestRequest: draft.autoCommitCoordinator.isLatest(ticket),
+            currentEditableRevision: draft.editableRevision,
+            currentSnapshot: currentSurfaceProbeDraftSnapshot
+        ) else {
+            return
+        }
+        if draft.pendingExplicitNewModel == ticket.request.model {
+            draft.pendingExplicitNewModel = nil
+        }
+        populateProbeDraft()
+    }
+
+    private func createProbePlan(
+        request: ProbeSurfaceAutoCommitRequest
+    ) async -> Bool {
+        return await model.createAtlasSurfaceProbePlan(
+            modelId: request.model.modelId,
+            modelVersion: request.model.modelVersion,
+            insertionAPText: request.ap,
+            insertionMLText: request.ml,
+            surfaceDepthText: request.surfaceDepthMM,
+            sagittalAngleText: request.sagittalAngle,
+            layoutRotationText: request.layoutRotation
         )
     }
 
-    private func updateProbePlan() async -> Bool {
-        guard let probe = model.selectedProbeModel else { return false }
-        return await model.updateSelectedProbePlan(
-            name: probeName,
-            targetId: probeTargetId,
-            modelId: probe.modelId,
-            modelVersion: probe.modelVersion,
-            placementMode: probePlacementMode,
-            entryAPText: probeEntryAP,
-            entryMLText: probeEntryML,
-            entryDVText: probeEntryDV,
-            azimuthText: probeAzimuth,
-            elevationText: probeElevation,
-            insertionDepthText: probeDepth,
-            axialRotationText: probeAxialRotation,
-            customGeometryAcknowledged: probeGeometryAcknowledged
+    private func updateProbePlan(
+        request: ProbeSurfaceAutoCommitRequest
+    ) async -> Bool {
+        guard editableSurfacePlan != nil else { return false }
+        return await model.updateSelectedAtlasSurfaceProbePlan(
+            modelId: request.model.modelId,
+            modelVersion: request.model.modelVersion,
+            insertionAPText: request.ap,
+            insertionMLText: request.ml,
+            surfaceDepthText: request.surfaceDepthMM,
+            sagittalAngleText: request.sagittalAngle,
+            layoutRotationText: request.layoutRotation
         )
     }
 
     private func populateProbeDraft() {
-        guard let plan = model.selectedProbePlan else { return }
-        let draft = plan.placementDraft
-        probeName = plan.name
-        probeTargetId = plan.targetId
-        probePlacementMode = draft.mode
-        probeEntryAP = draft.entryAPMillimetres.map(decimalText) ?? ""
-        probeEntryML = draft.entryMLMillimetres.map(decimalText) ?? ""
-        probeEntryDV = draft.entryDVMillimetres.map(decimalText) ?? ""
-        probeAzimuth = draft.azimuthDegrees.map(decimalText) ?? ""
-        probeElevation = draft.elevationDegrees.map(decimalText) ?? ""
-        probeDepth = draft.insertionDepthMicrometres.map(decimalText) ?? ""
-        probeAxialRotation = decimalText(draft.axialRotationDegrees)
-        probeGeometryAcknowledged = ProbePlanningContract.requiresExplicitAcknowledgement(
-            verificationStatus: plan.verificationStatus
+        guard let plan = editableSurfacePlan,
+              let input = plan.surfaceRelativeInput
+        else {
+            prepareNewProbeDraft()
+            return
+        }
+        draft.replaceEditableValues(
+            ap: decimalText(input.insertionAPMillimetres),
+            ml: decimalText(input.insertionMLMillimetres),
+            surfaceDepthMM: decimalText(input.surfaceDepthMillimetres),
+            sagittalAngle: decimalText(input.sagittalAngleDegrees),
+            layoutRotation: String(input.probeLayoutRotationDegrees)
         )
+        draft.surfaceBaseline = currentSurfaceProbeDraftSnapshot
+        draft.markSynchronized(with: currentProbeDraftContext)
+        draft.setHasUnappliedChanges(false)
     }
 
     private func clearProbeDraft() {
-        probeName = ""
-        probeTargetId = ""
-        probePlacementMode = .stereotaxicTargetManipulator
-        probeEntryAP = ""
-        probeEntryML = ""
-        probeEntryDV = ""
-        probeAzimuth = ""
-        probeElevation = ""
-        probeDepth = ""
-        probeAxialRotation = ""
-        probeGeometryAcknowledged = false
+        draft.replaceEditableValues(
+            ap: "0",
+            ml: "0",
+            surfaceDepthMM: "2.3",
+            sagittalAngle: "0",
+            layoutRotation: ProbeLayoutRotation.sagittal.rawValue
+        )
+    }
+
+    private func prepareNewProbeDraft() {
+        clearProbeDraft()
+        draft.surfaceBaseline = currentSurfaceProbeDraftSnapshot
+        draft.markSynchronized(with: currentProbeDraftContext)
+        draft.setHasUnappliedChanges(false)
+    }
+
+    private func synchronizeProbeDraft() {
+        let incomingContext = currentProbeDraftContext
+        guard ProbeDraftSynchronizationPolicy.shouldReplaceDraft(
+            existingContext: draft.synchronizedContext,
+            incomingContext: incomingContext,
+            hasUnappliedChanges: hasUnappliedProbeEdits
+        ) else { return }
+        if editableSurfacePlan == nil {
+            prepareNewProbeDraft()
+        } else {
+            populateProbeDraft()
+        }
+    }
+
+    private var currentProbeDraftContext: ProbeDraftContext {
+        ProbeDraftContext(
+            projectId: model.backendState?.project?.projectId,
+            planId: model.selectedProbePlan?.planId,
+            planInputSha256: model.selectedProbePlan?.inputSha256
+        )
     }
 
     private func decimalText(_ value: Double) -> String {
         String(format: "%.12g", value)
     }
 
-    private func populateVesselAnalysisDraftForCurrentPlan() {
-        guard let projectId = model.backendState?.project?.projectId,
-              let plan = model.selectedProbePlan,
-              let result = model.selectedProbeVesselAnalysis,
-              result.projectId == projectId,
-              result.planId == plan.planId,
-              result.planInputSha256 == plan.inputSha256
-        else {
-            vesselAnalysisDraft = VesselAnalysisDraft()
-            return
-        }
-        vesselAnalysisDraft = VesselAnalysisDraft(analysis: result.analysis)
-    }
-
-    private func populateVesselAnalysisDraft(from result: MajorVesselAnalysisResult) {
-        guard let projectId = model.backendState?.project?.projectId,
-              let plan = model.selectedProbePlan,
-              result.projectId == projectId,
-              result.planId == plan.planId,
-              result.planInputSha256 == plan.inputSha256
-        else { return }
-        vesselAnalysisDraft = VesselAnalysisDraft(analysis: result.analysis)
-    }
-
-    private func saveProbeRegions(_ format: ProbeRegionExportFormat) {
-        Task {
-            guard let export = await model.exportSelectedProbeRegions(format: format) else {
-                return
-            }
-            let panel = NSSavePanel()
-            panel.title = "Save exact probe-region analysis"
-            panel.prompt = "Save"
-            panel.nameFieldStringValue = export.suggestedFileName
-            panel.canCreateDirectories = true
-            panel.allowedContentTypes = [format == .csv ? .commaSeparatedText : .json]
-            guard panel.runModal() == .OK, let url = panel.url else { return }
-            do {
-                try Data(export.content.utf8).write(to: url, options: .atomic)
-                _ = await model.confirmProbeRegionExport(export)
-            } catch {
-                model.recordProbeFileError(error)
-            }
-        }
+    private var autoCommitReadinessFingerprint: String {
+        [
+            model.connection.isReady ? "connected" : "disconnected",
+            model.backendState?.project?.projectId ?? "no-project",
+            model.backendState?.project.map { String($0.revision) } ?? "no-revision",
+            String(describing: model.atlasLoadPhase),
+            model.supportsAtlasSurfaceProbePlanning ? "surface-plan" : "no-surface-plan",
+            model.projectOperationInProgress ? "project-busy" : "project-idle",
+            model.probeOperationInProgress ? "probe-busy" : "probe-idle",
+            model.selectedProbeModel?.id ?? "no-model",
+            model.selectedProbePlan?.planId ?? "no-plan",
+            model.selectedProbePlan?.inputSha256 ?? "no-input",
+        ].joined(separator: "|")
     }
 
     private var majorVesselsSection: some View {
         SidebarSection(title: "Major vessels", systemImage: "drop.triangle") {
-            StatusRow(label: "Geometry", value: model.majorVesselStatus)
             if model.majorVesselLoadInProgress {
-                ProgressView("Verifying vessel geometry…")
+                ProgressView("Loading vessels…")
                     .controlSize(.small)
-            }
-            if let error = model.majorVesselLoadError {
+            } else if let error = model.majorVesselLoadError {
                 Label(error, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
-            }
-            if let source = model.majorVesselGeometry?.provenance {
-                StatusRow(label: "Source", value: "LAMBADA \(source.specimenId) · CC BY 4.0")
-                Text(model.majorVesselDisclosure)
+            } else if let source = model.majorVesselGeometry?.provenance {
+                Label("Visible in every brain view", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                Text("VesSAP \(source.specimenId)")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 14) {
                     if let recordURL = URL(string: source.sourceRecordUrl) {
-                        Link("Dataset", destination: recordURL)
+                        Link("Dataset source", destination: recordURL)
                     }
                     if let paperURL = URL(
                         string: "https://doi.org/\(source.sourcePaperDoi)"
@@ -535,414 +1312,70 @@ struct ProjectSidebar: View {
                     }
                 }
                 .font(.caption)
-            }
-            if model.selectedProbePlan?.hasCurrentPlanningGeometry == true,
-               model.majorVesselGeometry != nil
-            {
-                Divider()
-                Text("Probe clearance")
-                    .font(.caption.weight(.semibold))
-                vesselDistanceField(
-                    "Required margin (µm)",
-                    text: $vesselAnalysisDraft.requiredMarginMicrometres
-                )
-                vesselDistanceField(
-                    "Registration uncertainty (µm)",
-                    text: $vesselAnalysisDraft.registrationUncertaintyMicrometres
-                )
-                Toggle(
-                    "I reviewed these lab-defined inputs",
-                    isOn: $vesselAnalysisDraft.riskProfileConfirmed
-                )
-                .font(.caption)
-                Toggle(
-                    "I understand this is a single fixed reference with missing vessels",
-                    isOn: $vesselAnalysisDraft.referenceCoverageAcknowledged
-                )
-                .font(.caption)
-                Button("Analyze probe", systemImage: "waveform.path.ecg") {
-                    analyzeProbeMajorVessels()
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .disabled(!canAnalyzeProbeMajorVessels)
-                if model.majorVesselAnalysisInProgress {
-                    ProgressView("Measuring tapered vessel surfaces…")
-                        .controlSize(.small)
-                }
-                if let error = model.majorVesselAnalysisError {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let result = model.selectedProbeVesselAnalysis {
-                    vesselAnalysisSummary(result.analysis)
-                }
-            }
-        }
-    }
-
-    private func vesselDistanceField(_ label: String, text: Binding<String>) -> some View {
-        HStack {
-            Text(label)
-                .font(.caption)
-            TextField("0", text: text)
-                .textFieldStyle(.roundedBorder)
-                .multilineTextAlignment(.trailing)
-        }
-    }
-
-    private var canAnalyzeProbeMajorVessels: Bool {
-        model.canAnalyzeMajorVesselClearance
-            && parsedVesselDistance(vesselAnalysisDraft.requiredMarginMicrometres) != nil
-            && parsedVesselDistance(
-                vesselAnalysisDraft.registrationUncertaintyMicrometres
-            ) != nil
-            && vesselAnalysisDraft.riskProfileConfirmed
-            && vesselAnalysisDraft.referenceCoverageAcknowledged
-    }
-
-    private func analyzeProbeMajorVessels() {
-        guard let margin = parsedVesselDistance(
-            vesselAnalysisDraft.requiredMarginMicrometres
-        ),
-              let uncertainty = parsedVesselDistance(
-                  vesselAnalysisDraft.registrationUncertaintyMicrometres
-              )
-        else { return }
-        let riskProfileConfirmed = vesselAnalysisDraft.riskProfileConfirmed
-        let referenceCoverageAcknowledged =
-            vesselAnalysisDraft.referenceCoverageAcknowledged
-        Task {
-            _ = await model.analyzeSelectedProbeMajorVessels(
-                requiredMarginMicrometres: margin,
-                registrationUncertaintyMicrometres: uncertainty,
-                riskProfileConfirmed: riskProfileConfirmed,
-                referenceCoverageAcknowledged: referenceCoverageAcknowledged
-            )
-        }
-    }
-
-    private func parsedVesselDistance(_ text: String) -> Double? {
-        guard let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-              value.isFinite,
-              value >= 0,
-              value <= MajorVesselAnalysisContract.maximumDistanceMicrometres
-        else { return nil }
-        return value
-    }
-
-    private func vesselAnalysisSummary(
-        _ analysis: MajorVesselClearanceAnalysis
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label(
-                vesselStatusLabel(analysis.resultStatus),
-                systemImage: vesselStatusIcon(analysis.resultStatus)
-            )
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(vesselStatusColor(analysis.resultStatus))
-            Text(analysis.statement)
-                .font(.caption)
+                Text("Reference anatomy—verify against the individual animal.")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.orange)
                 .fixedSize(horizontal: false, vertical: true)
-            if let adjusted = analysis.minimumAdjustedClearanceMicrometres {
-                Text("Minimum adjusted clearance: \(signedMicrometres(adjusted))")
-                    .font(.caption2.monospacedDigit())
+            } else {
+                Label(model.majorVesselStatus, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
-            if let nearest = analysis.nearestCenterlineDistanceMicrometres {
-                Text("Nearest loaded centerline: \(nearest.formatted(.number.precision(.fractionLength(1)))) µm")
-                    .font(.caption2.monospacedDigit())
-            }
-            if !analysis.conflicts.isEmpty {
-                Button(
-                    "Inspect \(analysis.conflicts.count) returned conflict"
-                        + (analysis.conflicts.count == 1 ? "" : "s"),
-                    systemImage: "list.bullet.rectangle"
-                ) {
-                    showingMajorVesselConflictInspector = true
+        }
+    }
+
+    private var projectSection: some View {
+        SidebarSection(title: "Surgery plan", systemImage: "doc") {
+            HStack {
+                Button("Open", systemImage: "folder") { openProject() }
+                    .disabled(!model.canOpenProject)
+                Button("Save", systemImage: "square.and.arrow.down") {
+                    saveProject()
                 }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-            }
-            if analysis.conflictsTruncated {
-                Text(
-                    "The backend returned \(analysis.conflicts.count) conflicts; additional "
-                        + "conflicts were truncated at the reviewed request limit."
+                .disabled(!model.canSaveProject || hasUnappliedProbeEdits)
+                .help(
+                    hasUnappliedProbeEdits
+                        ? "Finish the numeric edit and wait for the probe to update."
+                        : "Save the current animal surgery plan."
                 )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-            if let error = model.majorVesselNavigationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(analysis.warnings, id: \.self) { warning in
-                Label(warning, systemImage: "info.circle")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(8)
-        .background(.quaternary.opacity(0.65), in: RoundedRectangle(cornerRadius: 7))
-    }
-
-    private func vesselStatusLabel(_ status: MajorVesselResultStatus) -> String {
-        switch status {
-        case .intersection: "Intersection detected"
-        case .marginViolation: "Margin violation"
-        case .uncertaintyViolation: "Uncertainty-bound violation"
-        case .noConflictDetected: "Loaded reference evaluated"
-        case .insufficientGeometry: "Result not classifiable"
-        }
-    }
-
-    private func vesselStatusIcon(_ status: MajorVesselResultStatus) -> String {
-        switch status {
-        case .intersection: "exclamationmark.octagon.fill"
-        case .marginViolation, .uncertaintyViolation: "exclamationmark.triangle.fill"
-        case .noConflictDetected: "magnifyingglass.circle"
-        case .insufficientGeometry: "questionmark.circle"
-        }
-    }
-
-    private func vesselStatusColor(_ status: MajorVesselResultStatus) -> Color {
-        switch status {
-        case .intersection: .red
-        case .marginViolation, .uncertaintyViolation: .orange
-        case .noConflictDetected: .secondary
-        case .insufficientGeometry: .secondary
-        }
-    }
-
-    private var implantTargetSection: some View {
-        SidebarSection(title: "Implant target", systemImage: "scope") {
-            StatusRow(
-                label: "Coordinate frame",
-                value: "Bregma-relative AP / ML / DV in millimetres"
-            )
-            StatusRow(
-                label: "Projection",
-                value: projectionStatus
-            )
-            StatusRow(
-                label: "Stored sites",
-                value: "\(model.implantTargets.count) unprojected"
-            )
-            Button("Calibrations…", systemImage: "ruler") {
-                showingCalibrationSheet = true
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
-            .disabled(!model.canManageCalibration)
-            VStack(alignment: .leading, spacing: 7) {
-                TextField("Site label", text: $targetLabel)
-                    .textFieldStyle(.roundedBorder)
-                targetField("AP (mm)", sign: "−AP = posterior / back", text: $targetAPMillimetres)
-                targetField("ML (mm)", sign: "−ML = left", text: $targetMLMillimetres)
-                targetField("DV (mm)", sign: "−DV = deep / ventral", text: $targetDVMillimetres)
-            }
-            .disabled(!model.canStoreImplantTarget)
-            Button("Store unprojected site", systemImage: "plus") {
-                Task {
-                    let added = await model.addUnprojectedImplantTarget(
-                        label: targetLabel,
-                        apText: targetAPMillimetres,
-                        mlText: targetMLMillimetres,
-                        dvText: targetDVMillimetres
-                    )
-                    if added {
-                        targetLabel = "Implant site \(model.implantTargets.count + 1)"
-                        targetAPMillimetres = ""
-                        targetMLMillimetres = ""
-                        targetDVMillimetres = ""
-                    }
-                }
+            Button("Export PDF…", systemImage: "doc.richtext") {
+                showingSurgeryPlanExport = true
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .disabled(
-                !model.canStoreImplantTarget
-                    || targetLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || targetAPMillimetres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || targetMLMillimetres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    || targetDVMillimetres.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                model.backendState?.project == nil
+                    || editableSurfacePlan == nil
+                    || hasUnappliedProbeEdits
             )
-            .help("Stores the signed values from bregma without creating an atlas marker.")
-            if model.implantOperationInProgress {
-                ProgressView("Updating stored implant sites…")
-                    .controlSize(.small)
-            }
-            if let error = model.implantOperationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let error = model.calibrationOperationError {
-                Label(error, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            ForEach(model.implantTargets) { target in
-                implantTargetCard(target)
-            }
-        }
-    }
-
-    private func implantTargetCard(_ target: UnprojectedImplantTarget) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline) {
-                Text(target.label)
-                    .font(.caption.weight(.semibold))
-                Spacer(minLength: 4)
-                Button(role: .destructive) {
-                    Task {
-                        _ = await model.removeUnprojectedImplantTarget(
-                            targetId: target.targetId
-                        )
-                    }
-                } label: {
-                    Image(systemName: "trash")
+            .help(
+                hasUnappliedProbeEdits
+                    ? "Finish the numeric edit and wait for the probe to update."
+                    : "Create a prefilled protocol PDF with selected planning views "
+                        + "and a matched Mouse Brain atlas plate."
+            )
+            if model.canDownloadAtlas {
+                Button("Download atlas", systemImage: "arrow.down.circle") {
+                    Task { await model.downloadAndOpenAtlas() }
                 }
-                .buttonStyle(.borderless)
-                .disabled(model.implantOperationInProgress)
-                .help("Remove this stored unprojected site")
-                .accessibilityLabel("Remove \(target.label)")
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
-            Text(targetCoordinateSummary(target))
-            .font(.caption2.monospacedDigit())
-            .fixedSize(horizontal: false, vertical: true)
-            if let projection = model.projection(for: target.targetId) {
-                Text(atlasCoordinateSummary(projection))
-                    .font(.caption2.monospacedDigit())
-                Text(voxelSummary(projection))
-                    .font(.caption2.monospacedDigit())
-                Text(
-                    "Calibration \(String(projection.provenance.calibrationSha256.prefix(10)))… "
-                        + "· planning only · not navigation"
-                )
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.orange)
-            } else {
-                Text("From bregma · unprojected · not navigation")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.orange)
-                if model.activeCalibration != nil {
-                    Button("Project to atlas") {
-                        Task { _ = await model.projectImplantTarget(targetId: target.targetId) }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                    .disabled(model.calibrationOperationInProgress)
+            if !model.connection.isReady {
+                HStack {
+                    Label("Connection unavailable", systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Button("Retry") { reconnect() }
+                        .disabled(model.connection == .connecting)
                 }
             }
-        }
-        .padding(8)
-        .background(.quaternary.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
-        .accessibilityElement(children: .contain)
-    }
-
-    private var projectionStatus: String {
-        guard let calibration = model.activeCalibration else {
-            return "Locked — subject calibration required"
-        }
-        return "Active v\(calibration.calibrationVersion) · \(calibration.quality.uppercased())"
-    }
-
-    private func atlasCoordinateSummary(_ result: CalibratedTargetProjectionResult) -> String {
-        let point = result.atlasPoint
-        return "Atlas AP \(signedMicrometres(point.apMicrometres)) · "
-            + "DV \(signedMicrometres(point.dvMicrometres)) · "
-            + "ML \(signedMicrometres(point.mlMicrometres))"
-    }
-
-    private func voxelSummary(_ result: CalibratedTargetProjectionResult) -> String {
-        let voxel = result.containingVoxelIndex
-        return "Voxel AP \(voxel.ap) · DV \(voxel.dv) · ML \(voxel.ml)"
-    }
-
-    private func signedMicrometres(_ value: Double) -> String {
-        String(format: "%+.1f µm", value)
-    }
-
-    private func signed(_ value: Double) -> String {
-        if value == 0 { return "0.000" }
-        return String(format: "%+.3f", value)
-    }
-
-    private func targetCoordinateSummary(_ target: UnprojectedImplantTarget) -> String {
-        let apDirection = direction(
-            target.apMillimetres,
-            positive: "anterior",
-            negative: "posterior/back"
-        )
-        let mlDirection = direction(target.mlMillimetres, positive: "right", negative: "left")
-        let dvDirection = direction(
-            target.dvMillimetres,
-            positive: "dorsal/up",
-            negative: "deep/ventral"
-        )
-        return "AP \(signed(target.apMillimetres)) mm (\(apDirection)) · "
-            + "ML \(signed(target.mlMillimetres)) mm (\(mlDirection)) · "
-            + "DV \(signed(target.dvMillimetres)) mm (\(dvDirection))"
-    }
-
-    private func direction(_ value: Double, positive: String, negative: String) -> String {
-        if value > 0 { return positive }
-        if value < 0 { return negative }
-        return "zero"
-    }
-
-    private func targetField(
-        _ label: String,
-        sign: String,
-        text: Binding<String>
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(label).font(.caption.weight(.semibold))
-                TextField("0.000", text: text)
-                    .textFieldStyle(.roundedBorder)
-                    .multilineTextAlignment(.trailing)
-            }
-            Text(sign)
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var backendSection: some View {
-        SidebarSection(title: "Planning service", systemImage: "point.3.connected.trianglepath.dotted") {
-            StatusRow(label: "Connection", value: model.connection.title)
-            StatusRow(label: "Project", value: model.projectStatus)
-            HStack {
-                Button("Reconnect") {
-                    reconnect()
-                }
-                .disabled(model.connection == .connecting)
-
-                Button("Refresh state") {
-                    Task { await model.refreshState() }
-                }
-                .disabled(!model.connection.isReady)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            HStack {
-                Button("Open…", systemImage: "folder") { openProject() }
-                    .disabled(!model.canOpenProject)
-                Button("Save As…", systemImage: "square.and.arrow.down") { saveProject() }
-                    .disabled(!model.canSaveProject)
-            }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
             if model.projectOperationInProgress {
-                ProgressView("Validating project package…")
+                ProgressView("Working…")
                     .controlSize(.small)
             }
             if let error = model.projectOperationError {
@@ -958,400 +1391,6 @@ struct ProjectSidebar: View {
         }
     }
 
-    private var atlasSection: some View {
-        SidebarSection(title: "Atlas", systemImage: "square.stack.3d.up") {
-            StatusRow(label: "Supported", value: SafetyPolicy.supportedAtlasDisplayName)
-            StatusRow(label: "Operational", value: model.atlasOperationalStatus)
-            if model.canDownloadAtlas {
-                Button("Download reviewed 25 µm atlas", systemImage: "arrow.down.circle") {
-                    Task { await model.downloadAndOpenAtlas() }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.small)
-                .help("Downloads only allen_mouse_25um v1.2, then validates it before use.")
-            }
-        }
-    }
-
-}
-
-private struct MajorVesselConflictInspectorSheet: View {
-    @ObservedObject var model: PlannerViewModel
-    @Environment(\.dismiss) private var dismiss
-
-    private var result: MajorVesselAnalysisResult? {
-        model.selectedProbeVesselAnalysis
-    }
-
-    private var selectedConflict: MajorVesselConflict? {
-        guard let selected = model.selectedMajorVesselConflict,
-              result?.analysis.conflicts.contains(selected) == true
-        else { return nil }
-        return selected
-    }
-
-    var body: some View {
-        VStack(spacing: 0) {
-            header
-            Divider()
-            if let result {
-                provenanceBanner(result)
-                Divider()
-                HSplitView {
-                    conflictList(result.analysis)
-                        .frame(minWidth: 690, idealWidth: 760)
-                    conflictDetail(result)
-                        .frame(minWidth: 430, idealWidth: 500)
-                }
-            } else {
-                ContentUnavailableView(
-                    "No current vessel analysis",
-                    systemImage: "drop.triangle",
-                    description: Text("Run probe clearance analysis before inspecting conflicts.")
-                )
-            }
-        }
-        .frame(minWidth: 1_180, minHeight: 720)
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Major-vessel conflicts")
-                    .font(.title2.weight(.semibold))
-                Text("Select any returned row to atomically localize its probe point in all three atlas views.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Spacer()
-            if model.majorVesselNavigationInProgress {
-                ProgressView("Navigating all views…")
-                    .controlSize(.small)
-            }
-            if selectedConflict != nil {
-                Button("Clear selection") {
-                    model.clearMajorVesselConflictSelection()
-                }
-            }
-            Button("Done") { dismiss() }
-                .keyboardShortcut(.cancelAction)
-        }
-        .padding(16)
-    }
-
-    private func provenanceBanner(_ result: MajorVesselAnalysisResult) -> some View {
-        let source = result.analysis.provenance
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Label(
-                    "\(result.analysis.conflicts.count) returned"
-                        + (result.analysis.conflictsTruncated ? " · response truncated" : ""),
-                    systemImage: result.analysis.conflictsTruncated
-                        ? "exclamationmark.triangle.fill" : "checklist"
-                )
-                .font(.callout.weight(.semibold))
-                Spacer()
-                Text("Project revision \(result.projectRevision) · plan v\(result.planVersion)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(.secondary)
-            }
-            Text("\(source.datasetTitle) · specimen \(source.specimenId) · \(source.sourceLicense)")
-                .font(.caption)
-            Text(
-                "Reference-only, not subject-specific; pial and choroidal vessels are excluded. "
-                    + "Registration and tissue-distortion bounds are not published."
-            )
-            .font(.caption)
-            .foregroundStyle(.orange)
-            .fixedSize(horizontal: false, vertical: true)
-            HStack(spacing: 14) {
-                if let dataset = URL(string: source.sourceRecordUrl) {
-                    Link("Dataset", destination: dataset)
-                }
-                if let paper = URL(string: "https://doi.org/\(source.sourcePaperDoi)") {
-                    Link("Paper", destination: paper)
-                }
-                Text("Asset \(String(source.derivedAssetSha256.prefix(14)))…")
-                    .textSelection(.enabled)
-            }
-            .font(.caption.monospaced())
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .background(.quaternary.opacity(0.45))
-    }
-
-    private func conflictList(_ analysis: MajorVesselClearanceAnalysis) -> some View {
-        VStack(spacing: 0) {
-            conflictColumnHeader
-            Divider()
-            List(analysis.conflicts) { conflict in
-                Button {
-                    Task { _ = await model.navigateToMajorVesselConflict(conflict) }
-                } label: {
-                    conflictRow(conflict)
-                }
-                .buttonStyle(.plain)
-                .disabled(model.majorVesselNavigationInProgress)
-                .listRowBackground(
-                    selectedConflict?.conflictId == conflict.conflictId
-                        ? Color.accentColor.opacity(0.20) : Color.clear
-                )
-                .accessibilityLabel(
-                    "\(classificationLabel(conflict.classification)), shank "
-                        + "\(conflict.shankId), depth \(micrometres(conflict.insertionDepthMicrometres))"
-                )
-                .accessibilityHint("Select and navigate all atlas views to this conflict")
-            }
-            .listStyle(.inset)
-        }
-    }
-
-    private var conflictColumnHeader: some View {
-        HStack(spacing: 8) {
-            Text("Status").frame(width: 142, alignment: .leading)
-            Text("Shank").frame(width: 80, alignment: .leading)
-            Text("Depth µm").frame(width: 82, alignment: .trailing)
-            Text("Adjusted µm").frame(width: 92, alignment: .trailing)
-            Text("Centerline µm").frame(width: 100, alignment: .trailing)
-            Text("Vessel Ø µm").frame(width: 90, alignment: .trailing)
-            Spacer(minLength: 4)
-        }
-        .font(.caption.weight(.semibold))
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 18)
-        .padding(.vertical, 8)
-    }
-
-    private func conflictRow(_ conflict: MajorVesselConflict) -> some View {
-        HStack(spacing: 8) {
-            HStack(spacing: 5) {
-                if selectedConflict?.conflictId == conflict.conflictId {
-                    Image(systemName: "location.fill")
-                        .foregroundStyle(Color.accentColor)
-                }
-                Text(classificationLabel(conflict.classification))
-                    .lineLimit(1)
-            }
-            .frame(width: 142, alignment: .leading)
-            Text(conflict.shankId)
-                .lineLimit(1)
-                .frame(width: 80, alignment: .leading)
-            numericCell(conflict.insertionDepthMicrometres, width: 82)
-            numericCell(conflict.adjustedClearanceMicrometres, width: 92, signed: true)
-            numericCell(conflict.centerlineDistanceMicrometres, width: 100)
-            numericCell(conflict.vesselDiameterMicrometres, width: 90)
-            Spacer(minLength: 4)
-            Image(systemName: "chevron.right")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-        }
-        .font(.caption.monospacedDigit())
-        .contentShape(Rectangle())
-        .padding(.vertical, 4)
-    }
-
-    private func numericCell(
-        _ value: Double,
-        width: CGFloat,
-        signed: Bool = false
-    ) -> some View {
-        Text(String(format: signed ? "%+.2f" : "%.2f", value))
-            .frame(width: width, alignment: .trailing)
-    }
-
-    @ViewBuilder
-    private func conflictDetail(_ result: MajorVesselAnalysisResult) -> some View {
-        if let conflict = selectedConflict {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
-                    Label("Selected conflict", systemImage: "location.fill")
-                        .font(.headline)
-                        .foregroundStyle(Color.accentColor)
-                    if let error = model.majorVesselNavigationError {
-                        Label(error, systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.red)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    detailSection("Identity") {
-                        detailRow("Conflict ID", conflict.conflictId)
-                        detailRow("Classification", classificationLabel(conflict.classification))
-                        detailRow("Shank ID", conflict.shankId)
-                        detailRow("Source edge", "\(conflict.vesselSourceEdgeIndex)")
-                        detailRow("Vessel run", "\(conflict.vesselRunIndex)")
-                        detailRow("Segment in run", "\(conflict.vesselSegmentIndexInRun)")
-                    }
-                    detailSection("Measured geometry") {
-                        detailRow("Insertion depth", micrometres(conflict.insertionDepthMicrometres))
-                        detailRow("Vessel diameter", micrometres(conflict.vesselDiameterMicrometres))
-                        detailRow("Probe-envelope radius", micrometres(conflict.probeEnvelopeRadiusMicrometres))
-                        detailRow("Centerline distance", micrometres(conflict.centerlineDistanceMicrometres))
-                        detailRow("Geometric surface clearance", signedMicrometres(conflict.geometricSurfaceClearanceMicrometres))
-                        detailRow("Required margin", micrometres(conflict.requiredMarginMicrometres))
-                        detailRow("Registration uncertainty", micrometres(conflict.registrationUncertaintyMicrometres))
-                        detailRow("Adjusted clearance", signedMicrometres(conflict.adjustedClearanceMicrometres))
-                    }
-                    detailSection("Closest points · physical ASR") {
-                        detailRow("Probe point", pointDescription(conflict.probePoint))
-                        detailRow("Vessel point", pointDescription(conflict.vesselPoint))
-                        detailRow("Frame", conflict.probePoint.frameId)
-                    }
-                    detailSection("Source fields") {
-                        detailRow("Source kind", conflict.sourceKind)
-                        detailRow("Subject-specific", conflict.subjectSpecific ? "yes" : "no")
-                        ForEach(Array(conflict.warnings.enumerated()), id: \.offset) { index, warning in
-                            detailRow("Warning \(index + 1)", warning)
-                        }
-                    }
-                    completeProvenance(result)
-                }
-                .padding(16)
-            }
-        } else {
-            ContentUnavailableView(
-                "Select a conflict",
-                systemImage: "cursorarrow.click.2",
-                description: Text(
-                    "A selected row shows every returned field and moves Coronal, Sagittal, and Horizontal to its probe point in one revision."
-                )
-            )
-        }
-    }
-
-    private func completeProvenance(_ result: MajorVesselAnalysisResult) -> some View {
-        let analysis = result.analysis
-        let source = analysis.provenance
-        let profile = analysis.riskProfile
-        return detailSection("Analysis and source provenance") {
-            detailRow("Algorithm", analysis.algorithmVersion)
-            detailRow("Analysis SHA-256", analysis.inputSha256)
-            detailRow("Plan input SHA-256", result.planInputSha256)
-            detailRow("Risk profile", profile.profileId)
-            detailRow("Lab policy", profile.sourceOrLabPolicy)
-            detailRow("Inputs confirmed", profile.confirmedByUser ? "yes" : "no")
-            detailRow("Reference coverage acknowledged", profile.referenceOnlyCoverageAcknowledged ? "yes" : "no")
-            detailRow("Candidate segments", "\(analysis.candidateSegmentCount)")
-            detailRow("Measured segments", "\(analysis.measuredSegmentCount)")
-            detailRow("Source ID", source.sourceId)
-            detailRow("Dataset", source.datasetTitle)
-            detailRow("Authors", source.authors.joined(separator: "; "))
-            detailRow("Specimen", source.specimenId)
-            detailRow("Dataset DOI", source.sourceDoi)
-            detailRow("Paper DOI", source.sourcePaperDoi)
-            detailRow("Source version", source.sourceVersion)
-            detailRow("License", source.sourceLicense)
-            detailRow("Archive digest", source.sourceArchiveDigest)
-            detailRow("Derived asset SHA-256", source.derivedAssetSha256)
-            detailRow("Extraction algorithm", source.extractionAlgorithmVersion)
-            detailRow("Atlas", "\(source.atlasIdentifier) \(source.atlasVersion)")
-            detailRow("Coordinate frame", source.coordinateFrameId)
-            detailRow("Minimum included diameter", micrometres(source.minimumIncludedDiameterMicrometres))
-            detailRow("Physical units declared", yesNo(source.physicalUnitsDeclared))
-            detailRow("Atlas scale applied", yesNo(source.atlasScaleApplied))
-            detailRow("Geometry source audited", yesNo(source.geometrySourceAudited))
-            detailRow("Subject-specific source", yesNo(source.subjectSpecific))
-            detailRow("Pial vessels excluded", yesNo(source.pialVesselsExcluded))
-            detailRow("Choroidal vessels excluded", yesNo(source.choroidalVesselsExcluded))
-            detailRow("Artery/vein classification", yesNo(source.arteryVeinClassificationAvailable))
-            detailRow("Registration transform", source.registrationTransformId ?? "not published")
-            detailRow("Registration bound", source.registrationUncertaintyBoundMicrometres.map(micrometres) ?? "not published")
-            detailRow("Tissue-distortion bound", source.tissueDistortionUncertaintyBoundMicrometres.map(micrometres) ?? "not published")
-            detailRow("Uncertainty bounds reviewed", yesNo(source.uncertaintyBoundsReviewed))
-            ForEach(Array(result.limitations.enumerated()), id: \.offset) { index, limitation in
-                detailRow("Limitation \(index + 1)", limitation)
-            }
-        }
-    }
-
-    private func detailSection<Content: View>(
-        _ title: String,
-        @ViewBuilder content: () -> Content
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            content()
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(10)
-        .background(.quaternary.opacity(0.55), in: RoundedRectangle(cornerRadius: 8))
-    }
-
-    private func detailRow(_ label: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 1) {
-            Text(label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.caption.monospacedDigit())
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func classificationLabel(
-        _ classification: MajorVesselConflictClassification
-    ) -> String {
-        switch classification {
-        case .intersection: "Intersection"
-        case .marginViolation: "Margin violation"
-        case .uncertaintyViolation: "Uncertainty violation"
-        }
-    }
-
-    private func micrometres(_ value: Double) -> String {
-        String(format: "%.3f µm", value)
-    }
-
-    private func signedMicrometres(_ value: Double) -> String {
-        String(format: "%+.3f µm", value)
-    }
-
-    private func pointDescription(_ point: MajorVesselPhysicalPoint) -> String {
-        "AP \(signedMicrometres(point.apMicrometres)) · "
-            + "DV \(signedMicrometres(point.dvMicrometres)) · "
-            + "ML \(signedMicrometres(point.mlMicrometres))"
-    }
-
-    private func yesNo(_ value: Bool) -> String { value ? "yes" : "no" }
-}
-
-private struct VesselAnalysisDraft: Equatable {
-    var requiredMarginMicrometres = ""
-    var registrationUncertaintyMicrometres = ""
-    var riskProfileConfirmed = false
-    var referenceCoverageAcknowledged = false
-
-    init() {}
-
-    init(analysis: MajorVesselClearanceAnalysis) {
-        let profile = analysis.riskProfile
-        requiredMarginMicrometres = String(profile.requiredMarginMicrometres)
-        registrationUncertaintyMicrometres = String(
-            profile.registrationUncertaintyMicrometres
-        )
-        riskProfileConfirmed = profile.confirmedByUser
-        referenceCoverageAcknowledged = profile.referenceOnlyCoverageAcknowledged
-    }
-
-    func matches(_ analysis: MajorVesselClearanceAnalysis) -> Bool {
-        let profile = analysis.riskProfile
-        guard let margin = Double(requiredMarginMicrometres.trimmingCharacters(
-            in: .whitespacesAndNewlines
-        )),
-              let uncertainty = Double(registrationUncertaintyMicrometres.trimmingCharacters(
-                  in: .whitespacesAndNewlines
-              ))
-        else { return false }
-        return margin == profile.requiredMarginMicrometres
-            && uncertainty == profile.registrationUncertaintyMicrometres
-            && riskProfileConfirmed == profile.confirmedByUser
-            && referenceCoverageAcknowledged
-                == profile.referenceOnlyCoverageAcknowledged
-    }
 }
 
 private struct SidebarSection<Content: View>: View {
@@ -1386,23 +1425,5 @@ private struct SidebarSection<Content: View>: View {
             RoundedRectangle(cornerRadius: 10)
                 .strokeBorder(Color.secondary.opacity(0.20))
         }
-    }
-}
-
-struct StatusRow: View {
-    let label: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label)
-                .font(.caption.weight(.medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.callout)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

@@ -45,16 +45,17 @@ SwiftUI owns:
 - windows, menus, native file panels, keyboard focus, accessibility, and presentation;
 - asynchronous bridge lifecycle and explicit disconnected/loading/error states;
 - rendering bridge-produced atlas PNGs and backend-validated mesh assets;
-- SceneKit camera interaction, ray construction, and display of schema-checked brain/probe
-  geometry payloads; and
-- calibration, target, and probe controls that send declared typed inputs.
+- SceneKit camera interaction, ray construction, and display of schema-checked brain/probe/
+  reference-vessel geometry payloads; and
+- direct AP/ML/surface-depth/angle/layout probe controls that send declared typed inputs.
 
 Python owns:
 
 - BrainGlobe atlas acquisition, validation, metadata, hierarchy, arrays, and mesh provenance;
 - coordinate systems and transforms;
-- subject calibration, AP/ML/DV target projection, probe geometry, and voxel traversal;
-- digest-bound major-vessel qualification and fail-closed rejection;
+- source-pinned Pinpoint/Urchin AP/ML conversion, exact annotation-surface resolution, probe
+  geometry, and voxel traversal;
+- digest-bound VesSAP display geometry and fail-closed clearance rejection;
 - subject dorsal-image byte preservation, landmark fitting, residuals, and atlas-grid resampling;
 - population reference-density validation and its non-subject-specific limitation;
 - project models, migrations, checksums, atomic save, backup recovery, and exports.
@@ -69,27 +70,30 @@ process decision, is:
 
 - exactly `allen_mouse_25um` v1.2; 10 µm is not offered during testing;
 - exactly one selected `Dorsal / Coronal / Sagittal / Horizontal / 3D` view, with independent
-  slice depths and click-to-replace region labels;
-- a SceneKit brain/probe scene with camera control and atlas ray picking;
-- signed bregma AP/ML/DV targets, versioned subject calibration, QC-gated projection, and probe
-  planning/region export;
-- an archived LAMBADA P60_606 diameter-≥30 µm derivative that is not shown or served because
-  coordinate and coverage qualification is rejected; and
+  slice depths and click-to-replace region labels; one ontology selection drives reviewed
+  descendant masks in all four 2D modes and its reviewed mesh in 3D, while an ontology-only
+  entry with neither voxels nor mesh remains selected in an explicit no-geometry state;
+- a SceneKit brain/probe/reference-vessel scene with camera control and atlas ray picking;
+- only NP2003/NP2013 in the primary probe selector, with AP− posterior, ML− animal-left, AP/ML
+  anchored at user-facing Shank 1's exact local annotation-surface crossing, depth to that
+  shank's distal target, signed sagittal angle, and sagittal/90°-clockwise layout; 3D renders each
+  complete 10 mm shaft while slice/traversal analysis uses only the implanted surface-to-tip path;
+- no separate target-registration, subject-calibration, or geometry-checkbox prerequisite for a
+  v4 direct plan; legacy v1–v3 records retain their original archived semantics;
+- a VesSAP BL6J-no1 diameter-≥30 µm reference overlaid in all five views, with the older
+  LAMBADA P60_606 derivative retained only as rejected evidence; and
 - no reference-vessel analysis capability.
 
 Region export uses a two-phase boundary: Python generates and hashes content without mutation,
 the native client performs an atomic file write, and only a matching confirmation records the
 `exported` audit event. Cancelling the save panel or a failed write leaves the project unchanged.
 
-AP and DV orientation evidence passed, but the source describes hemisphere specimens and the
-exact graph has no persisted biological hemisphere/laterality binding. Whole-brain coverage and
-ML polarity are therefore unqualified, and the service must not infer a side or mirror the
-derivative. It omits `auditedReferenceMajorVessels` and
-`radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.get`,
-`vessel.major.reference.geometry`, and `vessel.major.reference.analyze` fail with
-`VESSEL_GEOMETRY_UNAVAILABLE`. The gate is bound to
-[`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
-SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
+The service advertises `auditedReferenceMajorVessels` and serves the exact VesSAP display
+geometry after source/transform/asset checks. It omits
+`radiusAwareReferenceVesselAnalysis`; `vessel.major.reference.analyze` fails with
+`VESSEL_ANALYSIS_UNAVAILABLE`. The source is one cleared ex-vivo C57BL/6J reference with no
+published subject-registration or tissue-distortion error bounds. The older LAMBADA rejection
+remains bound to its canonical report and cannot be bypassed or mirrored into VesSAP.
 
 Population density and subject-image registration remain archived compatibility code and
 persisted data. The primary bridge does not register their methods or capabilities, and the

@@ -236,8 +236,10 @@ def _fit_affine(
     linear = coefficients[:3, :].T
     translation = coefficients[3, :]
     determinant = float(np.linalg.det(linear))
-    if not math.isfinite(determinant) or abs(determinant) <= 1e-12:
-        raise TransformValidationError("affine fit produced a singular transform")
+    if not math.isfinite(determinant) or determinant <= 1e-12:
+        raise TransformValidationError(
+            "affine fit must preserve anatomical handedness and cannot contain a reflection"
+        )
     return linear, translation
 
 

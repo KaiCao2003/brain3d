@@ -109,11 +109,11 @@ struct ProbeRegionInspectorSheet: View {
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 3) {
                 Text(
-                    "\(micrometres(segment.entryDepthMicrometres))–"
-                        + "\(micrometres(segment.exitDepthMicrometres))"
+                    "\(millimetres(segment.entryDepthMicrometres))–"
+                        + "\(millimetres(segment.exitDepthMicrometres))"
                 )
                 .font(.caption.monospacedDigit())
-                Text("length \(micrometres(segment.lengthMicrometres))")
+                Text("length \(millimetres(segment.lengthMicrometres))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
@@ -156,7 +156,7 @@ struct ProbeRegionInspectorSheet: View {
         )
     }
 
-    private func micrometres(_ value: Double) -> String {
-        value.formatted(.number.precision(.fractionLength(1))) + " µm"
+    private func millimetres(_ value: Double) -> String {
+        (value / 1_000).formatted(.number.precision(.fractionLength(3))) + " mm"
     }
 }

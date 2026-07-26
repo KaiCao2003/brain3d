@@ -1,4 +1,4 @@
-"""Real-cache planning QA from Allen 25 um slices through persisted NP1 analysis.
+"""Real-cache planning QA from Allen 25 um slices through persisted NP2 analysis.
 
 The atlas arrays, labels, rendering, and region traversal in this module are
 real cached ``allen_mouse_25um`` v1.2 data.  The calibration measurements are
@@ -22,8 +22,8 @@ from mouse_brain_planner.bridge.planning import (
 )
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher
 from mouse_brain_planner.probes.catalog import (
-    NEUROPIXELS_1_0_MODEL_ID,
-    NEUROPIXELS_1_0_MODEL_VERSION,
+    NEUROPIXELS_2_0_MODEL_VERSION,
+    NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
 )
 
 ATLAS_IDENTIFIER = "allen_mouse_25um"
@@ -114,10 +114,14 @@ def _calibration_params(project_id: str, revision: int) -> dict[str, object]:
             "lateralityConfirmedFromAnimal": True,
         },
         "atlasLandmarks": {
-            "bregma": _atlas_point(3_000.0, 2_000.0, 4_500.0),
-            "lambdaPoint": _atlas_point(5_000.0, 2_000.0, 4_500.0),
-            "leftSkull": _atlas_point(3_000.0, 2_000.0, 5_500.0),
-            "rightSkull": _atlas_point(3_000.0, 2_000.0, 3_500.0),
+            # This is an engineering fixture, not an official Allen bregma.
+            # Keep its bregma/lambda axis on the reviewed 5.7 mm atlas
+            # midline so negative ML is visibly animal-left (screen-right) and the
+            # fixture cannot conceal a laterality regression.
+            "bregma": _atlas_point(3_000.0, 2_000.0, 5_700.0),
+            "lambdaPoint": _atlas_point(5_000.0, 2_000.0, 5_700.0),
+            "leftSkull": _atlas_point(3_000.0, 2_000.0, 6_700.0),
+            "rightSkull": _atlas_point(3_000.0, 2_000.0, 4_700.0),
         },
         "qualityLimits": {
             "minimumAxisBaselineMicrometres": 500.0,
@@ -304,19 +308,21 @@ def test_real_cached_25um_calibrated_neuropixels_workflow_round_trip(
     assert isinstance(projected_point, dict)
     assert projected_point["apMicrometres"] == pytest.approx(4_000.0)
     assert projected_point["dvMicrometres"] == pytest.approx(3_500.0)
-    assert projected_point["mlMicrometres"] == pytest.approx(5_000.0)
+    assert projected_point["mlMicrometres"] == pytest.approx(6_200.0)
+    assert projected_point["apMicrometres"] > 3_000.0
+    assert projected_point["mlMicrometres"] > 5_700.0
     assert projected["usableForNavigation"] is False
     assert session.project_revision == revision
 
     catalog = _call(
         dispatcher,
         "probe.catalog.get",
-        modelId=NEUROPIXELS_1_0_MODEL_ID,
-        modelVersion=NEUROPIXELS_1_0_MODEL_VERSION,
+        modelId=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        modelVersion=NEUROPIXELS_2_0_MODEL_VERSION,
     )
     model = catalog["model"]
     assert isinstance(model, dict)
-    assert model["siteCount"] == 960
+    assert model["siteCount"] == 1280
     assert model["verificationStatus"] == "source-transcribed-review-pending"
     assert model["independentTranscriptionReviewCompleted"] is False
 
@@ -326,9 +332,9 @@ def test_real_cached_25um_calibrated_neuropixels_workflow_round_trip(
         projectId=project_id,
         expectedProjectRevision=revision,
         targetId=target_id,
-        modelId=NEUROPIXELS_1_0_MODEL_ID,
-        modelVersion=NEUROPIXELS_1_0_MODEL_VERSION,
-        name="Real-atlas NP1 software-QA placement",
+        modelId=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        modelVersion=NEUROPIXELS_2_0_MODEL_VERSION,
+        name="Real-atlas NP2 software-QA placement",
         placementMode="STEREOTAXIC_TARGET_MANIPULATOR",
         azimuthDegrees=0.0,
         elevationDegrees=-90.0,
@@ -342,7 +348,7 @@ def test_real_cached_25um_calibrated_neuropixels_workflow_round_trip(
     assert isinstance(plan, dict)
     assert plan["placementMode"] == "STEREOTAXIC_TARGET_MANIPULATOR"
     assert plan["usableForNavigation"] is False
-    assert len(plan["recordingSites"]) == 960
+    assert len(plan["recordingSites"]) == 1280
     plan_id = plan["planId"]
     plan_sha256 = plan["inputSha256"]
     assert isinstance(plan_id, str)
@@ -371,7 +377,7 @@ def test_real_cached_25um_calibrated_neuropixels_workflow_round_trip(
     assert isinstance(segments, list)
     assert isinstance(assignments, list)
     assert segments
-    assert len(assignments) == 960
+    assert len(assignments) == 1280
     assert any(int(segment["structureId"]) > 0 for segment in segments)
     provenance = shank["provenance"]
     assert isinstance(provenance, dict)
@@ -426,8 +432,8 @@ def test_real_cached_25um_calibrated_neuropixels_workflow_round_trip(
 
 
 @pytest.mark.integration
-def test_real_cached_25um_major_vessel_step_requires_coordinate_qualification() -> None:
+def test_real_cached_25um_major_vessel_clearance_remains_display_only() -> None:
     pytest.skip(
-        "bundled LAMBADA graph has no independently reviewed coordinate/laterality "
-        "qualification; real probe-vessel analysis is intentionally not represented as qualified"
+        "the VesSAP reference overlay has a reviewed atlas transform but no subject-registration "
+        "or tissue-distortion error bounds; clearance analysis is intentionally unavailable"
     )

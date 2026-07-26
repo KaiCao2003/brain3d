@@ -13,6 +13,7 @@ struct ContentView: View {
             NavigationSplitView(columnVisibility: .constant(.all)) {
                 ProjectSidebar(
                     model: model,
+                    draft: model.probeDraftSession,
                     saveProject: showSaveProjectPanel,
                     openProject: requestOpenProject,
                     reconnect: requestReconnect
@@ -28,7 +29,7 @@ struct ContentView: View {
             if model.requiresAnimalOnlyAcknowledgement {
                 AnimalOnlyAcknowledgementGate(
                     model: model,
-                    openExistingProject: showOpenProjectPanel
+                    openExistingProject: { showOpenProjectPanel() }
                 )
                 .transition(.opacity)
                 .zIndex(1)
@@ -43,11 +44,15 @@ struct ContentView: View {
             titleVisibility: .visible
         ) {
             Button("Discard Changes and Reconnect", role: .destructive) {
+                model.discardProbeDraftSession()
                 Task { await model.reconnect() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Save As first to keep these changes.")
+            Text(
+                "Finish the active numeric edit with Return or by leaving the field, then save, "
+                    + "to keep all current changes."
+            )
         }
         .confirmationDialog(
             "Discard unsaved animal plan changes and open another project?",
@@ -55,11 +60,14 @@ struct ContentView: View {
             titleVisibility: .visible
         ) {
             Button("Discard Changes and Open…", role: .destructive) {
-                showOpenProjectPanel()
+                showOpenProjectPanel(discardPendingChanges: true)
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Save As first to keep these changes.")
+            Text(
+                "Finish the active numeric edit with Return or by leaving the field, then save, "
+                    + "to keep all current changes."
+            )
         }
     }
 
@@ -77,7 +85,7 @@ struct ContentView: View {
         Task { _ = await model.saveProject(to: url) }
     }
 
-    private func showOpenProjectPanel() {
+    private func showOpenProjectPanel(discardPendingChanges: Bool = false) {
         let panel = NSOpenPanel()
         panel.title = "Open animal surgery plan"
         panel.prompt = "Open Project"
@@ -87,11 +95,14 @@ struct ContentView: View {
         panel.treatsFilePackagesAsDirectories = false
         panel.allowedContentTypes = [mousePlanType]
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        if discardPendingChanges {
+            model.discardProbeDraftSession()
+        }
         Task { _ = await model.openProject(at: url) }
     }
 
     private func requestReconnect() {
-        if model.hasUnsavedChanges {
+        if model.hasPendingPlanChanges {
             isConfirmingReconnect = true
         } else {
             Task { await model.reconnect() }
@@ -99,7 +110,7 @@ struct ContentView: View {
     }
 
     private func requestOpenProject() {
-        if model.hasUnsavedChanges {
+        if model.hasPendingPlanChanges {
             isConfirmingOpen = true
         } else {
             showOpenProjectPanel()

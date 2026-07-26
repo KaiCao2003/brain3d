@@ -5,6 +5,7 @@ set -euo pipefail
 script_directory="$(cd "$(dirname "$0")" && pwd)"
 package_root="$(cd "$script_directory/.." && pwd)"
 configuration="${CONFIGURATION:-release}"
+architecture="${ARCHITECTURE:-}"
 output_root="${OUTPUT_DIR:-$package_root/build}"
 app_bundle="$output_root/Brain3D.app"
 
@@ -16,12 +17,17 @@ case "$configuration" in
         ;;
 esac
 
-swift build --package-path "$package_root" --configuration "$configuration" --product Brain3D
+swift_arguments=(
+    --package-path "$package_root"
+    --configuration "$configuration"
+)
+if [[ -n "$architecture" ]]; then
+    swift_arguments+=(--arch "$architecture")
+fi
+
+swift build "${swift_arguments[@]}" --product Brain3D
 binary_directory="$(
-    swift build \
-        --package-path "$package_root" \
-        --configuration "$configuration" \
-        --show-bin-path
+    swift build "${swift_arguments[@]}" --show-bin-path
 )"
 
 if [[ -z "$output_root" || "$output_root" == "/" || "$app_bundle" == "/Brain3D.app" ]]; then

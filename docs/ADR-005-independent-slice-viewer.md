@@ -8,16 +8,23 @@
 The independent-slice decision remains in force. Its later renderer gate is now satisfied: a
 SceneKit module consumes schema-checked atlas, probe, and ray-pick payloads from the backend. The
 current product path therefore implements all five single-view modes without reintroducing a
-linked cursor, crosshair, focus mode, or 2×2 layout. Vessel state is excluded because P60_606
-coordinate/coverage qualification is rejected.
+linked cursor, crosshair, focus mode, or 2×2 layout. P60_606 vessel state remains excluded
+because its coordinate/coverage qualification is rejected; the later qualified-for-display
+VesSAP reference is rendered and still provides no clearance result. One selected Allen region
+now drives descendant annotation highlights in all four 2D modes and its reviewed mesh highlight
+in 3D. An ontology entry with neither annotation voxels nor a reviewed mesh remains selected and
+shows an explicit no-geometry state instead of fabricated anatomy.
 
 ## Context
 
-The intended product must project calibrated AP/ML/DV targets, place Neuropixels geometry, and
-report atlas-region traversal. The original design also proposed comparing probe envelopes with
-explicitly registered vessel geometry; that proposal is not a current capability because no
-vessel source passed qualification. The early SwiftUI application showed only midpoint rasters
-and an unavailable 3D card. An older Qt/PyVista application contained unrelated
+The current product must resolve source-pinned AP/ML as user-facing Shank 1's local
+annotation-surface crossing, place NP2003/NP2013 geometry from that anchor and distal depth
+target, and report atlas-region traversal over the implanted surface-to-tip path. The original
+design also proposed
+comparing probe envelopes with explicitly registered vessel geometry; that analysis is not a
+current capability because no subject-specific vessel source passed qualification. The early
+SwiftUI application showed only midpoint rasters and an unavailable 3D card. An older
+Qt/PyVista application contained unrelated
 interaction/rendering state and is not the supported product.
 
 Coordinate order, laterality, voxel anchoring, and probe geometry can be verified more directly in

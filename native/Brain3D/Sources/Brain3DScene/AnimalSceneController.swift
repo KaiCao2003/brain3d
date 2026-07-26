@@ -40,16 +40,28 @@ final class AtlasInteractiveSCNView: SCNView {
 
 @MainActor
 final class AnimalSceneController {
+    typealias MajorVesselMeshBuilder =
+        @Sendable (
+            _ pointsASRMicrometres: [SIMD3<Float>],
+            _ radiiMicrometres: [Float],
+            _ runOffsets: [Int],
+            _ minimumVisibleDiameterMicrometres: Double
+        ) async throws -> MajorVesselTubeMeshData
+
     private let view: AtlasInteractiveSCNView
     private let loader: AtlasMeshLoader
+    private let majorVesselMeshBuilder: MajorVesselMeshBuilder
     private let scene = SCNScene()
     private let brainLayer = SCNNode()
+    private let highlightedRegionLayer = SCNNode()
     private let probeLayer = SCNNode()
-    private let majorVesselLayer = SCNNode()
+    private let implantSiteLayer = SCNNode()
+    private let majorVesselLayerSwap = MajorVesselLayerSwap()
     private let selectedVesselConflictLayer = SCNNode()
     private let cameraNode = SCNNode()
     private var currentMeshSHA256: String?
-    private var currentMajorVesselDigest: String?
+    private var currentProbePlanId: String?
+    private var currentHighlightedRegionIdentity: String?
     private var currentSnapshotIdentity: String?
     private var currentTransform: AtlasSceneTransform?
     private var loadGeneration = 0
@@ -60,10 +72,24 @@ final class AnimalSceneController {
     var onRayPick: ((AtlasRayPoint, AtlasRayPoint) -> Void)?
     var onBlankSelection: (() -> Void)?
     var cameraInertiaEnabled: Bool { view.defaultCameraController.inertiaEnabled }
+    private var majorVesselLayer: SCNNode { majorVesselLayerSwap.layer }
 
-    init(view: AtlasInteractiveSCNView, loader: AtlasMeshLoader = AtlasMeshLoader()) {
+    init(
+        view: AtlasInteractiveSCNView,
+        loader: AtlasMeshLoader = AtlasMeshLoader(),
+        majorVesselMeshBuilder: @escaping MajorVesselMeshBuilder = {
+            points, radii, offsets, minimumDiameter in
+            try await MajorVesselTubeMeshBuilder.buildAsync(
+                pointsASRMicrometres: points,
+                radiiMicrometres: radii,
+                runOffsets: offsets,
+                minimumVisibleDiameterMicrometres: minimumDiameter
+            )
+        }
+    ) {
         self.view = view
         self.loader = loader
+        self.majorVesselMeshBuilder = majorVesselMeshBuilder
         configureScene()
     }
 
@@ -72,6 +98,7 @@ final class AnimalSceneController {
         phaseChanged: @escaping (AnimalScenePhase) -> Void
     ) async {
         guard currentSnapshotIdentity != snapshot.identity else {
+            requestDisplay()
             phaseChanged(.ready)
             return
         }
@@ -81,28 +108,40 @@ final class AnimalSceneController {
 
         do {
             phaseChanged(.loading)
-            if currentMeshSHA256 != snapshot.meshResult.mesh.sha256 {
+            let meshChanged = currentMeshSHA256 != snapshot.meshResult.mesh.sha256
+            if meshChanged {
                 let loaded = try await loader.load(snapshot.meshResult.mesh)
                 try Task.checkCancellation()
                 guard generation == loadGeneration else { return }
                 replaceBrain(with: loaded.makeRootNode(), snapshot: snapshot)
                 currentMeshSHA256 = snapshot.meshResult.mesh.sha256
-                setCameraHome(for: snapshot)
             } else {
                 brainLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
             }
+            try await replaceHighlightedRegion(for: snapshot, generation: generation)
+            try Task.checkCancellation()
+            guard generation == loadGeneration else { return }
             try replaceProbe(for: snapshot)
+            if meshChanged
+                || (currentProbePlanId == nil && snapshot.selectedProbePlan != nil)
+            {
+                setCameraHome(for: snapshot)
+            }
+            try replaceImplantSite(for: snapshot)
             selectedVesselConflictLayer.childNodes.forEach { $0.removeFromParentNode() }
             try await replaceMajorVessels(for: snapshot, generation: generation)
             try Task.checkCancellation()
             guard generation == loadGeneration else { return }
             try replaceSelectedVesselConflict(for: snapshot)
             currentSnapshotIdentity = snapshot.identity
+            currentProbePlanId = snapshot.selectedProbePlan?.planId
+            requestDisplay()
             phaseChanged(.ready)
         } catch is CancellationError {
             return
         } catch {
             guard generation == loadGeneration else { return }
+            requestDisplay()
             phaseChanged(.failed(error.localizedDescription))
         }
     }
@@ -123,12 +162,19 @@ final class AnimalSceneController {
         SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         cameraNode.simdTransform = homeCameraTransform
         SCNTransaction.commit()
+        requestDisplay()
     }
 
     func offscreenSnapshot(size: CGSize) -> NSImage {
+        // Scene mutations are transaction-backed even when no animation is
+        // requested. Flush them before handing the shared scene to a fresh
+        // offscreen renderer, otherwise a snapshot taken immediately after an
+        // overlay change can intermittently capture the preceding frame.
+        SCNTransaction.flush()
         let renderer = SCNRenderer(device: MTLCreateSystemDefaultDevice(), options: nil)
         renderer.scene = scene
         renderer.pointOfView = cameraNode
+        _ = renderer.prepare(scene, shouldAbortBlock: nil)
         return renderer.snapshot(
             atTime: 0,
             with: size,
@@ -138,16 +184,22 @@ final class AnimalSceneController {
 
     private func configureScene() {
         brainLayer.name = "allen-mouse-root-mesh"
+        highlightedRegionLayer.name = "selected-allen-region-layer"
         probeLayer.name = "selected-probe-layer"
+        implantSiteLayer.name = "displayed-implant-site-layer"
         majorVesselLayer.name = "reviewed-major-vessel-layer"
         selectedVesselConflictLayer.name = "selected-vessel-conflict-layer"
         brainLayer.categoryBitMask = SceneCategory.brain.rawValue
+        highlightedRegionLayer.categoryBitMask = SceneCategory.highlightedRegion.rawValue
         probeLayer.categoryBitMask = SceneCategory.probe.rawValue
+        implantSiteLayer.categoryBitMask = SceneCategory.implantSite.rawValue
         majorVesselLayer.categoryBitMask = SceneCategory.majorVessel.rawValue
         selectedVesselConflictLayer.categoryBitMask =
             SceneCategory.selectedVesselConflict.rawValue
         scene.rootNode.addChildNode(brainLayer)
+        scene.rootNode.addChildNode(highlightedRegionLayer)
         scene.rootNode.addChildNode(probeLayer)
+        scene.rootNode.addChildNode(implantSiteLayer)
         scene.rootNode.addChildNode(majorVesselLayer)
         scene.rootNode.addChildNode(selectedVesselConflictLayer)
 
@@ -167,7 +219,7 @@ final class AnimalSceneController {
         let ambientNode = SCNNode()
         let ambient = SCNLight()
         ambient.type = .ambient
-        ambient.intensity = 520
+        ambient.intensity = 220
         ambient.color = NSColor(calibratedWhite: 0.94, alpha: 1)
         ambientNode.light = ambient
         scene.rootNode.addChildNode(ambientNode)
@@ -175,16 +227,22 @@ final class AnimalSceneController {
         let keyNode = SCNNode()
         let key = SCNLight()
         key.type = .directional
-        key.intensity = 920
+        key.intensity = 1_050
         key.color = NSColor(calibratedWhite: 1, alpha: 1)
         keyNode.light = key
         keyNode.eulerAngles = SCNVector3(-0.75, 0.55, 0.25)
         scene.rootNode.addChildNode(keyNode)
 
-        scene.background.contents = NSColor(calibratedWhite: 0.055, alpha: 1)
+        let background = NSColor(
+            srgbRed: 0.91,
+            green: 0.935,
+            blue: 0.96,
+            alpha: 1
+        )
+        scene.background.contents = background
         view.scene = scene
         view.pointOfView = cameraNode
-        view.backgroundColor = NSColor(calibratedWhite: 0.055, alpha: 1)
+        view.backgroundColor = background
         view.antialiasingMode = .multisampling4X
         view.preferredFramesPerSecond = 60
         view.rendersContinuously = false
@@ -212,24 +270,31 @@ final class AnimalSceneController {
             let material = SCNMaterial()
             material.name = "xray-allen-mouse-atlas-shell"
             material.diffuse.contents = NSColor(
-                calibratedRed: 0.16,
-                green: 0.48,
-                blue: 0.78,
-                alpha: 0.65
+                srgbRed: 0.10,
+                green: 0.43,
+                blue: 0.72,
+                alpha: 1
             )
-            material.emission.contents = NSColor.clear
-            material.lightingModel = .constant
-            material.transparency = 0.65
-            material.transparencyMode = .singleLayer
+            material.emission.contents = NSColor(
+                srgbRed: 0.005,
+                green: 0.025,
+                blue: 0.05,
+                alpha: 1
+            )
+            material.specular.contents = NSColor(white: 0.85, alpha: 1)
+            material.shininess = 0.38
+            material.lightingModel = .blinn
+            material.transparency = 0.36
+            material.transparencyMode = .dualLayer
             material.blendMode = .alpha
             material.isDoubleSided = true
             material.readsFromDepthBuffer = false
             material.writesToDepthBuffer = false
             geometry.materials = [material]
-            // SceneKit's imported-OBJ path can flatten or otherwise reinterpret
-            // material transparency. Node opacity is an independent final-stage
-            // guarantee that the anatomical shell cannot become opaque.
-            node.opacity = 0.28
+            // One opacity authority avoids the previous diffuse-alpha ×
+            // material-transparency × node-opacity collapse that reduced the
+            // whole brain to an almost-black gray silhouette.
+            node.opacity = 1
             node.castsShadow = false
             // Render the non-depth-writing context shell before every planning
             // overlay. Applying the order to geometry-bearing descendants is
@@ -237,6 +302,118 @@ final class AnimalSceneController {
             node.renderingOrder = -10_000
         }
         node.childNodes.forEach(applyBrainAppearance)
+    }
+
+    private func replaceHighlightedRegion(
+        for snapshot: AnimalSceneSnapshot,
+        generation: Int
+    ) async throws {
+        guard let regionMesh = snapshot.highlightedRegionMesh,
+              let region = regionMesh.region
+        else {
+            highlightedRegionLayer.childNodes.forEach { $0.removeFromParentNode() }
+            currentHighlightedRegionIdentity = nil
+            setBrainSelectionContext(active: false)
+            return
+        }
+        let regionIdentity = [
+            String(region.structureId),
+            regionMesh.mesh.sha256,
+            region.rgb.map(String.init).joined(separator: ","),
+        ].joined(separator: "@")
+        if currentHighlightedRegionIdentity == regionIdentity,
+           !highlightedRegionLayer.childNodes.isEmpty
+        {
+            highlightedRegionLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
+            setBrainSelectionContext(active: true)
+            return
+        }
+
+        highlightedRegionLayer.childNodes.forEach { $0.removeFromParentNode() }
+        currentHighlightedRegionIdentity = nil
+        let loaded = try await loader.load(regionMesh.mesh)
+        try Task.checkCancellation()
+        guard generation == loadGeneration else { return }
+        let importedRoot = loaded.makeRootNode()
+        importedRoot.name = "allen-region-\(region.structureId)"
+        applyHighlightedRegionAppearance(to: importedRoot, rgb: region.rgb)
+        highlightedRegionLayer.addChildNode(importedRoot)
+        highlightedRegionLayer.simdTransform = snapshot.transform.sourceToSceneMatrix
+        currentHighlightedRegionIdentity = regionIdentity
+        setBrainSelectionContext(active: true)
+    }
+
+    private func setBrainSelectionContext(active: Bool) {
+        func update(_ node: SCNNode) {
+            if let material = node.geometry?.firstMaterial,
+                material.name == "xray-allen-mouse-atlas-shell"
+            {
+                // The reviewed atlas region meshes lie immediately inside the
+                // root surface. A filled translucent shell is therefore still
+                // capable of completely compositing over thin cortical layers.
+                // Use a sparse wire context while a region is selected so its
+                // true mesh remains visible without hiding probes or vessels.
+                let replacement = (material.copy() as? SCNMaterial) ?? material
+                replacement.fillMode = active ? .lines : .fill
+                replacement.transparency = active ? 0.18 : 0.36
+                replacement.transparencyMode = active ? .singleLayer : .dualLayer
+                node.geometry?.materials = [replacement]
+            }
+            node.childNodes.forEach(update)
+        }
+        update(brainLayer)
+    }
+
+    private func applyHighlightedRegionAppearance(to node: SCNNode, rgb: [Int]) {
+        node.categoryBitMask = SceneCategory.highlightedRegion.rawValue
+        if let geometry = node.geometry {
+            // Model I/O-backed OBJ geometry can retain its original neutral
+            // material binding even after `materials` is replaced. Rebuilding
+            // the lightweight SceneKit geometry wrapper preserves the verified
+            // vertex/index buffers while ensuring the selected-region shader is
+            // the one actually used by the renderer.
+            let highlightedGeometry = SCNGeometry(
+                sources: geometry.sources,
+                elements: geometry.elements
+            )
+            highlightedGeometry.name = geometry.name
+            // SceneKit presents device material channels through an sRGB
+            // transfer. Supplying the ontology's sRGB bytes as linear values
+            // preserves the Allen color on screen instead of washing it out.
+            let color = NSColor(
+                deviceRed: linearSceneColorComponent(rgb[0]),
+                green: linearSceneColorComponent(rgb[1]),
+                blue: linearSceneColorComponent(rgb[2]),
+                alpha: 1
+            )
+            let material = SCNMaterial()
+            material.name = "selected-allen-region"
+            material.diffuse.contents = color
+            material.emission.contents = color
+            material.lightingModel = .constant
+            material.transparency = 0.94
+            material.transparencyMode = .singleLayer
+            material.blendMode = .alpha
+            material.isDoubleSided = true
+            material.readsFromDepthBuffer = false
+            material.writesToDepthBuffer = false
+            highlightedGeometry.materials = [material]
+            node.geometry = highlightedGeometry
+            node.opacity = 1
+            node.castsShadow = false
+            node.renderingOrder = 0
+        }
+        node.childNodes.forEach {
+            applyHighlightedRegionAppearance(to: $0, rgb: rgb)
+        }
+    }
+
+    private func linearSceneColorComponent(_ byte: Int) -> CGFloat {
+        let value = Double(byte) / 255
+        if value <= 0.04045 {
+            return CGFloat(value / 12.92)
+        }
+        return CGFloat(pow((value + 0.055) / 1.055, 2.4))
     }
 
     private func replaceProbe(for snapshot: AnimalSceneSnapshot) throws {
@@ -248,43 +425,78 @@ final class AnimalSceneController {
         probeLayer.addChildNode(probe)
     }
 
+    private func replaceImplantSite(for snapshot: AnimalSceneSnapshot) throws {
+        implantSiteLayer.childNodes.forEach { $0.removeFromParentNode() }
+        guard let marker = snapshot.implantSite else { return }
+        implantSiteLayer.addChildNode(
+            try ImplantSiteNodeFactory.makeNode(
+                for: marker,
+                transform: snapshot.transform
+            )
+        )
+    }
+
     private func replaceMajorVessels(
         for snapshot: AnimalSceneSnapshot,
         generation: Int
     ) async throws {
         guard let vessels = snapshot.majorVessels else {
-            majorVesselLayer.childNodes.forEach { $0.removeFromParentNode() }
-            currentMajorVesselDigest = nil
+            majorVesselLayerSwap.clear()
             return
         }
-        let digest = vessels.provenance.derivedAssetSha256
-        if currentMajorVesselDigest == digest,
-           !majorVesselLayer.childNodes.isEmpty
-        {
+        let sourceIdentity = [
+            vessels.provenance.derivedAssetSha256,
+            vessels.atlas.metadataSha256,
+        ].joined(separator: ":")
+        let digest = [
+            sourceIdentity,
+            String(
+                snapshot.minimumVisibleVesselDiameterMicrometres.bitPattern,
+                radix: 16
+            ),
+        ].joined(separator: ":")
+        if majorVesselLayerSwap.isCurrent(digest) {
             majorVesselLayer.childNodes.forEach {
                 $0.simdTransform = snapshot.transform.sourceToSceneMatrix
             }
             return
         }
 
-        // Never leave geometry from a different atlas or source visible while the
-        // verified replacement is being prepared off the main actor.
-        majorVesselLayer.childNodes.forEach { $0.removeFromParentNode() }
-        currentMajorVesselDigest = nil
+        // A different atlas/source cannot be represented by the prior layer.
+        // For a display-only threshold change on the same verified graph,
+        // however, retain the last complete mesh until its replacement is
+        // ready; clearing here made the vessel layer visibly disappear during
+        // each production-graph rebuild.
+        majorVesselLayerSwap.prepare(for: sourceIdentity)
+        majorVesselLayer.childNodes.forEach {
+            $0.simdTransform = snapshot.transform.sourceToSceneMatrix
+        }
         let graph = vessels.graph
-        let mesh = try await MajorVesselTubeMeshBuilder.buildAsync(
-            pointsASRMicrometres: graph.pointsASRMicrometres,
-            radiiMicrometres: graph.radiiMicrometres,
-            runOffsets: graph.runOffsets
+        let mesh = try await majorVesselMeshBuilder(
+            graph.pointsASRMicrometres,
+            graph.radiiMicrometres,
+            graph.runOffsets,
+            snapshot.minimumVisibleVesselDiameterMicrometres
         )
         try Task.checkCancellation()
         guard generation == loadGeneration else { return }
+        guard mesh.visibleSourceSegmentCount > 0 else {
+            majorVesselLayerSwap.commit(
+                node: nil,
+                digest: digest,
+                sourceIdentity: sourceIdentity
+            )
+            return
+        }
         let node = MajorVesselNodeFactory.makeNode(
             mesh: mesh,
             transform: snapshot.transform
         )
-        majorVesselLayer.addChildNode(node)
-        currentMajorVesselDigest = digest
+        majorVesselLayerSwap.commit(
+            node: node,
+            digest: digest,
+            sourceIdentity: sourceIdentity
+        )
     }
 
     private func replaceSelectedVesselConflict(
@@ -305,7 +517,13 @@ final class AnimalSceneController {
         selectedVesselConflictLayer.addChildNode(node)
     }
 
-    private func setCameraHome(for snapshot: AnimalSceneSnapshot) {
+    /// Frame the anatomical context plus the complete physical shank. The
+    /// optional override is used by render-contract tests; production always
+    /// takes the current snapshot geometry.
+    func setCameraHome(
+        for snapshot: AnimalSceneSnapshot,
+        shanks overrideShanks: [ProbePlacedShank]? = nil
+    ) {
         let minimum = snapshot.meshResult.sourceCoordinateFrame
             .bounds.minimumInclusiveMicrometres
         let maximum = snapshot.meshResult.sourceCoordinateFrame
@@ -315,29 +533,55 @@ final class AnimalSceneController {
         for ap in [minimum[0], maximum[0]] {
             for dv in [minimum[1], maximum[1]] {
                 for ml in [minimum[2], maximum[2]] {
-                    guard let point = try? snapshot.transform.scenePoint(
+                    guard
+                        let point = try? snapshot.transform.scenePoint(
                         apMicrometres: ap,
                         dvMicrometres: dv,
                         mlMicrometres: ml
-                    ) else { continue }
+                        )
+                    else { continue }
                     sceneMinimum = simd_min(sceneMinimum, point)
                     sceneMaximum = simd_max(sceneMaximum, point)
                 }
             }
         }
+        let shanks = overrideShanks ?? snapshot.selectedProbePlan?.shanks ?? []
+        for shank in shanks {
+            for endpoint in [shank.renderedProximalEnd, shank.tip] {
+                guard let point = try? snapshot.transform.scenePoint(endpoint)
+                else { continue }
+                sceneMinimum = simd_min(sceneMinimum, point)
+                sceneMaximum = simd_max(sceneMaximum, point)
+            }
+        }
         let center = (sceneMinimum + sceneMaximum) * 0.5
         let size = sceneMaximum - sceneMinimum
         let maximumDimension = max(size.x, max(size.y, size.z))
+        let cameraXScale: Float = shanks.isEmpty ? 1.05 : 1.20
+        let cameraZScale: Float = shanks.isEmpty ? 1.35 : 1.20
         homeCameraTarget = center
-        cameraNode.simdPosition = center + SIMD3<Float>(
-            maximumDimension * 0.34,
-            maximumDimension * 0.20,
-            maximumDimension * 1.75
+        // Keep both atlas AP (scene Z) and ML (scene X) visibly separated.
+        // NP2013's sagittal layout spaces its four shanks along AP, while the
+        // 90-degree clockwise layout spaces them along ML. The old nearly
+        // straight posterior view collapsed the sagittal set into one apparent
+        // line even though all four physical centerlines existed in the scene.
+        cameraNode.simdPosition =
+            center
+            + SIMD3<Float>(
+                maximumDimension * cameraXScale,
+                maximumDimension * 0.55,
+                maximumDimension * cameraZScale
         )
         cameraNode.simdLook(at: center)
         homeCameraTransform = cameraNode.simdTransform
         view.defaultCameraController.target = SCNVector3(center)
         view.defaultCameraController.stopInertia()
+        requestDisplay()
+    }
+
+    private func requestDisplay() {
+        view.needsDisplay = true
+        view.setNeedsDisplay(view.bounds)
     }
 
     private func pick(at point: CGPoint) {

@@ -116,7 +116,7 @@ public struct MajorVesselRiskProfile: Decodable, Equatable, Sendable {
             Bool.self,
             forKey: .referenceOnlyCoverageAcknowledged
         )
-        guard profileId == "lambada-p60-606-major-30um-v1",
+        guard profileId == "vessap-bl6j-no1-major-30um-v1",
               minimumVesselDiameterMicrometres
                 == MajorVesselContract.minimumIncludedDiameterMicrometres,
               [requiredMarginMicrometres, registrationUncertaintyMicrometres]

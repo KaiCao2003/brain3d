@@ -1,4 +1,4 @@
-"""Archived major-vessel contract behind a digest-bound fail-closed gate."""
+"""Display-only VesSAP major-vessel bridge with fail-closed safety analysis."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 import math
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Final, NoReturn
 from uuid import UUID
 
@@ -55,65 +54,57 @@ from mouse_brain_planner.domain.vessel_plan_models import (
     build_probe_vessel_analysis_bundle,
 )
 from mouse_brain_planner.surgery.trajectory import placed_shank_centerlines
-from mouse_brain_planner.vasculature.lambada_major_vessels import (
+from mouse_brain_planner.vasculature.vessap_major_vessels import (
     ATLAS_SHAPE_ASR,
     ATLAS_VOXEL_SIZE_UM,
     EXTRACTION_ALGORITHM_VERSION,
     MINIMUM_DIAMETER_UM,
-    SOURCE_ARCHIVE_SHA256,
+    REGISTRATION_TRANSFORM_ID,
+    SOURCE_BUNDLE_SHA256,
+    SOURCE_ID,
     SOURCE_LICENSE,
     SOURCE_PAPER_DOI,
-    SOURCE_RECORD_DOI,
     SOURCE_RECORD_URL,
-    SOURCE_SHA256,
-    LambadaMajorVesselError,
-    LambadaMajorVesselGraph,
-    load_lambada_major_vessels,
+    SOURCE_VERSION,
+    VesSAPMajorVesselError,
+    VesSAPMajorVesselGraph,
+    load_vessap_major_vessels,
 )
 
 MAXIMUM_RETURNED_CONFLICTS: Final = 250
 MAXIMUM_PROFILE_DISTANCE_UM: Final = 10_000.0
-REFERENCE_PROFILE_ID: Final = "lambada-p60-606-major-30um-v1"
+REFERENCE_PROFILE_ID: Final = "vessap-bl6j-no1-major-30um-v1"
 REFERENCE_POLICY: Final = (
-    "Analyze only the bundled pointwise diameter >= 30 micrometre reference runs. "
-    "Required margin and registration uncertainty are explicit user-reviewed inputs."
-)
-COORDINATE_QUALIFICATION_REPORT_FILENAME: Final = (
-    "lambada_p60_606_coordinate_qualification_rejected_v1.json"
-)
-COORDINATE_QUALIFICATION_REPORT_SHA256: Final = (
-    "0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a"
-)
-COORDINATE_QUALIFICATION_BLOCKING_REASONS: Final = (
-    "SOURCE_HEMISPHERE_PROPERTY_MISSING",
-    "SOURCE_SPECIMEN_COVERAGE_IS_HEMISPHERE",
+    "Display the bundled diameter >= 30 micrometre VesSAP reference only. "
+    "Clearance classification is unavailable without published subject-registration "
+    "and tissue-distortion uncertainty bounds."
 )
 
 ProjectGetter = Callable[[], PlannerProject]
 RevisionGetter = Callable[[], int]
 ProjectReplacer = Callable[[PlannerProject], int]
-GraphLoader = Callable[[], LambadaMajorVesselGraph]
+GraphLoader = Callable[[], VesSAPMajorVesselGraph]
 
 
 @dataclass(slots=True)
 class MajorVesselReferenceBridge:
-    """Retain the legacy contract while rejecting the unqualified reference."""
+    """Serve audited reference geometry but never classify surgical clearance."""
 
     dispatcher: BridgeDispatcher
     get_project: ProjectGetter
     get_revision: RevisionGetter
     replace_project: ProjectReplacer
-    graph_loader: GraphLoader = load_lambada_major_vessels
-    _graph_cache: LambadaMajorVesselGraph | None = field(default=None, init=False, repr=False)
+    graph_loader: GraphLoader = load_vessap_major_vessels
+    _graph_cache: VesSAPMajorVesselGraph | None = field(default=None, init=False, repr=False)
     _analysis_cache: RadiusBearingVesselRuns | None = field(default=None, init=False, repr=False)
 
     def register(self) -> None:
+        self.dispatcher.declare_capability("auditedReferenceMajorVessels")
         self.dispatcher.register("vessel.major.reference.get", self.reference_get)
         self.dispatcher.register("vessel.major.reference.geometry", self.reference_geometry)
         self.dispatcher.register("vessel.major.reference.analyze", self.reference_analyze)
 
     def reference_get(self, params: Mapping[str, object]) -> JsonObject:
-        self._reject_unqualified_reference()
         _validate_params(params, required={"protocolVersion"})
         _require_protocol(params)
         atlas = self._require_loaded_atlas()
@@ -141,9 +132,7 @@ class MajorVesselReferenceBridge:
         }
 
     def reference_geometry(self, params: Mapping[str, object]) -> JsonObject:
-        """Reject production access before the archived geometry contract can run."""
-
-        self._reject_unqualified_reference()
+        """Return exact, digest-bound display geometry for the reviewed atlas."""
         _validate_params(params, required={"protocolVersion"})
         _require_protocol(params)
         atlas = self._require_loaded_atlas()
@@ -172,7 +161,7 @@ class MajorVesselReferenceBridge:
         }
 
     def reference_analyze(self, params: Mapping[str, object]) -> JsonObject:
-        self._reject_unqualified_reference()
+        self._reject_clearance_analysis()
         _validate_params(
             params,
             required={
@@ -230,6 +219,14 @@ class MajorVesselReferenceBridge:
                 "The vessel analysis request uses an older probe-plan input.",
                 details={"actualPlanInputSha256": plan.input_sha256},
             )
+        try:
+            project.validate_probe_plan_projection_semantics(plan)
+        except ValueError as error:
+            raise BridgeError(
+                "PROBE_PLAN_PROJECTION_INVALID",
+                "The probe plan geometry cannot be reproduced from its preserved inputs.",
+                details={"reason": str(error), "exceptionType": type(error).__name__},
+            ) from error
         required_margin = _distance(
             params["requiredMarginMicrometres"],
             "requiredMarginMicrometres",
@@ -363,19 +360,15 @@ class MajorVesselReferenceBridge:
             project_revision=stored_revision,
         )
 
-    def _reject_unqualified_reference(self) -> NoReturn:
-        report_verified = _qualification_report_is_verified_rejection()
+    def _reject_clearance_analysis(self) -> NoReturn:
         raise BridgeError(
-            "VESSEL_GEOMETRY_UNAVAILABLE",
+            "VESSEL_ANALYSIS_UNAVAILABLE",
             (
-                "The archived P60_606 vessel derivative is unavailable because its "
-                "coordinate laterality and whole-brain coverage are not qualified."
+                "The VesSAP population reference is display-only. Clearance analysis is "
+                "unavailable because no subject-registration or tissue-distortion error "
+                "bounds are published."
             ),
-            details={
-                "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
-                "qualificationReportVerified": report_verified,
-                "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
-            },
+            details={"displayOnly": True, "subjectSpecific": False},
         )
 
     def _require_loaded_atlas(self) -> LoadedAtlasProtocol:
@@ -395,11 +388,11 @@ class MajorVesselReferenceBridge:
             )
         return atlas
 
-    def _graph(self) -> LambadaMajorVesselGraph:
+    def _graph(self) -> VesSAPMajorVesselGraph:
         if self._graph_cache is None:
             try:
                 self._graph_cache = self.graph_loader()
-            except (LambadaMajorVesselError, OSError, ValueError) as error:
+            except (VesSAPMajorVesselError, OSError, ValueError) as error:
                 raise BridgeError(
                     "VESSEL_GEOMETRY_UNAVAILABLE",
                     "The bundled major-vessel reference failed its integrity checks.",
@@ -409,7 +402,7 @@ class MajorVesselReferenceBridge:
 
     def _analysis_geometry(
         self,
-        graph: LambadaMajorVesselGraph,
+        graph: VesSAPMajorVesselGraph,
     ) -> RadiusBearingVesselRuns:
         if self._analysis_cache is None:
             self._analysis_cache = RadiusBearingVesselRuns(
@@ -427,7 +420,7 @@ def register_major_vessel_handlers(
     get_project: ProjectGetter,
     get_revision: RevisionGetter,
     replace_project: ProjectReplacer,
-    graph_loader: GraphLoader = load_lambada_major_vessels,
+    graph_loader: GraphLoader = load_vessap_major_vessels,
 ) -> MajorVesselReferenceBridge:
     extension = MajorVesselReferenceBridge(
         dispatcher=dispatcher,
@@ -438,38 +431,6 @@ def register_major_vessel_handlers(
     )
     extension.register()
     return extension
-
-
-def _qualification_report_is_verified_rejection() -> bool:
-    report_path = (
-        Path(__file__).parent.parent
-        / "assets"
-        / "vasculature"
-        / COORDINATE_QUALIFICATION_REPORT_FILENAME
-    )
-    if report_path.is_symlink() or not report_path.is_file():
-        return False
-    try:
-        payload = report_path.read_bytes()
-    except OSError:
-        return False
-    if hashlib.sha256(payload).hexdigest() != COORDINATE_QUALIFICATION_REPORT_SHA256:
-        return False
-    try:
-        value = json.loads(payload)
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        return False
-    if not isinstance(value, dict) or value.get("status") != "rejected":
-        return False
-    source = value.get("source")
-    decision = value.get("decision")
-    return (
-        isinstance(source, dict)
-        and source.get("sha256") == SOURCE_SHA256
-        and isinstance(decision, dict)
-        and decision.get("blockingReasons") == list(COORDINATE_QUALIFICATION_BLOCKING_REASONS)
-        and decision.get("qualifiedMapping") is None
-    )
 
 
 def _physical_shank(shank: PlacedProbeShank, atlas: AtlasMetadata) -> ProbeShankASR:
@@ -483,22 +444,25 @@ def _physical_shank(shank: PlacedProbeShank, atlas: AtlasMetadata) -> ProbeShank
     )
 
 
-def _source_provenance(graph: LambadaMajorVesselGraph) -> MajorVesselSourceProvenance:
+def _source_provenance(graph: VesSAPMajorVesselGraph) -> MajorVesselSourceProvenance:
     value = graph.provenance
     return MajorVesselSourceProvenance(
-        source_id="lambada-p60-606-major-vessels-v1",
-        source_doi=SOURCE_RECORD_DOI,
+        source_id=SOURCE_ID,
+        source_doi=SOURCE_PAPER_DOI,
         source_record_url=SOURCE_RECORD_URL,
         source_paper_doi=SOURCE_PAPER_DOI,
-        source_version="P60_606 / 606_graph_2024-12-03.gt",
+        source_version=SOURCE_VERSION,
         source_license=SOURCE_LICENSE,
         dataset_title=value.dataset_title,
         authors=value.authors,
         specimen_id=value.specimen_id,
-        source_archive_digest=f"sha256:{SOURCE_ARCHIVE_SHA256}",
+        source_archive_digest=f"sha256:{SOURCE_BUNDLE_SHA256}",
         derived_asset_sha256=value.asset_sha256,
         extraction_algorithm_version=EXTRACTION_ALGORITHM_VERSION,
         minimum_included_diameter_um=MINIMUM_DIAMETER_UM,
+        pial_vessels_excluded=False,
+        choroidal_vessels_excluded=False,
+        registration_transform_id=REGISTRATION_TRANSFORM_ID,
     )
 
 
@@ -606,11 +570,11 @@ def _provenance_payload(value: MajorVesselSourceProvenance) -> JsonObject:
         "minimumIncludedDiameterMicrometres": value.minimum_included_diameter_um,
         "physicalUnitsDeclared": value.physical_units_declared,
         "atlasScaleApplied": value.atlas_scale_applied,
-        "geometrySourceAudited": True,
-        "subjectSpecific": False,
-        "pialVesselsExcluded": True,
-        "choroidalVesselsExcluded": True,
-        "arteryVeinClassificationAvailable": False,
+        "geometrySourceAudited": value.geometry_source_audited,
+        "subjectSpecific": value.subject_specific,
+        "pialVesselsExcluded": value.pial_vessels_excluded,
+        "choroidalVesselsExcluded": value.choroidal_vessels_excluded,
+        "arteryVeinClassificationAvailable": value.artery_vein_classification_available,
         "registrationTransformId": value.registration_transform_id,
         "registrationUncertaintyBoundMicrometres": (value.registration_uncertainty_bound_um),
         "tissueDistortionUncertaintyBoundMicrometres": (
@@ -639,7 +603,7 @@ def _buffer_payload(array: NDArray[np.generic], *, shape: list[int]) -> JsonObje
     }
 
 
-def _path_length(graph: LambadaMajorVesselGraph) -> float:
+def _path_length(graph: VesSAPMajorVesselGraph) -> float:
     total = 0.0
     for run_index in range(graph.run_count):
         points = np.asarray(graph.run_points_asr_um(run_index), dtype=np.float64)

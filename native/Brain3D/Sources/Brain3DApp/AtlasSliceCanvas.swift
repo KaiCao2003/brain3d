@@ -66,6 +66,7 @@ fileprivate struct MajorVesselRasterKey: Hashable, Sendable {
     let imagePixelHeight: Int
     let segmentCount: Int
     let inPlaneResolutionBitPattern: UInt64
+    let minimumVisibleDiameterBitPattern: UInt64
 
     init?(
         overlay: MajorVesselSliceOverlay?,
@@ -80,6 +81,8 @@ fileprivate struct MajorVesselRasterKey: Hashable, Sendable {
         self.imagePixelHeight = imagePixelHeight
         segmentCount = overlay.segments.count
         inPlaneResolutionBitPattern = overlay.inPlaneResolutionMicrometres.bitPattern
+        minimumVisibleDiameterBitPattern =
+            overlay.minimumVisibleDiameterMicrometres.bitPattern
     }
 
     var cacheIdentifier: NSString {
@@ -91,6 +94,7 @@ fileprivate struct MajorVesselRasterKey: Hashable, Sendable {
             String(imagePixelHeight),
             String(segmentCount),
             String(inPlaneResolutionBitPattern),
+            String(minimumVisibleDiameterBitPattern),
         ].joined(separator: ":") as NSString
     }
 }
@@ -154,8 +158,8 @@ enum MajorVesselRasterizer {
     // These are intrinsic-image-pixel display minima. At a typical 1.5-point
     // aspect-fit scale they reproduce the prior 2.25/3.25/3-point screen aids,
     // while the measured physical vessel diameter remains the core authority.
-    private static let minimumCoreWidth: CGFloat = 1.5
-    private static let minimumPointDiameter: CGFloat = 2.25
+    private static let minimumCoreWidth: CGFloat = 2
+    private static let minimumPointDiameter: CGFloat = 3
     private static let haloExpansion: CGFloat = 2
     // The MVP intentionally matches the reviewed 25 µm atlas raster. A denser
     // supersample multiplied initial preparation cost without adding source
@@ -244,12 +248,13 @@ enum MajorVesselRasterizer {
             let coreAlpha = 0.98 * Double(coreCoverage[pixelIndex]) / 255
             let outputAlpha = coreAlpha + haloAlpha * (1 - coreAlpha)
             let byteOffset = pixelIndex * 4
-            let premultipliedCore = UInt8(
-                min(255, max(0, Int((coreAlpha * 255).rounded())))
-            )
-            rgba[byteOffset] = premultipliedCore
-            rgba[byteOffset + 1] = premultipliedCore
-            rgba[byteOffset + 2] = premultipliedCore
+            // Use a saturated surgical-overlay red instead of an achromatic
+            // core. The surrounding halo remains black because its RGB
+            // contribution is intentionally zero; it separates the reference
+            // vessel from both bright and dark atlas pixels.
+            rgba[byteOffset] = premultipliedByte(coreAlpha)
+            rgba[byteOffset + 1] = premultipliedByte(coreAlpha * 0.16)
+            rgba[byteOffset + 2] = premultipliedByte(coreAlpha * 0.10)
             rgba[byteOffset + 3] = UInt8(
                 min(255, max(0, Int((outputAlpha * 255).rounded())))
             )
@@ -279,6 +284,10 @@ enum MajorVesselRasterizer {
             logicalWidth: imagePixelWidth,
             logicalHeight: imagePixelHeight
         )
+    }
+
+    private static func premultipliedByte(_ value: Double) -> UInt8 {
+        UInt8(min(255, max(0, Int((value * 255).rounded()))))
     }
 
     private static func drawCoverage(
@@ -344,6 +353,7 @@ enum MajorVesselRasterizer {
 /// pixels into atlas coordinates.
 struct AtlasSliceCanvas: NSViewRepresentable {
     let imageData: Data?
+    let regionOverlayData: Data?
     let imagePixelWidth: Int
     let imagePixelHeight: Int
     let viewportIdentity: String
@@ -376,6 +386,7 @@ struct AtlasSliceCanvas: NSViewRepresentable {
     private func update(_ view: AtlasSliceNSView) {
         view.configure(
             imageData: imageData,
+            regionOverlayData: regionOverlayData,
             imagePixelWidth: imagePixelWidth,
             imagePixelHeight: imagePixelHeight,
             viewportIdentity: viewportIdentity,
@@ -405,6 +416,8 @@ final class AtlasSliceNSView: NSView {
     // source radius data.
     private var imageData: Data?
     private var image: NSImage?
+    private var regionOverlayData: Data?
+    private var regionOverlayImage: NSImage?
     private var imagePixelWidth = 0
     private var imagePixelHeight = 0
     private var anatomicalLabels: AtlasCanvasAnatomicalLabels?
@@ -459,6 +472,7 @@ final class AtlasSliceNSView: NSView {
 
     func configure(
         imageData: Data?,
+        regionOverlayData: Data? = nil,
         imagePixelWidth: Int,
         imagePixelHeight: Int,
         viewportIdentity: String,
@@ -492,6 +506,11 @@ final class AtlasSliceNSView: NSView {
         if self.imageData != imageData {
             self.imageData = imageData
             image = imageData.flatMap(NSImage.init(data:))
+            visualContentChanged = true
+        }
+        if self.regionOverlayData != regionOverlayData {
+            self.regionOverlayData = regionOverlayData
+            regionOverlayImage = regionOverlayData.flatMap(NSImage.init(data:))
             visualContentChanged = true
         }
         if self.imagePixelWidth != sanitizedWidth || self.imagePixelHeight != sanitizedHeight {
@@ -559,6 +578,7 @@ final class AtlasSliceNSView: NSView {
             hints: nil
         )
         context?.imageInterpolation = previousInterpolation ?? .default
+        drawRegionOverlayIfPresent(in: rect)
         drawMajorVesselsIfPresent(in: rect)
         drawProbeOverlayIfPresent()
         drawMajorVesselConflictIfPresent()
@@ -966,6 +986,9 @@ final class AtlasSliceNSView: NSView {
             case .entry:
                 path = triangle(at: point, radius: 6, pointsUp: true)
                 color = .systemGreen
+            case .implantSite:
+                path = diamond(at: point, radius: 7)
+                color = .systemPink
             case .target:
                 path = diamond(at: point, radius: 6)
                 color = .systemYellow
@@ -992,6 +1015,25 @@ final class AtlasSliceNSView: NSView {
         // the user directly manipulates the viewport.
         context?.imageInterpolation = .none
         majorVesselRasterImage.draw(
+            in: imageRect,
+            from: .zero,
+            operation: .sourceOver,
+            fraction: 1,
+            respectFlipped: true,
+            hints: nil
+        )
+        context?.imageInterpolation = previousInterpolation ?? .default
+    }
+
+    private func drawRegionOverlayIfPresent(in imageRect: CGRect) {
+        guard let regionOverlayImage else { return }
+        let context = NSGraphicsContext.current
+        let previousInterpolation = context?.imageInterpolation
+        // The mask is generated on the exact annotation voxel grid. Nearest
+        // neighbour display keeps the filled region and its boundary aligned
+        // with the underlying atlas slice at every zoom level.
+        context?.imageInterpolation = .none
+        regionOverlayImage.draw(
             in: imageRect,
             from: .zero,
             operation: .sourceOver,

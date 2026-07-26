@@ -499,6 +499,101 @@ def test_calibration_rejects_swapped_atlas_laterality_and_bregma_lambda() -> Non
     assert session.project_revision == 1
 
 
+@pytest.mark.parametrize(
+    "invalid_landmarks",
+    (
+        "shifted-midsagittal-axis",
+        "lateral-landmarks-on-one-side",
+        "lateral-landmarks-too-close-to-midline",
+    ),
+)
+def test_calibration_rejects_atlas_midline_mismatch_without_mutation(
+    invalid_landmarks: str,
+) -> None:
+    dispatcher, session = _dispatcher()
+    params = _create_params(session)
+    landmarks = params["atlasLandmarks"]
+    assert isinstance(landmarks, dict)
+
+    if invalid_landmarks == "shifted-midsagittal-axis":
+        for label in ("bregma", "lambdaPoint", "leftSkull", "rightSkull"):
+            point = landmarks[label]
+            assert isinstance(point, dict)
+            point["mlMicrometres"] = float(point["mlMicrometres"]) - 1.0
+    elif invalid_landmarks == "lateral-landmarks-on-one-side":
+        landmarks["leftSkull"] = _atlas_point(3.5, 3.5, 3.0)
+    else:
+        landmarks["rightSkull"] = _atlas_point(3.5, 3.5, 3.75)
+        landmarks["leftSkull"] = _atlas_point(3.5, 3.5, 4.25)
+
+    with pytest.raises(BridgeError) as mismatch:
+        _call(dispatcher, "calibration.create", **params)
+
+    assert mismatch.value.code == "CALIBRATION_ATLAS_MIDLINE_MISMATCH"
+    assert mismatch.value.details["atlasMidlineMlMicrometres"] == 4.0
+    assert session.project_revision == 1
+    assert session.project is not None
+    assert session.project.calibrations == []
+    assert session.project.active_calibration_uuid is None
+
+
+def test_half_voxel_midline_calibration_maps_signed_ml_to_correct_hemispheres() -> None:
+    dispatcher, session = _dispatcher()
+    created = _create(dispatcher, session)
+    calibration = created["calibration"]
+    assert isinstance(calibration, dict)
+    calibration_id = calibration["calibrationId"]
+    assert isinstance(calibration_id, str)
+    _set_active(dispatcher, session, calibration_id)
+    assert session.project is not None
+
+    target_ids: dict[str, str] = {}
+    for label, ml_mm in (("left target", -0.001), ("right target", 0.001)):
+        added = _call(
+            dispatcher,
+            "implant.add",
+            projectId=str(session.project.project_uuid),
+            expectedProjectRevision=session.project_revision,
+            label=label,
+            apMillimetres=0.0,
+            mlMillimetres=ml_mm,
+            dvMillimetres=0.0,
+        )
+        target = added["target"]
+        assert isinstance(target, dict)
+        target_id = target["targetId"]
+        assert isinstance(target_id, str)
+        target_ids[label] = target_id
+
+    revision_after_targets = session.project_revision
+    projected_left = _call(
+        dispatcher,
+        "calibration.projectTarget",
+        projectId=str(session.project.project_uuid),
+        targetId=target_ids["left target"],
+    )
+    projected_right = _call(
+        dispatcher,
+        "calibration.projectTarget",
+        projectId=str(session.project.project_uuid),
+        targetId=target_ids["right target"],
+    )
+
+    left_point = projected_left["atlasPoint"]
+    right_point = projected_right["atlasPoint"]
+    assert isinstance(left_point, dict)
+    assert isinstance(right_point, dict)
+    midline_ml_um = session.project.atlas.midline_ml_um
+    assert left_point["mlMicrometres"] > midline_ml_um
+    assert right_point["mlMicrometres"] < midline_ml_um
+    midline_voxel = session.project.atlas.shape_voxels[2] // 2
+    assert projected_left["containingVoxelIndex"]["ml"] >= midline_voxel
+    assert projected_right["containingVoxelIndex"]["ml"] < midline_voxel
+    assert projected_left["coordinateSemantics"]["mlNegativeDirection"] == "left"
+    assert projected_right["coordinateSemantics"]["mlPositiveDirection"] == "right"
+    assert session.project_revision == revision_after_targets
+
+
 def test_failed_calibration_is_persisted_for_review_but_cannot_be_active() -> None:
     dispatcher, session = _dispatcher()
     params = _create_params(session)

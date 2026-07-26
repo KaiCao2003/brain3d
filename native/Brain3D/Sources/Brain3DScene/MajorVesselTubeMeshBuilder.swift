@@ -8,6 +8,7 @@ struct MajorVesselTubeMeshData: Sendable {
     let indexData: Data
     let vertexCount: Int
     let triangleCount: Int
+    let visibleSourceSegmentCount: Int
 }
 
 enum MajorVesselTubeMeshBuilder {
@@ -16,28 +17,60 @@ enum MajorVesselTubeMeshBuilder {
     static func buildAsync(
         pointsASRMicrometres: [SIMD3<Float>],
         radiiMicrometres: [Float],
-        runOffsets: [Int]
+        runOffsets: [Int],
+        minimumVisibleDiameterMicrometres: Double = 0
     ) async throws -> MajorVesselTubeMeshData {
-        try await Task.detached(priority: .userInitiated) {
+        let worker = Task.detached(priority: .userInitiated) {
             try build(
                 pointsASRMicrometres: pointsASRMicrometres,
                 radiiMicrometres: radiiMicrometres,
-                runOffsets: runOffsets
+                runOffsets: runOffsets,
+                minimumVisibleDiameterMicrometres:
+                    minimumVisibleDiameterMicrometres
             )
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
     }
 
     static func build(
         pointsASRMicrometres: [SIMD3<Float>],
         radiiMicrometres: [Float],
-        runOffsets: [Int]
+        runOffsets: [Int],
+        minimumVisibleDiameterMicrometres: Double = 0
     ) throws -> MajorVesselTubeMeshData {
         try validate(
             pointsASRMicrometres: pointsASRMicrometres,
             radiiMicrometres: radiiMicrometres,
-            runOffsets: runOffsets
+            runOffsets: runOffsets,
+            minimumVisibleDiameterMicrometres:
+                minimumVisibleDiameterMicrometres
         )
-        let segmentCount = pointsASRMicrometres.count - (runOffsets.count - 1)
+        let filtered = try filteredRuns(
+            pointsASRMicrometres: pointsASRMicrometres,
+            radiiMicrometres: radiiMicrometres,
+            runOffsets: runOffsets,
+            minimumVisibleDiameterMicrometres:
+                minimumVisibleDiameterMicrometres
+        )
+        guard !filtered.points.isEmpty else {
+            return MajorVesselTubeMeshData(
+                vertexData: Data(),
+                normalData: Data(),
+                indexData: Data(),
+                vertexCount: 0,
+                triangleCount: 0,
+                visibleSourceSegmentCount: 0
+            )
+        }
+
+        let pointsASRMicrometres = filtered.points
+        let radiiMicrometres = filtered.radii
+        let runOffsets = filtered.runOffsets
+        let segmentCount = filtered.visibleSourceSegmentCount
         var vertices = [PackedFloat3]()
         var normals = [PackedFloat3]()
         var indices = [UInt32]()
@@ -55,6 +88,9 @@ enum MajorVesselTubeMeshBuilder {
             var normal = initialNormal(for: tangents[0])
 
             for pointIndex in runPoints.indices {
+                if pointIndex.isMultiple(of: 256) {
+                    try Task.checkCancellation()
+                }
                 let tangent = tangents[pointIndex]
                 if pointIndex > 0 {
                     normal = transportedNormal(normal, to: tangent)
@@ -77,6 +113,9 @@ enum MajorVesselTubeMeshBuilder {
             }
 
             for pointIndex in 0 ..< runPoints.count - 1 {
+                if pointIndex.isMultiple(of: 256) {
+                    try Task.checkCancellation()
+                }
                 let current = runVertexStart + pointIndex * sideCount
                 let next = current + sideCount
                 for side in 0 ..< sideCount {
@@ -95,14 +134,16 @@ enum MajorVesselTubeMeshBuilder {
             normalData: normals.withUnsafeBytes { Data($0) },
             indexData: indices.withUnsafeBytes { Data($0) },
             vertexCount: vertices.count,
-            triangleCount: indices.count / 3
+            triangleCount: indices.count / 3,
+            visibleSourceSegmentCount: filtered.visibleSourceSegmentCount
         )
     }
 
     private static func validate(
         pointsASRMicrometres: [SIMD3<Float>],
         radiiMicrometres: [Float],
-        runOffsets: [Int]
+        runOffsets: [Int],
+        minimumVisibleDiameterMicrometres: Double
     ) throws {
         guard pointsASRMicrometres.count == radiiMicrometres.count,
               !pointsASRMicrometres.isEmpty,
@@ -113,7 +154,9 @@ enum MajorVesselTubeMeshBuilder {
               pointsASRMicrometres.allSatisfy({ point in
                   point.x.isFinite && point.y.isFinite && point.z.isFinite
               }),
-              radiiMicrometres.allSatisfy({ $0.isFinite && $0 > 0 })
+              radiiMicrometres.allSatisfy({ $0.isFinite && $0 > 0 }),
+              minimumVisibleDiameterMicrometres.isFinite,
+              minimumVisibleDiameterMicrometres >= 0
         else {
             throw AtlasSceneContractError.invalid(
                 "Major-vessel points, radii, or run boundaries are inconsistent."
@@ -139,6 +182,105 @@ enum MajorVesselTubeMeshBuilder {
                 }
             }
         }
+    }
+
+    private struct FilteredRuns {
+        let points: [SIMD3<Float>]
+        let radii: [Float]
+        let runOffsets: [Int]
+        let visibleSourceSegmentCount: Int
+    }
+
+    private static func filteredRuns(
+        pointsASRMicrometres: [SIMD3<Float>],
+        radiiMicrometres: [Float],
+        runOffsets: [Int],
+        minimumVisibleDiameterMicrometres: Double
+    ) throws -> FilteredRuns {
+        try Task.checkCancellation()
+        guard minimumVisibleDiameterMicrometres > 0 else {
+            return FilteredRuns(
+                points: pointsASRMicrometres,
+                radii: radiiMicrometres,
+                runOffsets: runOffsets,
+                visibleSourceSegmentCount:
+                    pointsASRMicrometres.count - (runOffsets.count - 1)
+            )
+        }
+
+        let threshold = MajorVesselDisplayFilter.clampedMinimumDiameterMicrometres(
+            minimumVisibleDiameterMicrometres
+        )
+        var points: [SIMD3<Float>] = []
+        var radii: [Float] = []
+        var filteredOffsets = [0]
+        var visibleSourceSegmentCount = 0
+
+        func appendInterpolated(
+            pointIndex: Int,
+            fraction: Double
+        ) {
+            let start = pointsASRMicrometres[pointIndex]
+            let end = pointsASRMicrometres[pointIndex + 1]
+            let startRadius = radiiMicrometres[pointIndex]
+            let endRadius = radiiMicrometres[pointIndex + 1]
+            let fraction = Float(fraction)
+            points.append(start + (end - start) * fraction)
+            radii.append(startRadius + (endRadius - startRadius) * fraction)
+        }
+
+        func finishRun() {
+            guard filteredOffsets.last != points.count else { return }
+            filteredOffsets.append(points.count)
+        }
+
+        for runIndex in 0 ..< runOffsets.count - 1 {
+            if runIndex.isMultiple(of: 256) {
+                try Task.checkCancellation()
+            }
+            let runStart = runOffsets[runIndex]
+            let runEnd = runOffsets[runIndex + 1]
+            var previousReachedSourceEndpoint = false
+            for pointIndex in runStart ..< runEnd - 1 {
+                guard let interval = MajorVesselDisplayFilter.visibleInterval(
+                    startRadiusMicrometres: Double(radiiMicrometres[pointIndex]),
+                    endRadiusMicrometres: Double(radiiMicrometres[pointIndex + 1]),
+                    minimumDiameterMicrometres: threshold
+                ) else {
+                    finishRun()
+                    previousReachedSourceEndpoint = false
+                    continue
+                }
+
+                let continuesPrevious = previousReachedSourceEndpoint
+                    && interval.lowerBound <= 1e-12
+                    && filteredOffsets.last != points.count
+                if !continuesPrevious {
+                    finishRun()
+                    appendInterpolated(
+                        pointIndex: pointIndex,
+                        fraction: interval.lowerBound
+                    )
+                }
+                appendInterpolated(
+                    pointIndex: pointIndex,
+                    fraction: interval.upperBound
+                )
+                visibleSourceSegmentCount += 1
+                previousReachedSourceEndpoint = interval.upperBound >= 1 - 1e-12
+                if !previousReachedSourceEndpoint {
+                    finishRun()
+                }
+            }
+            finishRun()
+        }
+
+        return FilteredRuns(
+            points: points,
+            radii: radii,
+            runOffsets: filteredOffsets,
+            visibleSourceSegmentCount: visibleSourceSegmentCount
+        )
     }
 
     private static func makeTangents(_ points: [SIMD3<Float>]) throws -> [SIMD3<Float>] {

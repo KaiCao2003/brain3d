@@ -187,8 +187,10 @@ class AnatomicalTransform(BaseModel):
         if not np.allclose(matrix[3], (0, 0, 0, 1), rtol=0, atol=1e-10):
             raise ValueError("transform matrix must end with homogeneous row [0, 0, 0, 1]")
         determinant = float(np.linalg.det(matrix[:3, :3]))
-        if not math.isfinite(determinant) or abs(determinant) <= 1e-12:
-            raise ValueError("transform linear component must be invertible")
+        if not math.isfinite(determinant) or determinant <= 1e-12:
+            raise ValueError(
+                "transform linear component must be invertible and preserve anatomical handedness"
+            )
         return value
 
     @field_validator("version", mode="before")

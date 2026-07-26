@@ -7,14 +7,18 @@ never serializes mesh contents through the newline-delimited JSON transport.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import math
 import os
 import stat
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Final
+from typing import Any, Final
+
+import numpy as np
+from numpy.typing import NDArray
 
 from mouse_brain_planner.analysis.region_traversal import (
     ANNOTATION_RAY_PICK_ALGORITHM_VERSION,
@@ -31,10 +35,17 @@ from mouse_brain_planner.bridge.server import (
     JsonObject,
     LoadedAtlasProtocol,
     atlas_provenance,
+    encode_rgba_png,
 )
 from mouse_brain_planner.coordinates.atlas_space import BrainGlobeAtlasSpace
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
+from mouse_brain_planner.rendering.region_overlay import (
+    REGION_OVERLAY_ALGORITHM_VERSION,
+    dorsal_surface_annotation,
+    render_region_overlay,
+)
+from mouse_brain_planner.rendering.slice_renderer import SliceOrientation
 
 MAX_REGION_PAGE_SIZE: Final = 500
 DEFAULT_REGION_PAGE_SIZE: Final = 200
@@ -50,6 +61,16 @@ class AtlasInteractionBridge:
     """Register planning-safe, read-only operations for one loaded atlas."""
 
     dispatcher: BridgeDispatcher
+    _dorsal_annotation_cache_key: tuple[str, int] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    _dorsal_annotation_cache: NDArray[Any] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
 
     def register(self) -> None:
         """Publish the handlers and their independently discoverable capabilities."""
@@ -59,11 +80,13 @@ class AtlasInteractionBridge:
         self.dispatcher.register("atlas.point", self.point)
         self.dispatcher.register("atlas.ray.pick", self.ray_pick)
         self.dispatcher.register("atlas.mesh", self.mesh)
+        self.dispatcher.register("atlas.region.overlay", self.region_overlay)
         self.dispatcher.declare_capability("atlasRegionRecords")
         self.dispatcher.declare_capability("atlasRegionSearch")
         self.dispatcher.declare_capability("atlasPhysicalPointLookup")
         self.dispatcher.declare_capability("atlasAnnotationRayPick")
         self.dispatcher.declare_capability("atlasMeshDescriptor")
+        self.dispatcher.declare_capability("atlasRegionOverlay")
 
     def regions(self, params: Mapping[str, object]) -> JsonObject:
         """Return one deterministic page of normalized atlas region records."""
@@ -285,7 +308,8 @@ class AtlasInteractionBridge:
                     minimum=1,
                     maximum=(1 << 63) - 1,
                 )
-                by_id = {item.structure_id: item for item in _validated_regions(atlas)}
+                records = _validated_regions(atlas)
+                by_id = {item.structure_id: item for item in records}
                 region = by_id.get(structure_id)
                 if region is None:
                     raise BridgeError(
@@ -293,7 +317,34 @@ class AtlasInteractionBridge:
                         "The requested structure ID is not present in the loaded atlas.",
                         details={"structureId": structure_id},
                     )
-                mesh_path = atlas.mesh_file_for_region(region)
+                try:
+                    mesh_path = atlas.mesh_file_for_region(region)
+                except (AtlasAdapterError, KeyError, OSError, TypeError, ValueError) as error:
+                    included_ids = _ontology_branch_structure_ids(
+                        records,
+                        selected_structure_id=region.structure_id,
+                    )
+                    if not _annotation_branch_has_voxels(
+                        atlas.annotation,
+                        included_structure_ids=included_ids,
+                    ):
+                        raise BridgeError(
+                            "ATLAS_REGION_HAS_NO_ANNOTATED_VOXELS",
+                            (
+                                "The selected Allen ontology region has no voxels in the "
+                                "reviewed 25 micrometre annotation, so there is no reviewed "
+                                "3D geometry to display."
+                            ),
+                            details={
+                                "structureId": region.structure_id,
+                                "acronym": region.acronym,
+                                "includedStructureIds": list(included_ids),
+                                "annotationVoxelCount": 0,
+                                "geometryStatus": "ontology-only-no-annotated-voxels",
+                                "atlasMetadataSha256": atlas.metadata.metadata_sha256,
+                            },
+                        ) from error
+                    raise
         except BridgeError:
             raise
         except (AtlasAdapterError, KeyError, OSError, TypeError, ValueError) as error:
@@ -311,6 +362,153 @@ class AtlasInteractionBridge:
             "sourceCoordinateFrame": _source_coordinate_frame(atlas.metadata),
             "atlas": atlas_provenance(atlas),
         }
+
+    def region_overlay(self, params: Mapping[str, object]) -> JsonObject:
+        """Render one selected ontology region over a dorsal or slice view.
+
+        Parent selections include every descendant whose structure ID path
+        contains the selected ID. The returned pixels therefore come only from
+        the reviewed annotation volume, even when the volume stores leaf labels.
+        """
+
+        _validate_params(
+            params,
+            required={"protocolVersion", "structureId", "orientation"},
+            optional={"index"},
+        )
+        _require_protocol(params)
+        structure_id = _bounded_integer(
+            params["structureId"],
+            field="structureId",
+            minimum=1,
+            maximum=(1 << 63) - 1,
+        )
+        raw_orientation = params["orientation"]
+        allowed_orientations = {"dorsal", *(item.value for item in SliceOrientation)}
+        if not isinstance(raw_orientation, str) or raw_orientation not in allowed_orientations:
+            raise BridgeError(
+                "INVALID_PARAMS",
+                "orientation must be dorsal, coronal, sagittal, or horizontal.",
+                details={
+                    "field": "orientation",
+                    "allowed": sorted(allowed_orientations),
+                },
+            )
+
+        atlas = self._require_loaded_atlas()
+        records = _validated_regions(atlas)
+        selected_region = next(
+            (region for region in records if region.structure_id == structure_id),
+            None,
+        )
+        if selected_region is None:
+            raise BridgeError(
+                "ATLAS_REGION_NOT_FOUND",
+                "The selected structure ID is not present in the loaded atlas.",
+                details={"structureId": structure_id},
+            )
+        included_ids = _ontology_branch_structure_ids(
+            records,
+            selected_structure_id=structure_id,
+        )
+        if not included_ids or included_ids[0] <= 0:
+            raise BridgeError(
+                "ATLAS_CONTRACT_VIOLATION",
+                "The selected ontology region has no resolvable annotation identities.",
+                details={"structureId": structure_id},
+            )
+
+        index: int | None
+        slice_count: int | None
+        fixed_axis: str | None
+        row_axis: str
+        column_axis: str
+        if raw_orientation == "dorsal":
+            if "index" in params:
+                raise BridgeError(
+                    "INVALID_PARAMS",
+                    "index must be omitted for the dorsal surface projection.",
+                    details={"field": "index"},
+                )
+            index = None
+            slice_count = None
+            fixed_axis = None
+            row_axis = "AP"
+            column_axis = "ML"
+            annotation = self._dorsal_annotation(atlas)
+        else:
+            if "index" not in params:
+                raise BridgeError(
+                    "INVALID_PARAMS",
+                    "index is required for an orthogonal slice overlay.",
+                    details={"field": "index"},
+                )
+            renderer = self.dispatcher.context.renderer
+            if renderer is None:
+                raise BridgeError("ATLAS_NOT_OPEN", "Open the reviewed atlas first.")
+            orientation = SliceOrientation(raw_orientation)
+            index = _bounded_integer(
+                params["index"],
+                field="index",
+                minimum=0,
+                maximum=renderer.slice_count(orientation) - 1,
+            )
+            slice_count = renderer.slice_count(orientation)
+            fixed_axis = orientation.fixed_axis_name
+            row_axis = orientation.row_axis_name
+            column_axis = orientation.column_axis_name
+            annotation = renderer.annotation_slice(orientation, index)
+
+        try:
+            overlay = render_region_overlay(
+                annotation,
+                included_structure_ids=included_ids,
+                color=selected_region.rgb,
+            )
+            png = encode_rgba_png(overlay.rgba, compression_level=1)
+        except (TypeError, ValueError) as error:
+            raise BridgeError(
+                "ATLAS_REGION_OVERLAY_FAILED",
+                "The selected Allen region overlay could not be rendered.",
+                details={
+                    "structureId": structure_id,
+                    "orientation": raw_orientation,
+                    "exceptionType": type(error).__name__,
+                },
+            ) from error
+        height, width = overlay.rgba.shape[:2]
+        return {
+            "protocolVersion": PROTOCOL_VERSION,
+            "algorithmVersion": REGION_OVERLAY_ALGORITHM_VERSION,
+            "selectionRule": ("selected structure and every descendant in structureIdPath"),
+            "region": _region_payload(selected_region),
+            "includedStructureIds": list(included_ids),
+            "visiblePixelCount": int(np.count_nonzero(overlay.selected)),
+            "mimeType": "image/png",
+            "colorModel": "RGBA",
+            "alphaMode": "straight",
+            "pngBase64": base64.b64encode(png).decode("ascii"),
+            "width": int(width),
+            "height": int(height),
+            "orientation": raw_orientation,
+            "index": index,
+            "sliceCount": slice_count,
+            "fixedAxis": fixed_axis,
+            "rowAxis": row_axis,
+            "columnAxis": column_axis,
+            "atlas": atlas_provenance(atlas),
+        }
+
+    def _dorsal_annotation(
+        self,
+        atlas: LoadedAtlasProtocol,
+    ) -> NDArray[Any]:
+        annotation = np.asarray(atlas.annotation)
+        cache_key = (atlas.metadata.metadata_sha256, id(annotation))
+        if self._dorsal_annotation_cache_key != cache_key or self._dorsal_annotation_cache is None:
+            self._dorsal_annotation_cache = dorsal_surface_annotation(annotation)
+            self._dorsal_annotation_cache_key = cache_key
+        return self._dorsal_annotation_cache
 
     def ray_pick(self, params: Mapping[str, object]) -> JsonObject:
         """Resolve the first annotated voxel crossed by a finite camera ray."""
@@ -466,6 +664,40 @@ def _validated_regions(atlas: LoadedAtlasProtocol) -> list[RegionRecord]:
             "The normalized atlas region collection contains duplicate identities.",
         )
     return records
+
+
+def _ontology_branch_structure_ids(
+    records: list[RegionRecord],
+    *,
+    selected_structure_id: int,
+) -> tuple[int, ...]:
+    """Return the selected ontology identity and all descendants deterministically."""
+
+    return tuple(
+        sorted(
+            region.structure_id
+            for region in records
+            if selected_structure_id in region.structure_id_path
+        )
+    )
+
+
+def _annotation_branch_has_voxels(
+    annotation: NDArray[Any],
+    *,
+    included_structure_ids: tuple[int, ...],
+) -> bool:
+    """Check ontology geometry slab-by-slab without allocating a whole-volume mask."""
+
+    volume = np.asarray(annotation)
+    if volume.ndim != 3:
+        raise AtlasAdapterError("atlas annotation must be a three-dimensional array")
+    if not included_structure_ids:
+        raise AtlasAdapterError("selected ontology branch contains no structure identities")
+    for slab in volume:
+        if np.isin(slab, included_structure_ids, assume_unique=True).any():
+            return True
+    return False
 
 
 def _region_payload(region: RegionRecord) -> JsonObject:

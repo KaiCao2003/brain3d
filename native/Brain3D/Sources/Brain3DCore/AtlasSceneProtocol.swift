@@ -4,8 +4,17 @@ public enum AtlasSceneContract {
     public static let physicalFrameId = AtlasPhysicalCoordinateFrame.expectedFrameId
     public static let rayPickAlgorithmVersion =
         "amanatides-woo-clipped-half-open-first-nonzero-v1"
+    public static let maximumRegionSearchCharacters = 128
+    public static let maximumRegionSearchResults = 100
+    public static let regionSearchMatchingRule =
+        "case-insensitive exact, prefix, then substring matching over normalized "
+            + "acronym/name; decimal structure ID is exact only"
     public static let maximumMeshByteSize = 128 * 1024 * 1024
     public static let maximumRayLengthMicrometres = 250_000.0
+    public static let regionOverlayAlgorithmVersion =
+        "annotation-descendants-filled-outline-v1"
+    public static let regionOverlaySelectionRule =
+        "selected structure and every descendant in structureIdPath"
 }
 
 public enum AtlasSceneContractError: Error, Equatable, LocalizedError, Sendable {
@@ -21,6 +30,526 @@ public enum AtlasSceneContractError: Error, Equatable, LocalizedError, Sendable 
 public enum AtlasMeshTarget: String, Codable, CaseIterable, Equatable, Sendable {
     case root
     case region
+}
+
+public struct AtlasRegionsParameters: Encodable, Equatable, Sendable {
+    public static let maximumPageSize = 500
+
+    public let protocolVersion: Int
+    public let offset: Int
+    public let limit: Int
+
+    public init(offset: Int = 0, limit: Int = maximumPageSize) throws {
+        guard offset >= 0, (1 ... Self.maximumPageSize).contains(limit) else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas region pages require a nonnegative offset and 1–500 records."
+            )
+        }
+        protocolVersion = BridgeProtocolVersion.current
+        self.offset = offset
+        self.limit = limit
+    }
+}
+
+public struct AtlasRegionsResult: Decodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let offset: Int
+    public let limit: Int
+    public let returnedCount: Int
+    public let totalCount: Int
+    public let hasMore: Bool
+    public let regions: [AtlasRegionSummary]
+    public let atlas: ViewerAtlasIdentity
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case protocolVersion
+        case offset
+        case limit
+        case returnedCount
+        case totalCount
+        case hasMore
+        case regions
+        case atlas
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireAtlasSceneExactKeys(
+            decoder,
+            CodingKeys.self,
+            label: "atlas regions result"
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        offset = try container.decode(Int.self, forKey: .offset)
+        limit = try container.decode(Int.self, forKey: .limit)
+        returnedCount = try container.decode(Int.self, forKey: .returnedCount)
+        totalCount = try container.decode(Int.self, forKey: .totalCount)
+        hasMore = try container.decode(Bool.self, forKey: .hasMore)
+        regions = try container.decode([AtlasRegionSummary].self, forKey: .regions)
+        atlas = try container.decode(ViewerAtlasIdentity.self, forKey: .atlas)
+
+        let consumedCount = offset + returnedCount
+        guard protocolVersion == BridgeProtocolVersion.current,
+              offset >= 0,
+              (1 ... AtlasRegionsParameters.maximumPageSize).contains(limit),
+              returnedCount == regions.count,
+              returnedCount <= limit,
+              totalCount > 0,
+              consumedCount <= totalCount,
+              hasMore == (consumedCount < totalCount),
+              !hasMore || returnedCount > 0,
+              Set(regions.map(\.structureId)).count == regions.count,
+              Set(regions.map(\.acronym)).count == regions.count
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas region page metadata or identities are inconsistent."
+            )
+        }
+    }
+}
+
+public struct AtlasRegionTreeNode: Identifiable, Equatable, Sendable {
+    public let region: AtlasRegionSummary
+    public let children: [AtlasRegionTreeNode]
+
+    public var id: Int { region.structureId }
+    public var outlineChildren: [AtlasRegionTreeNode]? {
+        children.isEmpty ? nil : children
+    }
+
+    fileprivate init(region: AtlasRegionSummary, children: [AtlasRegionTreeNode]) {
+        self.region = region
+        self.children = children
+    }
+}
+
+public struct AtlasRegionHierarchy: Equatable, Sendable {
+    public let regions: [AtlasRegionSummary]
+    public let roots: [AtlasRegionTreeNode]
+    public let childrenByParentStructureId: [Int: [AtlasRegionSummary]]
+
+    private let regionsByStructureId: [Int: AtlasRegionSummary]
+
+    public init(regions: [AtlasRegionSummary]) throws {
+        guard !regions.isEmpty,
+              Set(regions.map(\.structureId)).count == regions.count,
+              Set(regions.map(\.acronym)).count == regions.count
+        else {
+            throw AtlasSceneContractError.invalid(
+                "The complete atlas ontology must contain unique region identities."
+            )
+        }
+
+        let byId = Dictionary(uniqueKeysWithValues: regions.map { ($0.structureId, $0) })
+        var childRegions: [Int: [AtlasRegionSummary]] = [:]
+        var rootRegions: [AtlasRegionSummary] = []
+        for region in regions {
+            guard Set(region.structureIdPath).count == region.structureIdPath.count,
+                  region.structureIdPath.allSatisfy({ byId[$0] != nil })
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "Every ontology path must be acyclic and resolve within the complete atlas."
+                )
+            }
+            if let parentId = region.parentStructureId {
+                guard let parent = byId[parentId],
+                      parent.structureIdPath == Array(region.structureIdPath.dropLast())
+                else {
+                    throw AtlasSceneContractError.invalid(
+                        "Every ontology parent must exist and own the child's exact path prefix."
+                    )
+                }
+                childRegions[parentId, default: []].append(region)
+            } else {
+                guard region.structureIdPath == [region.structureId] else {
+                    throw AtlasSceneContractError.invalid(
+                        "Atlas ontology roots must contain only their own structure ID."
+                    )
+                }
+                rootRegions.append(region)
+            }
+        }
+        guard !rootRegions.isEmpty else {
+            throw AtlasSceneContractError.invalid(
+                "The complete atlas ontology must contain at least one root."
+            )
+        }
+
+        func node(for region: AtlasRegionSummary) -> AtlasRegionTreeNode {
+            AtlasRegionTreeNode(
+                region: region,
+                children: childRegions[region.structureId, default: []].map(node(for:))
+            )
+        }
+
+        self.regions = regions
+        roots = rootRegions.map(node(for:))
+        childrenByParentStructureId = childRegions
+        regionsByStructureId = byId
+    }
+
+    public func region(structureId: Int) -> AtlasRegionSummary? {
+        regionsByStructureId[structureId]
+    }
+
+    public func children(of structureId: Int) -> [AtlasRegionSummary] {
+        childrenByParentStructureId[structureId, default: []]
+    }
+}
+
+public struct AtlasRegionPageAccumulator: Sendable {
+    private var atlas: ViewerAtlasIdentity?
+    private var totalCount: Int?
+    private var regions: [AtlasRegionSummary] = []
+    private var structureIds: Set<Int> = []
+    private var acronyms: Set<String> = []
+    private var complete = false
+
+    public init() {}
+
+    public var nextOffset: Int { regions.count }
+
+    public mutating func append(_ page: AtlasRegionsResult) throws {
+        guard !complete, page.offset == nextOffset else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas region pages must be appended once in contiguous offset order."
+            )
+        }
+        if let atlas {
+            guard page.atlas == atlas else {
+                throw AtlasSceneContractError.invalid(
+                    "Every atlas region page must use one immutable atlas identity."
+                )
+            }
+        } else {
+            atlas = page.atlas
+        }
+        if let totalCount {
+            guard page.totalCount == totalCount else {
+                throw AtlasSceneContractError.invalid(
+                    "Atlas region totalCount changed while paging."
+                )
+            }
+        } else {
+            totalCount = page.totalCount
+        }
+        for region in page.regions {
+            guard structureIds.insert(region.structureId).inserted,
+                  acronyms.insert(region.acronym).inserted
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "Atlas region identities must remain unique across pages."
+                )
+            }
+            regions.append(region)
+        }
+        complete = !page.hasMore
+    }
+
+    public func finish() throws -> AtlasRegionHierarchy {
+        guard complete,
+              let totalCount,
+              regions.count == totalCount
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Every advertised atlas region page must load before building the hierarchy."
+            )
+        }
+        return try AtlasRegionHierarchy(regions: regions)
+    }
+}
+
+public struct AtlasRegionSearchParameters: Encodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let query: String
+    public let limit: Int
+
+    public init(query: String, limit: Int = 25) throws {
+        let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty,
+              normalized.count <= AtlasSceneContract.maximumRegionSearchCharacters,
+              (1 ... AtlasSceneContract.maximumRegionSearchResults).contains(limit)
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas search requires 1–128 characters and 1–100 results."
+            )
+        }
+        protocolVersion = BridgeProtocolVersion.current
+        self.query = normalized
+        self.limit = limit
+    }
+}
+
+public enum AtlasRegionSearchMatchKind: String, Decodable, CaseIterable, Equatable, Sendable {
+    case structureIdExact
+    case acronymExact
+    case nameExact
+    case acronymPrefix
+    case namePrefix
+    case acronymSubstring
+    case nameSubstring
+}
+
+public struct AtlasRegionSearchHit: Decodable, Equatable, Identifiable, Sendable {
+    public let matchKind: AtlasRegionSearchMatchKind
+    public let region: AtlasRegionSummary
+
+    public var id: Int { region.structureId }
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case matchKind
+        case region
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireAtlasSceneExactKeys(
+            decoder,
+            CodingKeys.self,
+            label: "atlas region search hit"
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        matchKind = try container.decode(AtlasRegionSearchMatchKind.self, forKey: .matchKind)
+        region = try container.decode(AtlasRegionSummary.self, forKey: .region)
+    }
+}
+
+public struct AtlasRegionSearchResult: Decodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let query: String
+    public let matchingRule: String
+    public let returnedCount: Int
+    public let totalMatchCount: Int
+    public let results: [AtlasRegionSearchHit]
+    public let atlas: ViewerAtlasIdentity
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case protocolVersion
+        case query
+        case matchingRule
+        case returnedCount
+        case totalMatchCount
+        case results
+        case atlas
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireAtlasSceneExactKeys(
+            decoder,
+            CodingKeys.self,
+            label: "atlas region search result"
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        query = try container.decode(String.self, forKey: .query)
+        matchingRule = try container.decode(String.self, forKey: .matchingRule)
+        returnedCount = try container.decode(Int.self, forKey: .returnedCount)
+        totalMatchCount = try container.decode(Int.self, forKey: .totalMatchCount)
+        results = try container.decode([AtlasRegionSearchHit].self, forKey: .results)
+        atlas = try container.decode(ViewerAtlasIdentity.self, forKey: .atlas)
+        guard protocolVersion == BridgeProtocolVersion.current,
+              !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              query.count <= AtlasSceneContract.maximumRegionSearchCharacters,
+              matchingRule == AtlasSceneContract.regionSearchMatchingRule,
+              returnedCount == results.count,
+              returnedCount >= 0,
+              returnedCount <= AtlasSceneContract.maximumRegionSearchResults,
+              totalMatchCount >= returnedCount,
+              Set(results.map(\.region.structureId)).count == results.count
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas region search metadata is inconsistent."
+            )
+        }
+    }
+}
+
+public enum AtlasRegionOverlayOrientation: String, Codable, CaseIterable, Hashable, Sendable {
+    case dorsal
+    case coronal
+    case sagittal
+    case horizontal
+
+    public init(_ sliceOrientation: AtlasSliceOrientation) {
+        switch sliceOrientation {
+        case .coronal: self = .coronal
+        case .sagittal: self = .sagittal
+        case .horizontal: self = .horizontal
+        }
+    }
+
+    public var sliceOrientation: AtlasSliceOrientation? {
+        switch self {
+        case .dorsal: nil
+        case .coronal: .coronal
+        case .sagittal: .sagittal
+        case .horizontal: .horizontal
+        }
+    }
+}
+
+public struct AtlasRegionOverlayParameters: Encodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let structureId: Int
+    public let orientation: AtlasRegionOverlayOrientation
+    public let index: Int?
+
+    public init(
+        structureId: Int,
+        orientation: AtlasRegionOverlayOrientation,
+        index: Int? = nil
+    ) throws {
+        guard structureId > 0,
+              (orientation == .dorsal && index == nil)
+                || (orientation != .dorsal && index.map({ $0 >= 0 }) == true)
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Dorsal overlays omit index; slice overlays require a nonnegative index."
+            )
+        }
+        protocolVersion = BridgeProtocolVersion.current
+        self.structureId = structureId
+        self.orientation = orientation
+        self.index = index
+    }
+}
+
+public struct AtlasRegionOverlayResult: Decodable, Equatable, Sendable {
+    public let protocolVersion: Int
+    public let algorithmVersion: String
+    public let selectionRule: String
+    public let region: AtlasRegionSummary
+    public let includedStructureIds: [Int]
+    public let visiblePixelCount: Int
+    public let mimeType: String
+    public let colorModel: String
+    public let alphaMode: String
+    public let pngBase64: String
+    public let width: Int
+    public let height: Int
+    public let orientation: AtlasRegionOverlayOrientation
+    public let index: Int?
+    public let sliceCount: Int?
+    public let fixedAxis: AtlasAnatomicalAxis?
+    public let rowAxis: AtlasAnatomicalAxis
+    public let columnAxis: AtlasAnatomicalAxis
+    public let atlas: ViewerAtlasIdentity
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case protocolVersion
+        case algorithmVersion
+        case selectionRule
+        case region
+        case includedStructureIds
+        case visiblePixelCount
+        case mimeType
+        case colorModel
+        case alphaMode
+        case pngBase64
+        case width
+        case height
+        case orientation
+        case index
+        case sliceCount
+        case fixedAxis
+        case rowAxis
+        case columnAxis
+        case atlas
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try requireAtlasSceneExactKeys(
+            decoder,
+            CodingKeys.self,
+            label: "atlas region overlay result"
+        )
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        protocolVersion = try container.decode(Int.self, forKey: .protocolVersion)
+        algorithmVersion = try container.decode(String.self, forKey: .algorithmVersion)
+        selectionRule = try container.decode(String.self, forKey: .selectionRule)
+        region = try container.decode(AtlasRegionSummary.self, forKey: .region)
+        includedStructureIds = try container.decode(
+            [Int].self,
+            forKey: .includedStructureIds
+        )
+        visiblePixelCount = try container.decode(Int.self, forKey: .visiblePixelCount)
+        mimeType = try container.decode(String.self, forKey: .mimeType)
+        colorModel = try container.decode(String.self, forKey: .colorModel)
+        alphaMode = try container.decode(String.self, forKey: .alphaMode)
+        pngBase64 = try container.decode(String.self, forKey: .pngBase64)
+        width = try container.decode(Int.self, forKey: .width)
+        height = try container.decode(Int.self, forKey: .height)
+        orientation = try container.decode(
+            AtlasRegionOverlayOrientation.self,
+            forKey: .orientation
+        )
+        index = try container.decodeIfPresent(Int.self, forKey: .index)
+        sliceCount = try container.decodeIfPresent(Int.self, forKey: .sliceCount)
+        fixedAxis = try container.decodeIfPresent(AtlasAnatomicalAxis.self, forKey: .fixedAxis)
+        rowAxis = try container.decode(AtlasAnatomicalAxis.self, forKey: .rowAxis)
+        columnAxis = try container.decode(AtlasAnatomicalAxis.self, forKey: .columnAxis)
+        atlas = try container.decode(ViewerAtlasIdentity.self, forKey: .atlas)
+        try validate()
+    }
+
+    private func validate() throws {
+        let pixelCount = width.multipliedReportingOverflow(by: height)
+        guard protocolVersion == BridgeProtocolVersion.current,
+              algorithmVersion == AtlasSceneContract.regionOverlayAlgorithmVersion,
+              selectionRule == AtlasSceneContract.regionOverlaySelectionRule,
+              !includedStructureIds.isEmpty,
+              includedStructureIds.contains(region.structureId),
+              includedStructureIds.allSatisfy({ $0 > 0 }),
+              Set(includedStructureIds).count == includedStructureIds.count,
+              includedStructureIds == includedStructureIds.sorted(),
+              visiblePixelCount >= 0,
+              width > 0,
+              height > 0,
+              !pixelCount.overflow,
+              visiblePixelCount <= pixelCount.partialValue,
+              mimeType == "image/png",
+              colorModel == "RGBA",
+              alphaMode == "straight",
+              !pngBase64.isEmpty
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Atlas region overlay identity, image, or ontology metadata is invalid."
+            )
+        }
+
+        if orientation == .dorsal {
+            guard index == nil,
+                  sliceCount == nil,
+                  fixedAxis == nil,
+                  rowAxis == .ap,
+                  columnAxis == .ml,
+                  width == atlas.shapeVoxels.mlVoxels,
+                  height == atlas.shapeVoxels.apVoxels
+            else {
+                throw AtlasSceneContractError.invalid(
+                    "Dorsal region overlay dimensions or axes do not match the atlas."
+                )
+            }
+            return
+        }
+
+        guard let sliceOrientation = orientation.sliceOrientation,
+              let index,
+              let sliceCount,
+              let fixedAxis,
+              index >= 0,
+              sliceCount == atlas.shapeVoxels[sliceOrientation.fixedAxis],
+              index < sliceCount,
+              fixedAxis == sliceOrientation.fixedAxis,
+              rowAxis == sliceOrientation.rowAxis,
+              columnAxis == sliceOrientation.columnAxis,
+              width == atlas.shapeVoxels[sliceOrientation.columnAxis],
+              height == atlas.shapeVoxels[sliceOrientation.rowAxis]
+        else {
+            throw AtlasSceneContractError.invalid(
+                "Slice region overlay dimensions, axes, or index do not match the atlas."
+            )
+        }
+    }
 }
 
 public struct AtlasMeshParameters: Encodable, Equatable, Sendable {

@@ -29,6 +29,10 @@ from mouse_brain_planner.domain.region_models import (
     CalibratedProbeShankSegment,
 )
 from mouse_brain_planner.domain.transform_models import AnatomicalPoint
+from mouse_brain_planner.probes.catalog import (
+    ProbeModelCatalogSnapshotError,
+    validate_probe_model_catalog_snapshot,
+)
 from mouse_brain_planner.surgery.trajectory import (
     placed_recording_sites,
     placed_shank_centerlines,
@@ -52,9 +56,24 @@ def analyze_probe_plan_regions(
 
     if plan.atlas_metadata_sha256 != metadata.metadata_sha256:
         raise ProbeRegionServiceError("probe plan atlas digest does not match loaded atlas")
-    transform_id = (
-        f"calibration:{plan.calibration_uuid}:v{plan.calibration_version}:{plan.calibration_sha256}"
-    )
+    try:
+        validate_probe_model_catalog_snapshot(plan.probe_model)
+    except ProbeModelCatalogSnapshotError as error:
+        raise ProbeRegionServiceError(
+            "probe model snapshot is not exact source-pinned catalog geometry"
+        ) from error
+    if plan.surface_relative_input is not None:
+        transform_id = (
+            "atlas-surface:"
+            f"{plan.surface_relative_input.bregma_reference.reference_id}:"
+            f"{plan.surface_relative_input.annotation_sha256}:"
+            f"{plan.projection_sha256}"
+        )
+    else:
+        transform_id = (
+            f"calibration:{plan.calibration_uuid}:"
+            f"v{plan.calibration_version}:{plan.calibration_sha256}"
+        )
     shanks = placed_shank_centerlines(plan.probe_model, plan.placement)
     sites = placed_recording_sites(plan.probe_model, plan.placement)
     sites_by_shank: dict[str, list[AtlasRecordingSitePoint]] = {

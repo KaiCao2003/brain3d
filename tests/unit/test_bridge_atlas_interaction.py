@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from dataclasses import dataclass, field
@@ -11,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from PIL import Image
 from tests.fixtures.atlas_factory import make_allen_metadata_test_double
 
 from mouse_brain_planner.bridge.atlas_interaction import (
@@ -157,6 +159,7 @@ def test_extension_capabilities_are_discoverable_without_loading_atlas() -> None
     assert capabilities["atlasPhysicalPointLookup"] is True
     assert capabilities["atlasAnnotationRayPick"] is True
     assert capabilities["atlasMeshDescriptor"] is True
+    assert capabilities["atlasRegionOverlay"] is True
     assert diagnostics == ""
 
 
@@ -458,6 +461,175 @@ def test_mesh_descriptor_hashes_verified_atlas_file_without_inlining_contents(
     assert diagnostics == ""
 
 
+def test_mesh_reports_ontology_region_without_annotation_geometry_truthfully(
+    fake_atlas: _FakeLoadedAtlas,
+) -> None:
+    fake_atlas._regions.append(
+        RegionRecord(
+            structure_id=545,
+            acronym="RSPd4",
+            name="Retrosplenial area, dorsal part, layer 4",
+            structure_id_path=(997, 315, 545),
+            rgb=(26, 166, 152),
+        )
+    )
+
+    responses, diagnostics = _run(
+        _request(
+            "ontology-only-mesh",
+            "atlas.mesh",
+            {"protocolVersion": 1, "target": "region", "structureId": 545},
+        ),
+        atlas=fake_atlas,
+    )
+
+    error = responses[0]["error"]
+    assert error["code"] == "ATLAS_REGION_HAS_NO_ANNOTATED_VOXELS"
+    assert error["message"] == (
+        "The selected Allen ontology region has no voxels in the reviewed 25 micrometre "
+        "annotation, so there is no reviewed 3D geometry to display."
+    )
+    assert error["details"] == {
+        "structureId": 545,
+        "acronym": "RSPd4",
+        "includedStructureIds": [545],
+        "annotationVoxelCount": 0,
+        "geometryStatus": "ontology-only-no-annotated-voxels",
+        "atlasMetadataSha256": fake_atlas.metadata.metadata_sha256,
+    }
+    assert "ATLAS_REGION_HAS_NO_ANNOTATED_VOXELS" in diagnostics
+
+
+def test_missing_mesh_for_annotation_backed_branch_remains_a_mesh_failure(
+    fake_atlas: _FakeLoadedAtlas,
+) -> None:
+    responses, diagnostics = _run(
+        _request(
+            "missing-backed-mesh",
+            "atlas.mesh",
+            {"protocolVersion": 1, "target": "region", "structureId": 315},
+        ),
+        atlas=fake_atlas,
+    )
+
+    assert responses[0]["error"]["code"] == "ATLAS_MESH_UNAVAILABLE"
+    assert "ATLAS_MESH_UNAVAILABLE" in diagnostics
+
+
+def test_region_overlay_uses_selected_parent_and_all_ontology_descendants(
+    fake_atlas: _FakeLoadedAtlas,
+) -> None:
+    responses, diagnostics = _run(
+        _request(
+            "overlay",
+            "atlas.region.overlay",
+            {
+                "protocolVersion": 1,
+                "structureId": 315,
+                "orientation": "coronal",
+                "index": 2,
+            },
+        ),
+        atlas=fake_atlas,
+    )
+
+    result = responses[0]["result"]
+    assert result["algorithmVersion"] == "annotation-descendants-filled-outline-v1"
+    assert result["selectionRule"] == ("selected structure and every descendant in structureIdPath")
+    assert result["region"]["structureId"] == 315
+    assert result["includedStructureIds"] == [315, 385, 394]
+    assert result["orientation"] == "coronal"
+    assert result["index"] == 2
+    assert result["sliceCount"] == fake_atlas.metadata.shape_voxels[0]
+    assert result["fixedAxis"] == "AP"
+    assert result["rowAxis"] == "DV"
+    assert result["columnAxis"] == "ML"
+    assert result["width"] == fake_atlas.metadata.shape_voxels[2]
+    assert result["height"] == fake_atlas.metadata.shape_voxels[1]
+    assert result["visiblePixelCount"] == result["width"] * result["height"]
+    assert result["mimeType"] == "image/png"
+    assert result["colorModel"] == "RGBA"
+    assert result["alphaMode"] == "straight"
+    decoded = Image.open(BytesIO(base64.b64decode(result["pngBase64"])))
+    assert decoded.mode == "RGBA"
+    alpha = np.asarray(decoded)[:, :, 3]
+    assert np.count_nonzero(alpha) == result["visiblePixelCount"]
+    assert result["atlas"]["metadataSha256"] == fake_atlas.metadata.metadata_sha256
+    assert diagnostics == ""
+
+
+def test_region_overlay_dorsal_projection_omits_slice_fields(
+    fake_atlas: _FakeLoadedAtlas,
+) -> None:
+    responses, diagnostics = _run(
+        _request(
+            "dorsal-overlay",
+            "atlas.region.overlay",
+            {
+                "protocolVersion": 1,
+                "structureId": 385,
+                "orientation": "dorsal",
+            },
+        ),
+        atlas=fake_atlas,
+    )
+
+    result = responses[0]["result"]
+    assert result["orientation"] == "dorsal"
+    assert result["index"] is None
+    assert result["sliceCount"] is None
+    assert result["fixedAxis"] is None
+    assert result["rowAxis"] == "AP"
+    assert result["columnAxis"] == "ML"
+    assert result["width"] == fake_atlas.metadata.shape_voxels[2]
+    assert result["height"] == fake_atlas.metadata.shape_voxels[0]
+    assert result["visiblePixelCount"] == result["width"] * result["height"]
+    assert diagnostics == ""
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {
+            "protocolVersion": 1,
+            "structureId": 385,
+            "orientation": "dorsal",
+            "index": 0,
+        },
+        {
+            "protocolVersion": 1,
+            "structureId": 385,
+            "orientation": "sagittal",
+        },
+        {
+            "protocolVersion": 1,
+            "structureId": 385,
+            "orientation": "oblique",
+            "index": 0,
+        },
+        {
+            "protocolVersion": 1,
+            "structureId": 999_999,
+            "orientation": "horizontal",
+            "index": 0,
+        },
+    ],
+)
+def test_region_overlay_rejects_ambiguous_view_schema(
+    fake_atlas: _FakeLoadedAtlas,
+    params: dict[str, object],
+) -> None:
+    responses, _ = _run(
+        _request("bad-overlay", "atlas.region.overlay", params),
+        atlas=fake_atlas,
+    )
+
+    assert responses[0]["error"]["code"] in {
+        "INVALID_PARAMS",
+        "ATLAS_REGION_NOT_FOUND",
+    }
+
+
 def test_root_mesh_descriptor_requires_root_schema(fake_atlas: _FakeLoadedAtlas) -> None:
     payload = b"".join(
         (
@@ -515,7 +687,14 @@ def test_mesh_path_escape_is_rejected_even_if_adapter_double_returns_it(
 
 @pytest.mark.parametrize(
     "method",
-    ["atlas.regions", "atlas.search", "atlas.point", "atlas.ray.pick", "atlas.mesh"],
+    [
+        "atlas.regions",
+        "atlas.search",
+        "atlas.point",
+        "atlas.ray.pick",
+        "atlas.mesh",
+        "atlas.region.overlay",
+    ],
 )
 def test_all_interaction_methods_require_an_open_atlas(method: str) -> None:
     params_by_method: dict[str, dict[str, object]] = {
@@ -530,6 +709,12 @@ def test_all_interaction_methods_require_an_open_atlas(method: str) -> None:
         },
         "atlas.ray.pick": _ray_params(),
         "atlas.mesh": {"protocolVersion": 1, "target": "root"},
+        "atlas.region.overlay": {
+            "protocolVersion": 1,
+            "structureId": 385,
+            "orientation": "coronal",
+            "index": 0,
+        },
     }
 
     responses, _ = _run(

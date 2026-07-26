@@ -265,6 +265,7 @@ class PlacementMethod(StrEnum):
     ENTRY_ANGLES_DEPTH = "entry-plus-angles-depth"
     TARGET_ANGLES_DEPTH = "target-plus-angles-depth"
     STEREOTAXIC_TARGET_MANIPULATOR = "stereotaxic-target-plus-manipulator-angles"
+    ATLAS_SURFACE_AP_ML = "atlas-surface-ap-ml-plus-depth-angle-layout"
 
 
 class NormalizedProbePlacement(BaseModel):
@@ -433,7 +434,14 @@ class PlacedRecordingSite(BaseModel):
 
 
 class PlacedProbeShank(BaseModel):
-    """One finite implanted shank centerline with its conservative envelope."""
+    """One placed shank with both the implanted path and full physical extent.
+
+    ``entry`` remains the surface crossing used by region/vessel analysis and
+    ``tip`` is the distal target.  ``proximal_end`` is the catalogued base end
+    of the complete shank, which can lie outside the atlas.  Keeping those
+    points separate prevents a renderer from mistaking insertion depth for the
+    physical shank length.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -443,6 +451,8 @@ class PlacedProbeShank(BaseModel):
     shank_id: str = Field(min_length=1, max_length=200)
     entry: AnatomicalPoint
     tip: AnatomicalPoint
+    proximal_end: AnatomicalPoint
+    length_um: PositiveFiniteFloat
     width_um: PositiveFiniteFloat
     thickness_um: PositiveFiniteFloat
     envelope_definition: Literal["circumscribed-radius-of-rectangular-cross-section"] = (
@@ -451,10 +461,48 @@ class PlacedProbeShank(BaseModel):
 
     @model_validator(mode="after")
     def validate_shank(self) -> Self:
-        if self.entry.frame_id != self.tip.frame_id:
-            raise ValueError("placed shank entry and tip must use one explicit frame")
+        if not (self.entry.frame_id == self.tip.frame_id == self.proximal_end.frame_id):
+            raise ValueError(
+                "placed shank surface entry, distal tip, and proximal end "
+                "must use one explicit frame"
+            )
         if self.entry.as_ap_ml_dv() == self.tip.as_ap_ml_dv():
             raise ValueError("placed shank entry and tip must be distinct")
+
+        proximal = self.proximal_end.as_ap_ml_dv()
+        surface = self.entry.as_ap_ml_dv()
+        distal = self.tip.as_ap_ml_dv()
+        full_axis = tuple(
+            distal_value - proximal_value
+            for distal_value, proximal_value in zip(distal, proximal, strict=True)
+        )
+        full_length = math.sqrt(sum(component * component for component in full_axis))
+        tolerance = max(1e-6, self.length_um * 1e-10)
+        if not math.isclose(full_length, self.length_um, rel_tol=0, abs_tol=tolerance):
+            raise ValueError(
+                f"placed shank length {self.length_um:g} does not match "
+                f"proximal-to-tip distance {full_length:g} micrometres"
+            )
+        unit_axis = tuple(component / full_length for component in full_axis)
+        proximal_to_surface = tuple(
+            surface_value - proximal_value
+            for surface_value, proximal_value in zip(surface, proximal, strict=True)
+        )
+        surface_distance = sum(
+            component * axis for component, axis in zip(proximal_to_surface, unit_axis, strict=True)
+        )
+        surface_off_axis = math.sqrt(
+            sum(
+                (component - surface_distance * axis) ** 2
+                for component, axis in zip(proximal_to_surface, unit_axis, strict=True)
+            )
+        )
+        if surface_off_axis > tolerance:
+            raise ValueError("placed shank surface entry is off the full physical centerline")
+        if surface_distance < -tolerance or surface_distance > full_length + tolerance:
+            raise ValueError(
+                "placed shank surface entry must lie between proximal end and distal tip"
+            )
         return self
 
     @property

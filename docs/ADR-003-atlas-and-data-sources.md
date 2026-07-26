@@ -4,14 +4,15 @@
 - **Decision date:** 2026-07-21
 - **Applies to:** atlas discovery, download, cache, provenance, and external reference material
 
-## Implementation update — 2026-07-22
+## Implementation update — 2026-07-23
 
-The atlas decision is unchanged. A CC BY 4.0 diameter-≥30 µm derivative of the LAMBADA P60_606
-graph, Zenodo record DOI `10.5281/zenodo.18876865`, is retained only as archived evidence.
-Coordinate qualification rejected runtime use: AP/DV evidence passed, but biological laterality
-and whole-brain coverage did not. Population density and subject-image registration also remain
-archived backend paths and are absent from the primary UI. See
-[the derivation and qualification record](LAMBADA_MAJOR_VESSELS.md).
+The atlas decision is unchanged. A CC BY-NC 4.0 diameter-≥30 µm derivative of VesSAP
+`BL6J-no1` is now the display-only major-vessel reference in all five views. Exact coordinate,
+laterality, topology, source, transform, and asset evidence permits display but not subject
+clearance. The older LAMBADA P60_606 derivative remains archived and rejected. Population density
+and subject-image registration also remain archived backend paths and are absent from the primary
+UI. See [the VesSAP record](VESSAP_MAJOR_VESSELS.md) and
+[the LAMBADA record](LAMBADA_MAJOR_VESSELS.md).
 
 ## Decision
 
@@ -123,11 +124,10 @@ hemisphere/laterality. Coordinates occurring on both sides of an array midpoint 
 whole-brain coverage. No approved exact-specimen transform supports mirroring, so the application
 does not infer a side or mirror the derivative.
 
-The runtime omits `auditedReferenceMajorVessels` and
-`radiusAwareReferenceVesselAnalysis` from its capabilities. All three reference methods—
-`vessel.major.reference.get`, `vessel.major.reference.geometry`, and
-`vessel.major.reference.analyze`—return `VESSEL_GEOMETRY_UNAVAILABLE` without loading or serving
-geometry. The canonical rejection report is
+No LAMBADA handler or capability is registered in the current runtime. The production
+`auditedReferenceMajorVessels` capability and reference metadata/geometry methods now belong
+exclusively to the separately qualified VesSAP display reference; they never load P60_606.
+`radiusAwareReferenceVesselAnalysis` remains absent. The canonical LAMBADA rejection report is
 [`lambada_p60_606_coordinate_qualification_rejected_v1.json`](evidence/lambada_p60_606_coordinate_qualification_rejected_v1.json),
 SHA-256 `0993d5a0ad6c0d62094dc395fe2bc4f284870e6e7c0b602be7df5a7da867c93a`.
 
@@ -135,6 +135,25 @@ This remains a fixed cleared reference, not the animal being planned. The source
 choroidal vessels; the derivative omits smaller vessels; artery/vein identity is unavailable;
 and biological variation, tissue distortion, registration error, and omitted vessels are not
 bounded. It cannot support a visual overlay, vessel conflict, or surgical-clearance claim.
+
+## VesSAP display-only major-vessel decision
+
+Use the official VesSAP `BL6J-no1` 3 µm skeleton/radius volumes and published Euler + B-spline
+Allen registration for a C57BL/6J population-reference display layer. Retain source skeleton
+points with radius ≥5 voxels, preserve only true 26-neighbour source adjacency, transform
+continuous coordinates with the mandatory ML reflection, and coalesce on a 50 µm display grid.
+The bundled NPZ, adjacent strict manifest, CC BY-NC 4.0 license text, and exact source/transform
+digests must remain together.
+
+The backend may advertise `auditedReferenceMajorVessels` and serve metadata/geometry only after
+all integrity checks pass. It must not advertise `radiusAwareReferenceVesselAnalysis`.
+Clearance analysis fails with `VESSEL_ANALYSIS_UNAVAILABLE` before reading or mutating project
+state. The display must identify one fixed cleared ex-vivo specimen, omitted capillaries, and the
+absence of subject-registration/tissue-distortion bounds.
+
+This decision does not supersede the LAMBADA rejection or authorize mixing/mirroring datasets.
+The detailed transform, validation statistics, counts, and digests are in
+[VESSAP_MAJOR_VESSELS.md](VESSAP_MAJOR_VESSELS.md).
 
 ## Cache, download, and offline behavior
 
@@ -191,14 +210,21 @@ files only when an authoritative expected hash is available.
 | cortex-lab/allenCCF and SHARP-Track | Prior-art workflow reference only | No repository license found; no copied code or assets |
 | Kim 2022 population vascular length-density data, DOI `10.17632/stxvn5sv44.1` | Optional downloaded scientific data | Mendeley Data v1, CC BY 4.0; exact archive/member identities are pinned. Archived backend preparation only; never vessel paths, a subject layer, or clearance geometry. |
 | LAMBADA P60_606 vascular graph, DOI `10.5281/zenodo.18876865` | Archived derived scientific evidence | CC BY 4.0; exact source and derivative identities are pinned. Coordinate qualification is rejected, so it is not displayed, served, mirrored, or analyzed. |
+| VesSAP BL6J-no1 whole-brain vasculature | Bundled display-only derived scientific data | CC BY-NC 4.0; exact source/transform/asset identities are pinned. It is displayed in all five views but cannot support subject clearance, vessel absence, suitability, or safety. |
 | Wu et al. simulation-ready vascular tracing data, DOI `10.17632/mjtyry6v85.1` | Rejected for planning integration | Version 1 is CC BY 4.0 and documents four traced adult-mouse graphs in MATLAB format, but the documented coordinates are raw specimen-space XYZ with no qualified axis orientation, laterality, Allen transform, or bregma relationship. No graph is integrated or bundled. |
 | VesselGraph | Prior-art vascular graph/data reference only | Software is MIT; data is CC BY-NC 4.0. No code, models, or data copied. The noncommercial restriction prevents treating it as an unrestricted distributable default. |
-| VesSAP | Prior-art vascular workflow/reference only | Repository code is MIT; the paper links public scans and registered atlas data, but the external data terms were not established here. No code, models, or data copied. |
+| VesSAP repository code | Reviewed derivation/workflow reference only; not a runtime dependency | Repository code is MIT and was not copied. The separately licensed bundled BL6J-no1 data derivative is the CC BY-NC 4.0 artifact documented in the row above. |
 
 The Allen terms currently restrict covered Content to noncommercial research unless otherwise
 stated. The application must show the source and terms before first download, retain attribution,
 and avoid redistributing the atlas inside the `.app` or an installer. Commercial distribution,
 hosted redistribution, or a change in Allen terms requires legal review before release.
+
+Pinpoint remains a workflow reference rather than a runtime component. The hosted Unity WebGL
+application does not provide a supported bidirectional contract for exact probe identity,
+coordinate/transform provenance, camera/region state, or the VesSAP overlay. Brain3D uses its
+existing typed BrainGlobe endpoints for the complete ontology and lazy meshes instead. See
+[the Pinpoint interoperability decision](PINPOINT_INTEGRATION.md).
 
 The archived `stxvn5sv44.1` density and rejected `mjtyry6v85.1` vessel graphs are distinct
 deposits and must never be conflated. A new source still needs a stable URL, version, coordinate
@@ -216,6 +242,8 @@ must not be copied unless their license is explicitly compatible and the reuse i
 - 10 µm is deferred. Existing source or derived cache data is left untouched but cannot enter a
   current project package.
 - The Mendeley density and subject-image workflows remain archived and absent from the primary UI.
+- VesSAP `BL6J-no1` is the only runtime major-vessel layer; it is display-only and separately
+  licensed CC BY-NC 4.0.
 - The LAMBADA derivative remains archived evidence and cannot render or enter analysis. Any future
   vessel source needs a new qualification that binds trustworthy whole-brain coverage and
   biological laterality without an inferred or mirrored hemisphere.

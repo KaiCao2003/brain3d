@@ -5,25 +5,45 @@ import Testing
 
 @Suite("Pinned major-vessel protocol")
 struct MajorVesselProtocolTests {
-    @Test("Exact binary geometry decodes with pinned provenance")
-    func validGeometry() throws {
+    @Test("Exact production bridge geometry decodes with pinned provenance")
+    func validGeometry() async throws {
         let payload = try geometryPayload()
         let result = try JSONDecoder().decode(MajorVesselGeometryResult.self, from: payload)
+        let dorsalProjection =
+            try await MajorVesselSliceOverlayGeometry.makeDorsalProjectionAsync(
+                geometry: result
+            )
 
         #expect(result.pointCount == MajorVesselContract.expectedPointCount)
         #expect(result.runCount == MajorVesselContract.expectedRunCount)
         #expect(result.segmentCount == MajorVesselContract.expectedSegmentCount)
+        #expect(
+            dorsalProjection.segments.count
+                == MajorVesselContract.expectedSegmentCount
+        )
+        #expect(
+            dorsalProjection.assetSHA256
+                == MajorVesselContract.derivedAssetSHA256
+        )
         #expect(result.graph.pointsASRMicrometres[0] == SIMD3<Float>(0.5, 0.5, 0.5))
         #expect(result.graph.radiiMicrometres[0] == 15.25)
         #expect(result.graph.runOffsets.first == 0)
         #expect(result.graph.runOffsets.last == MajorVesselContract.expectedPointCount)
         #expect(result.provenance.derivedAssetSha256 == MajorVesselContract.derivedAssetSHA256)
-        #expect(result.provenance.registrationTransformId == nil)
+        #expect(
+            result.provenance.registrationTransformId
+                == MajorVesselContract.registrationTransformId
+        )
         #expect(result.provenance.registrationUncertaintyBoundMicrometres == nil)
         #expect(result.provenance.tissueDistortionUncertaintyBoundMicrometres == nil)
         #expect(result.provenance.uncertaintyBoundsReviewed == false)
-        #expect(result.limitations.contains(where: {
+        #expect(
+            result.limitations.contains(where: {
             $0.localizedCaseInsensitiveContains("pial")
+        }))
+        #expect(
+            result.limitations.contains(where: {
+            $0.localizedCaseInsensitiveContains("not the current animal")
         }))
     }
 
@@ -130,6 +150,49 @@ struct MajorVesselProtocolTests {
         #expect(overlay.segments[0].endRadiusMicrometres == 21)
     }
 
+    @Test("Display diameter clips a tapered segment without changing source identity")
+    func taperedDisplayDiameterClip() throws {
+        let atlas = try atlasIdentity()
+        let graph = try MajorVesselGraph(
+            pointsASRMicrometres: [
+                SIMD3(25, 100, 50),
+                SIMD3(125, 200, 100),
+            ],
+            radiiMicrometres: [15, 35],
+            runOffsets: [0, 2],
+            sourceEdgeIndices: [17],
+            atlas: atlas,
+            minimumIncludedDiameterMicrometres: 30
+        )
+
+        let overlay = MajorVesselSliceOverlayGeometry.makeDorsalProjection(
+            graph: graph,
+            atlas: atlas,
+            assetSHA256: MajorVesselContract.derivedAssetSHA256,
+            minimumVisibleDiameterMicrometres: 50
+        )
+
+        #expect(overlay.assetSHA256 == MajorVesselContract.derivedAssetSHA256)
+        #expect(overlay.minimumVisibleDiameterMicrometres == 50)
+        #expect(overlay.segments.count == 1)
+        #expect(overlay.segments[0].start == ProbeSliceImagePoint(column: 3, row: 3))
+        #expect(overlay.segments[0].end == ProbeSliceImagePoint(column: 4, row: 5))
+        #expect(overlay.segments[0].startRadiusMicrometres == 25)
+        #expect(overlay.segments[0].endRadiusMicrometres == 35)
+        #expect(
+            MajorVesselDisplayFilter.visibleSegmentCount(
+                graph: graph,
+                minimumDiameterMicrometres: 50
+            ) == 1
+        )
+        #expect(
+            MajorVesselDisplayFilter.visibleSegmentCount(
+                graph: graph,
+                minimumDiameterMicrometres: 80
+            ) == 0
+        )
+    }
+
     private func geometryPayload() throws -> Data {
         let pointCount = MajorVesselContract.expectedPointCount
         let runCount = MajorVesselContract.expectedRunCount
@@ -142,10 +205,10 @@ struct MajorVesselProtocolTests {
         }
         let radii = [Float](repeating: 15.25, count: pointCount)
         var offsets = [Int64](repeating: 0, count: runCount + 1)
-        let longerRunCount = pointCount - runCount * 6
+        let longerRunCount = pointCount - runCount * 2
         var cursor = 0
         for run in 0 ..< runCount {
-            cursor += run < longerRunCount ? 7 : 6
+            cursor += run < longerRunCount ? 3 : 2
             offsets[run + 1] = Int64(cursor)
         }
         let edges = (0 ..< runCount).map(Int32.init)
@@ -162,8 +225,14 @@ struct MajorVesselProtocolTests {
             "sourceEdgeIndices": buffer(int32: edges, shape: [runCount]),
             "provenance": provenanceObject,
             "limitations": [
-                "Single cleared reference; not subject-specific anatomy.",
-                "Pial and choroidal vessels are excluded.",
+                "Animal research use only; this reference is not a medical device and is not validated for surgery.",
+                "Single fixed, cleared adult C57BL/6J specimen BL6J-no1; not the current animal and not a population prior.",
+                "Only centreline paths with radius at least 15 µm (diameter at least 30 µm) are included; capillaries and smaller vessels are intentionally omitted.",
+                "Registration and tissue-clearing distortion error bounds were not published and are not invented here.",
+                "The 50 µm centreline grid and public radius interpolation limit the spatial fidelity of the rendered paths.",
+                "Pial and choroidal coverage is not separately classified in the public source; visible surface coverage must not be interpreted as complete.",
+                "Display-only reference: it cannot establish clearance, vessel absence, trajectory suitability, or safety for an individual animal.",
+                "The pinned VesSAP source is CC BY-NC 4.0; downstream use must preserve attribution and non-commercial restrictions.",
             ],
             "atlas": atlasObject,
         ]
@@ -194,14 +263,14 @@ struct MajorVesselProtocolTests {
         [
             "sourceId": MajorVesselContract.sourceId,
             "sourceKind": "reference-individual-vessel-graph",
-            "datasetTitle": "Vascular graphs of the developing post-natal mouse brain",
-            "authors": ["Nicolas Renier", "Elisa de Launoit", "Sophie Skriabine"],
+            "datasetTitle": "Machine learning analysis of whole mouse brain vasculature",
+            "authors": ["Mihail I. Todorov", "Johannes C. Paetzold", "Ali Ertürk"],
             "specimenId": MajorVesselContract.specimenId,
             "sourceDoi": MajorVesselContract.sourceDoi,
             "sourceRecordUrl": MajorVesselContract.sourceRecordURL,
             "sourcePaperDoi": MajorVesselContract.sourcePaperDoi,
-            "sourceVersion": "P60_606 / 606_graph_2024-12-03.gt",
-            "sourceLicense": "CC BY 4.0",
+            "sourceVersion": "VesSAP public repository release 2021.10.01",
+            "sourceLicense": "CC BY-NC 4.0",
             "sourceArchiveDigest": MajorVesselContract.sourceArchiveDigest,
             "derivedAssetSha256": MajorVesselContract.derivedAssetSHA256,
             "extractionAlgorithmVersion": MajorVesselContract.extractionAlgorithmVersion,
@@ -213,10 +282,10 @@ struct MajorVesselProtocolTests {
             "atlasScaleApplied": true,
             "geometrySourceAudited": true,
             "subjectSpecific": false,
-            "pialVesselsExcluded": true,
-            "choroidalVesselsExcluded": true,
+            "pialVesselsExcluded": false,
+            "choroidalVesselsExcluded": false,
             "arteryVeinClassificationAvailable": false,
-            "registrationTransformId": NSNull(),
+            "registrationTransformId": MajorVesselContract.registrationTransformId,
             "registrationUncertaintyBoundMicrometres": NSNull(),
             "tissueDistortionUncertaintyBoundMicrometres": NSNull(),
             "uncertaintyBoundsReviewed": false,
@@ -260,7 +329,7 @@ struct MajorVesselProtocolTests {
             "byteOrder": "littleEndian",
             "shape": shape,
             "byteLength": data.count,
-            "sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+            "sha256": LowercaseHex.encode(SHA256.hash(data: data)),
             "dataBase64": data.base64EncodedString(),
         ]
     }

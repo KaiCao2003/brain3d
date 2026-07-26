@@ -117,7 +117,11 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
     public let calibratedTargetProjection: Bool?
     public let probeCatalog: Bool?
     public let calibratedProbePlanning: Bool?
+    public let atlasSurfaceProbePlanning: Bool?
     public let exactProbeRegionTraversal: Bool?
+    public let atlasRegionRecords: Bool?
+    public let atlasRegionSearch: Bool?
+    public let atlasRegionOverlay: Bool?
     public let atlasMeshDescriptor: Bool?
     public let atlasAnnotationRayPick: Bool?
     public let atlasDorsalRegionPick: Bool?
@@ -138,7 +142,11 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         case calibratedTargetProjection
         case probeCatalog
         case calibratedProbePlanning
+        case atlasSurfaceProbePlanning
         case exactProbeRegionTraversal
+        case atlasRegionRecords
+        case atlasRegionSearch
+        case atlasRegionOverlay
         case atlasMeshDescriptor
         case atlasAnnotationRayPick
         case atlasDorsalRegionPick
@@ -160,7 +168,11 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         calibratedTargetProjection: Bool? = nil,
         probeCatalog: Bool? = nil,
         calibratedProbePlanning: Bool? = nil,
+        atlasSurfaceProbePlanning: Bool? = nil,
         exactProbeRegionTraversal: Bool? = nil,
+        atlasRegionRecords: Bool? = nil,
+        atlasRegionSearch: Bool? = nil,
+        atlasRegionOverlay: Bool? = nil,
         atlasMeshDescriptor: Bool? = nil,
         atlasAnnotationRayPick: Bool? = nil,
         atlasDorsalRegionPick: Bool? = nil,
@@ -180,7 +192,11 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
         self.calibratedTargetProjection = calibratedTargetProjection
         self.probeCatalog = probeCatalog
         self.calibratedProbePlanning = calibratedProbePlanning
+        self.atlasSurfaceProbePlanning = atlasSurfaceProbePlanning
         self.exactProbeRegionTraversal = exactProbeRegionTraversal
+        self.atlasRegionRecords = atlasRegionRecords
+        self.atlasRegionSearch = atlasRegionSearch
+        self.atlasRegionOverlay = atlasRegionOverlay
         self.atlasMeshDescriptor = atlasMeshDescriptor
         self.atlasAnnotationRayPick = atlasAnnotationRayPick
         self.atlasDorsalRegionPick = atlasDorsalRegionPick
@@ -223,9 +239,25 @@ public struct BridgeCapabilities: Codable, Equatable, Sendable {
             Bool.self,
             forKey: .calibratedProbePlanning
         )
+        atlasSurfaceProbePlanning = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasSurfaceProbePlanning
+        )
         exactProbeRegionTraversal = try container.decodeIfPresent(
             Bool.self,
             forKey: .exactProbeRegionTraversal
+        )
+        atlasRegionRecords = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasRegionRecords
+        )
+        atlasRegionSearch = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasRegionSearch
+        )
+        atlasRegionOverlay = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .atlasRegionOverlay
         )
         atlasMeshDescriptor = try container.decodeIfPresent(
             Bool.self,

@@ -11,6 +11,8 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mouse_brain_planner.domain.atlas_reference_models import AtlasBregmaReference
+from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
 from mouse_brain_planner.domain.probe_models import (
     NormalizedProbePlacement,
@@ -28,6 +30,12 @@ STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION: Final[
 ] = "calibrated-stereotaxic-probe-transform-v2"
 PROBE_PLANNING_ALGORITHM_VERSION: Final[Literal["calibrated-explicit-placement-mode-v3"]] = (
     "calibrated-explicit-placement-mode-v3"
+)
+ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION: Final[
+    Literal["pinpoint-atlas-surface-ap-ml-depth-v4"]
+] = "pinpoint-atlas-surface-ap-ml-depth-v4"
+ATLAS_SURFACE_DEFINITION_VERSION: Final[Literal["first-annotated-voxel-superior-boundary-v1"]] = (
+    "first-annotated-voxel-superior-boundary-v1"
 )
 REGION_ANALYSIS_BUNDLE_VERSION: Final[Literal["probe-region-analysis-bundle-v1"]] = (
     "probe-region-analysis-bundle-v1"
@@ -60,6 +68,7 @@ class ProbePlacementMode(StrEnum):
     ENTRY_ANGLES_DEPTH = "ENTRY_ANGLES_DEPTH"
     TARGET_ANGLES_DEPTH = "TARGET_ANGLES_DEPTH"
     STEREOTAXIC_TARGET_MANIPULATOR = "STEREOTAXIC_TARGET_MANIPULATOR"
+    ATLAS_SURFACE_AP_ML = "ATLAS_SURFACE_AP_ML"
 
     @property
     def placement_method(self) -> PlacementMethod:
@@ -70,6 +79,7 @@ class ProbePlacementMode(StrEnum):
             ProbePlacementMode.STEREOTAXIC_TARGET_MANIPULATOR: (
                 PlacementMethod.STEREOTAXIC_TARGET_MANIPULATOR
             ),
+            ProbePlacementMode.ATLAS_SURFACE_AP_ML: PlacementMethod.ATLAS_SURFACE_AP_ML,
         }[self]
 
 
@@ -139,6 +149,82 @@ class ProbePlacementInput(BaseModel):
         return self
 
 
+class AtlasSurfaceProbeInput(BaseModel):
+    """Exact direct-planning controls plus the resolved atlas-surface evidence."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    mode: Literal["ATLAS_SURFACE_AP_ML"] = "ATLAS_SURFACE_AP_ML"
+    bregma_reference: AtlasBregmaReference
+    insertion_ap_mm: FiniteFloat
+    insertion_ml_mm: FiniteFloat
+    surface_depth_mm: PositiveFiniteFloat
+    sagittal_angle_deg: FiniteFloat = Field(gt=-90, lt=90)
+    probe_layout_rotation_deg: Literal[0, 90]
+    surface_entry_physical: BrainGlobePhysicalPoint
+    surface_dv_index: int = Field(ge=0)
+    surface_dv_resolution_um: PositiveFiniteFloat
+    annotation_source: str = Field(min_length=1, max_length=500)
+    annotation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    surface_definition_version: Literal["first-annotated-voxel-superior-boundary-v1"] = (
+        ATLAS_SURFACE_DEFINITION_VERSION
+    )
+    ap_sign_convention: Literal["AP positive anterior; AP negative posterior/back"] = (
+        "AP positive anterior; AP negative posterior/back"
+    )
+    ml_sign_convention: Literal["ML positive animal right; ML negative animal left"] = (
+        "ML positive animal right; ML negative animal left"
+    )
+    depth_convention: Literal[
+        "positive path length from the resolved atlas brain-surface entry"
+    ] = "positive path length from the resolved atlas brain-surface entry"
+    angle_convention: Literal[
+        "zero is deep/ventral; positive advances anterior-to-posterior; "
+        "negative advances posterior-to-anterior"
+    ] = (
+        "zero is deep/ventral; positive advances anterior-to-posterior; "
+        "negative advances posterior-to-anterior"
+    )
+    layout_convention: Literal[
+        "0 degrees places the shank array in the sagittal plane; "
+        "90 degrees rotates it clockwise when viewed dorsally"
+    ] = (
+        "0 degrees places the shank array in the sagittal plane; "
+        "90 degrees rotates it clockwise when viewed dorsally"
+    )
+
+    @field_validator("probe_layout_rotation_deg", mode="before")
+    @classmethod
+    def reject_boolean_layout_rotation(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("probe layout rotation must be 0 or 90 degrees")
+        return value
+
+    @model_validator(mode="after")
+    def validate_reference_identity(self) -> Self:
+        reference_identity = (
+            self.bregma_reference.atlas_key,
+            self.bregma_reference.atlas_version,
+        )
+        entry_identity = (
+            self.surface_entry_physical.atlas_key,
+            self.surface_entry_physical.atlas_version,
+        )
+        if entry_identity != reference_identity:
+            raise ValueError("surface entry atlas identity does not match bregma reference")
+        expected_ap_um = self.bregma_reference.ap_um - self.insertion_ap_mm * 1000.0
+        expected_ml_um = self.bregma_reference.ml_um - self.insertion_ml_mm * 1000.0
+        if not (
+            abs(self.surface_entry_physical.ap_um - expected_ap_um) <= 1e-6
+            and abs(self.surface_entry_physical.ml_um - expected_ml_um) <= 1e-6
+        ):
+            raise ValueError("surface entry AP/ML does not match bregma-relative input")
+        expected_dv_um = self.surface_dv_index * self.surface_dv_resolution_um
+        if abs(self.surface_entry_physical.dv_um - expected_dv_um) > 1e-6:
+            raise ValueError("surface entry is not the recorded superior voxel boundary")
+        return self
+
+
 class ProbePlanRecord(BaseModel):
     """One editable plan version tied to exact calibration and atlas inputs."""
 
@@ -148,20 +234,22 @@ class ProbePlanRecord(BaseModel):
     plan_uuid: UUID = Field(default_factory=uuid4)
     plan_version: int = Field(gt=0)
     name: str = Field(min_length=1, max_length=200)
-    source_target: UnprojectedBregmaTarget
+    source_target: UnprojectedBregmaTarget | None
     probe_model: ProbeModelDefinition
     manipulator_input: ProbeManipulatorInput | None = None
     placement_input: ProbePlacementInput | None = None
+    surface_relative_input: AtlasSurfaceProbeInput | None = None
     placement: NormalizedProbePlacement
-    calibration_uuid: UUID
-    calibration_version: int = Field(gt=0)
-    calibration_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    calibration_uuid: UUID | None = None
+    calibration_version: int | None = Field(default=None, gt=0)
+    calibration_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     atlas_metadata_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     projection_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     planning_algorithm_version: Literal[
         "calibrated-target-angle-depth-v1",
         "calibrated-stereotaxic-probe-transform-v2",
         "calibrated-explicit-placement-mode-v3",
+        "pinpoint-atlas-surface-ap-ml-depth-v4",
     ] = LEGACY_PROBE_PLANNING_ALGORITHM_VERSION
     input_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=_utc_now)
@@ -196,11 +284,36 @@ class ProbePlanRecord(BaseModel):
             raise ValueError("probe plan model snapshot does not match placement identity")
         if self.placement.name != self.name:
             raise ValueError("probe plan name does not match normalized placement name")
-        if self.placement.context.subject_id is None:
+        is_surface_plan = (
+            self.planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION
+        )
+        if self.placement.context.subject_id is None and not is_surface_plan:
             raise ValueError("probe plan requires an explicit animal subject ID")
-        if self.source_target.projected:
+        if self.source_target is not None and self.source_target.projected:
             raise ValueError("probe plan source must preserve the original unprojected target")
-        if self.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION:
+        if not is_surface_plan:
+            if self.source_target is None:
+                raise ValueError("v1-v3 probe plans require an unprojected source target")
+            if (
+                self.calibration_uuid is None
+                or self.calibration_version is None
+                or self.calibration_sha256 is None
+            ):
+                raise ValueError("v1-v3 probe plans require exact calibration provenance")
+            if self.surface_relative_input is not None:
+                raise ValueError("v1-v3 probe plans cannot contain atlas-surface inputs")
+        if self.planning_algorithm_version == LEGACY_PROBE_PLANNING_ALGORITHM_VERSION:
+            if self.manipulator_input is not None or self.placement_input is not None:
+                raise ValueError("v1 probe plans cannot contain later-version planning inputs")
+            if self.placement.method is not PlacementMethod.TARGET_ANGLES_DEPTH:
+                raise ValueError("v1 probe plans require direct atlas target-angle placement")
+            if (
+                self.placement.local_lateral_direction is not None
+                or self.placement.local_normal_direction is not None
+                or self.placement.model_to_placement_uniform_scale != 1
+            ):
+                raise ValueError("v1 probe plans require unresolved legacy cross-section geometry")
+        elif self.planning_algorithm_version == STEREOTAXIC_PROBE_PLANNING_ALGORITHM_VERSION:
             if self.manipulator_input is None:
                 raise ValueError("v2 probe plans require preserved manipulator inputs")
             if self.placement.method.value != "stereotaxic-target-plus-manipulator-angles":
@@ -233,6 +346,26 @@ class ProbePlanRecord(BaseModel):
                     raise ValueError("placement input does not match preserved manipulator input")
             elif self.manipulator_input is not None:
                 raise ValueError("non-manipulator placement modes cannot contain manipulator input")
+        elif is_surface_plan:
+            if (
+                self.source_target is not None
+                or self.manipulator_input is not None
+                or self.placement_input is not None
+            ):
+                raise ValueError("v4 atlas-surface plans cannot contain legacy target inputs")
+            if any(
+                value is not None
+                for value in (
+                    self.calibration_uuid,
+                    self.calibration_version,
+                    self.calibration_sha256,
+                )
+            ):
+                raise ValueError("v4 atlas-surface plans cannot claim a subject calibration")
+            if self.surface_relative_input is None:
+                raise ValueError("v4 atlas-surface plans require preserved direct inputs")
+            if self.placement.method is not PlacementMethod.ATLAS_SURFACE_AP_ML:
+                raise ValueError("v4 atlas-surface plan has the wrong placement method")
         expected = probe_plan_input_digest(
             plan_uuid=self.plan_uuid,
             plan_version=self.plan_version,
@@ -241,6 +374,7 @@ class ProbePlanRecord(BaseModel):
             probe_model=self.probe_model,
             manipulator_input=self.manipulator_input,
             placement_input=self.placement_input,
+            surface_relative_input=self.surface_relative_input,
             placement=self.placement,
             calibration_uuid=self.calibration_uuid,
             calibration_version=self.calibration_version,
@@ -307,20 +441,22 @@ def probe_plan_input_digest(
     plan_uuid: UUID,
     plan_version: int,
     name: str,
-    source_target: UnprojectedBregmaTarget,
+    source_target: UnprojectedBregmaTarget | None,
     probe_model: ProbeModelDefinition,
-    manipulator_input: ProbeManipulatorInput | None = None,
-    placement_input: ProbePlacementInput | None = None,
     placement: NormalizedProbePlacement,
-    calibration_uuid: UUID,
-    calibration_version: int,
-    calibration_sha256: str,
+    calibration_uuid: UUID | None,
+    calibration_version: int | None,
+    calibration_sha256: str | None,
     atlas_metadata_sha256: str,
     projection_sha256: str,
+    manipulator_input: ProbeManipulatorInput | None = None,
+    placement_input: ProbePlacementInput | None = None,
+    surface_relative_input: AtlasSurfaceProbeInput | None = None,
     planning_algorithm_version: Literal[
         "calibrated-target-angle-depth-v1",
         "calibrated-stereotaxic-probe-transform-v2",
         "calibrated-explicit-placement-mode-v3",
+        "pinpoint-atlas-surface-ap-ml-depth-v4",
     ] = LEGACY_PROBE_PLANNING_ALGORITHM_VERSION,
 ) -> str:
     """Hash every input that can change displayed or analyzed geometry."""
@@ -334,10 +470,10 @@ def probe_plan_input_digest(
         "planUuid": str(plan_uuid),
         "planVersion": plan_version,
         "name": name,
-        "sourceTarget": source_target.model_dump(mode="json"),
+        "sourceTarget": (None if source_target is None else source_target.model_dump(mode="json")),
         "probeModel": probe_model.model_dump(mode="json"),
         "placement": placement_payload,
-        "calibrationUuid": str(calibration_uuid),
+        "calibrationUuid": None if calibration_uuid is None else str(calibration_uuid),
         "calibrationVersion": calibration_version,
         "calibrationSha256": calibration_sha256,
         "atlasMetadataSha256": atlas_metadata_sha256,
@@ -354,6 +490,12 @@ def probe_plan_input_digest(
     if planning_algorithm_version == PROBE_PLANNING_ALGORITHM_VERSION:
         payload["placementInput"] = (
             None if placement_input is None else placement_input.model_dump(mode="json")
+        )
+    if planning_algorithm_version == ATLAS_SURFACE_PROBE_PLANNING_ALGORITHM_VERSION:
+        payload["surfaceRelativeInput"] = (
+            None
+            if surface_relative_input is None
+            else surface_relative_input.model_dump(mode="json")
         )
     return _canonical_sha256(payload)
 

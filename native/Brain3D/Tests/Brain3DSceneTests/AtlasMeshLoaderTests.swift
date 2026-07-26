@@ -41,6 +41,92 @@ struct AtlasMeshLoaderTests {
         }
     }
 
+    @Test("The bounded cache evicts the least-recently-used mesh")
+    @MainActor
+    func leastRecentlyUsedEviction() async throws {
+        let first = try makeFixture()
+        let second = try makeFixture()
+        let third = try makeFixture()
+        defer {
+            for fixture in [first, second, third] {
+                try? FileManager.default.removeItem(at: fixture.root)
+            }
+        }
+        let firstDescriptor = try descriptor(for: first)
+        let secondDescriptor = try descriptor(for: second)
+        let thirdDescriptor = try descriptor(for: third)
+        let loader = AtlasMeshLoader(
+            maximumCachedMeshCount: 2,
+            maximumCachedSourceBytes: 1_024 * 1_024
+        )
+
+        let firstLoad = try await loader.load(firstDescriptor)
+        _ = try await loader.load(secondDescriptor)
+        let refreshedFirst = try await loader.load(firstDescriptor)
+        _ = try await loader.load(thirdDescriptor)
+        #expect(firstLoad === refreshedFirst)
+
+        try FileManager.default.removeItem(at: second.root)
+        await #expect(throws: AtlasMeshLoadError.self) {
+            try await loader.load(secondDescriptor)
+        }
+
+        try FileManager.default.removeItem(at: first.root)
+        try FileManager.default.removeItem(at: third.root)
+        #expect(try await loader.load(firstDescriptor) === firstLoad)
+        _ = try await loader.load(thirdDescriptor)
+    }
+
+    @Test("The cache byte budget evicts an older mesh even below the count limit")
+    @MainActor
+    func descriptorByteBudgetEviction() async throws {
+        let first = try makeFixture()
+        let second = try makeFixture()
+        defer {
+            for fixture in [first, second] {
+                try? FileManager.default.removeItem(at: fixture.root)
+            }
+        }
+        let firstDescriptor = try descriptor(for: first)
+        let secondDescriptor = try descriptor(for: second)
+        let loader = AtlasMeshLoader(
+            maximumCachedMeshCount: 8,
+            maximumCachedSourceBytes: first.byteSize
+        )
+
+        _ = try await loader.load(firstDescriptor)
+        let secondLoad = try await loader.load(secondDescriptor)
+        try FileManager.default.removeItem(at: first.root)
+        await #expect(throws: AtlasMeshLoadError.self) {
+            try await loader.load(firstDescriptor)
+        }
+
+        try FileManager.default.removeItem(at: second.root)
+        #expect(try await loader.load(secondDescriptor) === secondLoad)
+    }
+
+    @Test("A digest hit cannot bypass the current descriptor-locked path")
+    func cacheKeyPreservesDescriptorLock() async throws {
+        let first = try makeFixture()
+        let sameBytesAtAnotherPath = try makeFixture()
+        defer {
+            for fixture in [first, sameBytesAtAnotherPath] {
+                try? FileManager.default.removeItem(at: fixture.root)
+            }
+        }
+        #expect(first.sha256 == sameBytesAtAnotherPath.sha256)
+        let firstDescriptor = try descriptor(for: first)
+        let missingDescriptor = try descriptor(for: sameBytesAtAnotherPath)
+        let loader = AtlasMeshLoader()
+
+        _ = try await loader.load(firstDescriptor)
+        try FileManager.default.removeItem(at: sameBytesAtAnotherPath.root)
+
+        await #expect(throws: AtlasMeshLoadError.self) {
+            try await loader.load(missingDescriptor)
+        }
+    }
+
     private func makeFixture() throws -> (root: URL, obj: URL, sha256: String, byteSize: Int) {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("brain3d-scene-\(UUID().uuidString)", isDirectory: true)
@@ -58,12 +144,23 @@ struct AtlasMeshLoaderTests {
             """.utf8
         )
         try data.write(to: obj, options: .atomic)
-        let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let sha = LowercaseHex.encode(SHA256.hash(data: data))
         return (
             root.standardizedFileURL,
             obj.standardizedFileURL,
             sha,
             data.count
+        )
+    }
+
+    private func descriptor(
+        for fixture: (root: URL, obj: URL, sha256: String, byteSize: Int)
+    ) throws -> AtlasMeshDescriptor {
+        try decodeDescriptor(
+            url: fixture.obj,
+            root: fixture.root,
+            sha256: fixture.sha256,
+            byteSize: fixture.byteSize
         )
     }
 

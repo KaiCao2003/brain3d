@@ -41,10 +41,11 @@ enum MajorVesselNodeFactory {
         node.name = "reference-major-vessel-tubes"
         node.categoryBitMask = SceneCategory.majorVessel.rawValue
         node.simdTransform = transform.sourceToSceneMatrix
-        // The contextual brain shell deliberately does not write depth. The
-        // vessel and probe overlays share this depth-tested pass so their
-        // front/back relationship follows calibrated geometry, not draw order.
-        node.renderingOrder = 20
+        // Reference vessels are a planning overlay inside a closed atlas shell.
+        // Draw them after anatomical context but before the selected probe and
+        // conflict glyphs. Their coordinates and radii remain calibrated; only
+        // shell occlusion is intentionally removed.
+        node.renderingOrder = 10
         node.opacity = 1
         node.castsShadow = false
         return node
@@ -69,8 +70,12 @@ enum MajorVesselNodeFactory {
         material.transparency = 1
         material.blendMode = .replace
         material.isDoubleSided = true
-        material.readsFromDepthBuffer = true
-        material.writesToDepthBuffer = true
+        // SceneKit's offscreen Metal renderer can depth-fill imported OBJ
+        // transparency even when the shell material itself does not request
+        // depth writes. An x-ray overlay is therefore required for the same
+        // trustworthy interior graph to remain visible in live and PDF views.
+        material.readsFromDepthBuffer = false
+        material.writesToDepthBuffer = false
         return material
     }
 }

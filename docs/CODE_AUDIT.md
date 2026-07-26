@@ -6,7 +6,8 @@ Audit baseline: `main` commit `51fe26d637b700d39944bbee86e3ea42ded4e7a2`, review
 > **Historical snapshot:** every present-tense “current” statement below refers to that baseline,
 > not the current development tree. A later refactor made calibration, target projection, probe
 > planning/region traversal, SceneKit 3D, and temporarily the LAMBADA/V3 path product-reachable.
-> The current digest-bound qualification gate rejects P60_606 geometry and analysis. See
+> The current digest-bound qualification gate rejects P60_606 geometry and analysis; a separate
+> VesSAP BL6J-no1 derivative is now available as display-only geometry. See
 > [Project Status](../PROJECT_STATUS.md) for the live inventory.
 
 This document records evidence about what is reachable from the supported product, what is only

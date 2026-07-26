@@ -1,8 +1,9 @@
 import Brain3DCore
-@testable import Brain3DScene
 import Foundation
-import simd
 import Testing
+import simd
+
+@testable import Brain3DScene
 
 @Suite("Radius-bearing reference major-vessel tubes")
 struct MajorVesselTubeMeshBuilderTests {
@@ -42,6 +43,41 @@ struct MajorVesselTubeMeshBuilderTests {
         #expect(indices[36 ..< 72].allSatisfy { $0 >= 12 && $0 < 24 })
     }
 
+    @Test("3D mesh clips tapered runs at the display diameter")
+    func displayDiameterFilter() throws {
+        let mesh = try MajorVesselTubeMeshBuilder.build(
+            pointsASRMicrometres: [
+                SIMD3(0, 0, 0),
+                SIMD3(100, 0, 0),
+                SIMD3(200, 0, 0),
+            ],
+            radiiMicrometres: [15, 35, 15],
+            runOffsets: [0, 3],
+            minimumVisibleDiameterMicrometres: 50
+        )
+
+        #expect(mesh.visibleSourceSegmentCount == 2)
+        #expect(mesh.vertexCount == 3 * MajorVesselTubeMeshBuilder.sideCount)
+        #expect(mesh.triangleCount == 24)
+        let first = vector(from: mesh.vertexData, at: 0)
+        let last = vector(
+            from: mesh.vertexData,
+            at: mesh.vertexCount - MajorVesselTubeMeshBuilder.sideCount
+        )
+        #expect(abs(simd_distance(first, SIMD3<Float>(50, 0, 0)) - 25) < 0.001)
+        #expect(abs(simd_distance(last, SIMD3<Float>(150, 0, 0)) - 25) < 0.001)
+
+        let hidden = try MajorVesselTubeMeshBuilder.build(
+            pointsASRMicrometres: [SIMD3(0, 0, 0), SIMD3(100, 0, 0)],
+            radiiMicrometres: [15, 35],
+            runOffsets: [0, 2],
+            minimumVisibleDiameterMicrometres: 80
+        )
+        #expect(hidden.visibleSourceSegmentCount == 0)
+        #expect(hidden.vertexCount == 0)
+        #expect(hidden.triangleCount == 0)
+    }
+
     @Test("Zero-length vessel segments fail closed")
     func zeroLengthRejected() {
         #expect(throws: AtlasSceneContractError.self) {
@@ -73,6 +109,30 @@ struct MajorVesselTubeMeshBuilderTests {
         #expect(node.geometry?.elements.first?.primitiveType == .triangles)
         #expect(node.categoryBitMask == SceneCategory.majorVessel.rawValue)
         #expect(node.simdTransform == transform.sourceToSceneMatrix)
+    }
+
+    @Test("Cancelling an async rebuild stops its detached mesh worker")
+    func asyncCancellation() async {
+        let pointCount = 100_000
+        let points = (0..<pointCount).map {
+            SIMD3<Float>(Float($0), 0, 0)
+        }
+        let radii = [Float](repeating: 25, count: pointCount)
+        let worker = Task {
+            try await MajorVesselTubeMeshBuilder.buildAsync(
+                pointsASRMicrometres: points,
+                radiiMicrometres: radii,
+                runOffsets: [0, pointCount],
+                minimumVisibleDiameterMicrometres: 30
+            )
+        }
+
+        await Task.yield()
+        worker.cancel()
+
+        await #expect(throws: CancellationError.self) {
+            try await worker.value
+        }
     }
 
     @Test("Production cardinality fits one deterministic batch")
@@ -110,7 +170,14 @@ struct MajorVesselTubeMeshBuilderTests {
         )
         #expect(
             mesh.vertexData.count + mesh.normalData.count + mesh.indexData.count
-                == 18_836_352
+                == pointCount * MajorVesselTubeMeshBuilder.sideCount
+                    * MemoryLayout<Float>.size * 3 * 2
+                    + segmentCount * MajorVesselTubeMeshBuilder.sideCount
+                    * 6 * MemoryLayout<UInt32>.size
+        )
+        #expect(
+            mesh.vertexData.count + mesh.normalData.count + mesh.indexData.count
+                < 48 * 1_024 * 1_024
         )
     }
 

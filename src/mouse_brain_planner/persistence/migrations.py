@@ -5,7 +5,12 @@ from __future__ import annotations
 import copy
 import math
 from typing import Any
+from uuid import UUID
 
+from pydantic import ValidationError
+
+from mouse_brain_planner.domain.implant_site_models import UnprojectedBregmaTarget
+from mouse_brain_planner.domain.project_models import MAX_UNPROJECTED_BREGMA_TARGETS
 from mouse_brain_planner.version import PROJECT_SCHEMA_VERSION
 
 
@@ -21,8 +26,20 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
     coordinate-entry targets. Schema 4 adds versioned subject calibrations and
     an explicit active-calibration UUID. Schema 5 adds persisted probe plans
     and exact region-analysis bundles. Schema 6 persists the monotonic project
-    revision and plan-linked major-vessel analysis bundles. Earlier projects
-    default new state to empty without altering any legacy AP/ML/DV target.
+    revision and plan-linked major-vessel analysis bundles. Schema 7 makes
+    every probe plan's immutable source-target snapshot a required project
+    target. Legacy schema-5/6 projects could delete that target while retaining
+    the plan, so migration restores an unambiguous missing snapshot instead of
+    weakening the current referential-integrity invariant. Schema 8 versions
+    the fail-closed calibration and probe semantic-validation contract. Its
+    migration only copies the schema-7 payload and bumps the version: current
+    ``PlannerProject`` validation may then accept coherent state or reject
+    unsafe legacy geometry, but migration never repairs or reinterprets it.
+    Schema 9 adds the optional calibration-free atlas-surface probe-plan
+    representation. Existing schema-8 plans retain their exact target and
+    calibration semantics; migration only advances the envelope version.
+    Earlier projects otherwise default new state to empty without altering
+    legacy AP/ML/DV coordinates.
     """
 
     version = payload.get("schema_version")
@@ -34,22 +51,50 @@ def migrate_project_payload(payload: dict[str, Any]) -> dict[str, Any]:
         missing = {"project_revision", "probe_vessel_analyses"} - set(payload)
         if missing:
             raise UnsupportedProjectSchemaError(
-                "schema 6 project is missing required persisted state: "
+                f"schema {PROJECT_SCHEMA_VERSION} project is missing required persisted state: "
                 + ", ".join(sorted(missing))
             )
         return payload
     if version == 1:
-        return _migrate_v5_to_v6(
-            _migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload))))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(
+                _migrate_v6_to_v7(
+                    _migrate_v5_to_v6(
+                        _migrate_v4_to_v5(
+                            _migrate_v3_to_v4(_migrate_v2_to_v3(_migrate_v1_to_v2(payload)))
+                        )
+                    )
+                )
+            )
         )
     if version == 2:
-        return _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload))))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(
+                _migrate_v6_to_v7(
+                    _migrate_v5_to_v6(
+                        _migrate_v4_to_v5(_migrate_v3_to_v4(_migrate_v2_to_v3(payload)))
+                    )
+                )
+            )
+        )
     if version == 3:
-        return _migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload)))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(
+                _migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(_migrate_v3_to_v4(payload))))
+            )
+        )
     if version == 4:
-        return _migrate_v5_to_v6(_migrate_v4_to_v5(payload))
+        return _migrate_v8_to_v9(
+            _migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(_migrate_v4_to_v5(payload))))
+        )
     if version == 5:
-        return _migrate_v5_to_v6(payload)
+        return _migrate_v8_to_v9(_migrate_v7_to_v8(_migrate_v6_to_v7(_migrate_v5_to_v6(payload))))
+    if version == 6:
+        return _migrate_v8_to_v9(_migrate_v7_to_v8(_migrate_v6_to_v7(payload)))
+    if version == 7:
+        return _migrate_v8_to_v9(_migrate_v7_to_v8(payload))
+    if version == 8:
+        return _migrate_v8_to_v9(payload)
     raise UnsupportedProjectSchemaError(
         f"project schema {version!r} cannot be migrated to {PROJECT_SCHEMA_VERSION}"
     )
@@ -182,6 +227,117 @@ def _migrate_v5_to_v6(payload: dict[str, Any]) -> dict[str, Any]:
         migrated[field] = copy.deepcopy(default)
     migrated["schema_version"] = 6
     return migrated
+
+
+def _migrate_v6_to_v7(payload: dict[str, Any]) -> dict[str, Any]:
+    """Restore unambiguous plan source targets deleted under schema 6.
+
+    Schema 6 required target UUID uniqueness but did not require a plan's
+    immutable ``source_target`` snapshot to remain in the project target list.
+    Preserve the existing target order, then append each missing source target
+    in first-plan-reference order. Identical references are coalesced. Any
+    duplicate project UUID or differing snapshots for one UUID are ambiguous
+    and therefore rejected rather than guessed.
+    """
+
+    migrated = copy.deepcopy(payload)
+    raw_targets = migrated.get("unprojected_bregma_targets")
+    if not isinstance(raw_targets, list):
+        raise UnsupportedProjectSchemaError("schema 6 unprojected_bregma_targets must be an array")
+    raw_plans = migrated.get("probe_plans")
+    if not isinstance(raw_plans, list):
+        raise UnsupportedProjectSchemaError("schema 6 probe_plans must be an array")
+
+    targets_by_id: dict[UUID, UnprojectedBregmaTarget] = {}
+    for index, raw_target in enumerate(raw_targets):
+        target = _schema_six_target(raw_target, field=f"unprojected_bregma_targets[{index}]")
+        if target.target_uuid in targets_by_id:
+            raise UnsupportedProjectSchemaError(
+                "schema 6 unprojected_bregma_targets contains duplicate target UUID "
+                f"{target.target_uuid}"
+            )
+        targets_by_id[target.target_uuid] = target
+
+    referenced_by_id: dict[UUID, UnprojectedBregmaTarget] = {}
+    missing_targets: list[dict[str, Any]] = []
+    for index, raw_plan in enumerate(raw_plans):
+        if not isinstance(raw_plan, dict):
+            raise UnsupportedProjectSchemaError(f"schema 6 probe_plans[{index}] must be an object")
+        source = _schema_six_target(
+            raw_plan.get("source_target"),
+            field=f"probe_plans[{index}].source_target",
+        )
+        previous_source = referenced_by_id.get(source.target_uuid)
+        if previous_source is not None and previous_source != source:
+            raise UnsupportedProjectSchemaError(
+                "schema 6 probe plans contain conflicting source-target snapshots for UUID "
+                f"{source.target_uuid}"
+            )
+        referenced_by_id[source.target_uuid] = source
+
+        current = targets_by_id.get(source.target_uuid)
+        if current is not None:
+            if current != source:
+                raise UnsupportedProjectSchemaError(
+                    "schema 6 project target conflicts with a probe-plan source snapshot for UUID "
+                    f"{source.target_uuid}"
+                )
+            continue
+        if previous_source is None:
+            restored = source.model_dump(mode="json")
+            missing_targets.append(restored)
+            targets_by_id[source.target_uuid] = source
+
+    if len(raw_targets) + len(missing_targets) > MAX_UNPROJECTED_BREGMA_TARGETS:
+        raise UnsupportedProjectSchemaError(
+            "schema 6 source-target restoration would exceed the schema 7 target limit "
+            f"of {MAX_UNPROJECTED_BREGMA_TARGETS}"
+        )
+    migrated["unprojected_bregma_targets"] = [*raw_targets, *missing_targets]
+    migrated["schema_version"] = 7
+    return migrated
+
+
+def _migrate_v7_to_v8(payload: dict[str, Any]) -> dict[str, Any]:
+    """Version the fail-closed persisted semantic-validation contract.
+
+    Do not infer, rewrite, or repair calibration/probe geometry here. The
+    current project model validates the structurally preserved payload and
+    provides the actionable rejection when legacy state is unsafe.
+    """
+
+    missing = {"project_revision", "probe_vessel_analyses"} - set(payload)
+    if missing:
+        raise UnsupportedProjectSchemaError(
+            "schema 7 project is missing required persisted state: " + ", ".join(sorted(missing))
+        )
+    migrated = copy.deepcopy(payload)
+    migrated["schema_version"] = 8
+    return migrated
+
+
+def _migrate_v8_to_v9(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add no inferred geometry while enabling the new v4 plan representation."""
+
+    missing = {"project_revision", "probe_vessel_analyses"} - set(payload)
+    if missing:
+        raise UnsupportedProjectSchemaError(
+            "schema 8 project is missing required persisted state: " + ", ".join(sorted(missing))
+        )
+    migrated = copy.deepcopy(payload)
+    migrated["schema_version"] = 9
+    return migrated
+
+
+def _schema_six_target(raw_target: object, *, field: str) -> UnprojectedBregmaTarget:
+    """Validate one legacy target snapshot without accepting partial identity."""
+
+    try:
+        return UnprojectedBregmaTarget.model_validate(raw_target)
+    except ValidationError as error:
+        raise UnsupportedProjectSchemaError(
+            f"schema 6 {field} is not a valid source-target snapshot"
+        ) from error
 
 
 def _positive_integer_triplet(value: object, field: str) -> tuple[int, int, int]:

@@ -14,6 +14,10 @@ enum ProbeEnvelopeNodeFactory {
         container.categoryBitMask = SceneCategory.probe.rawValue
         guard let plan else { return container }
         guard plan.hasCurrentPlanningGeometry else { return container }
+        try validateDirectProductShanks(
+            modelId: plan.modelId,
+            shanks: plan.shanks
+        )
 
         return try makeNode(
             for: plan.shanks,
@@ -32,9 +36,9 @@ enum ProbeEnvelopeNodeFactory {
         container.name = "selected-probe-envelope"
         container.categoryBitMask = SceneCategory.probe.rawValue
         for shank in shanks {
-            let entry = try transform.scenePoint(shank.entry)
+            let proximalEnd = try transform.scenePoint(shank.renderedProximalEnd)
             let tip = try transform.scenePoint(shank.tip)
-            let delta = tip - entry
+            let delta = tip - proximalEnd
             let length = simd_length(delta)
             let radius = Float(
                 shank.conservativeEnvelopeRadiusMicrometres
@@ -56,7 +60,7 @@ enum ProbeEnvelopeNodeFactory {
             geometry.materials = [material(usableForNavigation: usableForNavigation)]
             let node = SCNNode(geometry: geometry)
             node.name = "probe-shank-\(shank.shankId)"
-            node.simdPosition = (entry + tip) * 0.5
+            node.simdPosition = (proximalEnd + tip) * 0.5
             node.simdOrientation = orientation(fromYAxisTo: delta / length)
             node.categoryBitMask = SceneCategory.probe.rawValue
             node.renderingOrder = 20
@@ -64,6 +68,48 @@ enum ProbeEnvelopeNodeFactory {
             container.addChildNode(node)
         }
         return container
+    }
+
+    static func expectedShankCount(forDirectModelId modelId: String) -> Int? {
+        switch modelId {
+        case ProbePlanningContract.neuropixels2SingleShankModelId:
+            1
+        case ProbePlanningContract.neuropixels2StandardFourShankModelId:
+            4
+        default:
+            nil
+        }
+    }
+
+    static func validateDirectProductShanks(
+        modelId: String,
+        shanks: [ProbePlacedShank]
+    ) throws {
+        guard let expectedCount = expectedShankCount(forDirectModelId: modelId) else {
+            return
+        }
+        guard shanks.count == expectedCount else {
+            throw AtlasSceneContractError.invalid(
+                "\(modelId) requires exactly \(expectedCount) distinct 3D shank"
+                    + (expectedCount == 1 ? "." : "s.")
+            )
+        }
+
+        let centerlines = shanks.map { shank in
+            [
+                shank.renderedProximalEnd.apMicrometres,
+                shank.renderedProximalEnd.dvMicrometres,
+                shank.renderedProximalEnd.mlMicrometres,
+                shank.tip.apMicrometres,
+                shank.tip.dvMicrometres,
+                shank.tip.mlMicrometres,
+            ]
+        }
+        guard Set(centerlines).count == expectedCount else {
+            throw AtlasSceneContractError.invalid(
+                "\(modelId) contains coincident 3D shank centerlines."
+            )
+        }
     }
 
     private static func orientation(fromYAxisTo direction: SIMD3<Float>) -> simd_quatf {
@@ -77,14 +123,17 @@ enum ProbeEnvelopeNodeFactory {
     private static func material(usableForNavigation: Bool) -> SCNMaterial {
         let material = SCNMaterial()
         material.name = "probe-conservative-envelope"
-        material.diffuse.contents = usableForNavigation
-            ? NSColor.systemYellow
-            : NSColor.systemOrange
-        material.emission.contents = NSColor.systemOrange.withAlphaComponent(0.14)
-        material.lightingModel = .physicallyBased
-        material.roughness.contents = 0.42
-        material.metalness.contents = 0.08
+        let color = usableForNavigation ? NSColor.systemYellow : NSColor.systemOrange
+        material.diffuse.contents = color
+        material.emission.contents = color
+        material.lightingModel = .constant
         material.isDoubleSided = true
+        // The probe is planning geometry, not an anatomical surface. Render it
+        // as an x-ray overlay so an atlas shell cannot hide an intracranial
+        // trajectory on SceneKit/Metal implementations that flatten imported
+        // OBJ transparency.
+        material.readsFromDepthBuffer = false
+        material.writesToDepthBuffer = false
         return material
     }
 }
@@ -94,4 +143,6 @@ enum SceneCategory: Int {
     case probe = 2
     case majorVessel = 4
     case selectedVesselConflict = 8
+    case highlightedRegion = 16
+    case implantSite = 32
 }

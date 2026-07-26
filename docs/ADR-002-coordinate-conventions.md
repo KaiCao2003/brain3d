@@ -77,8 +77,8 @@ not contain an unqualified `coordinates: [a, b, c]` field.
 | `BRAINGLOBE_VOXEL_ASR` | `[AP, DV, ML]` | origin A/S/R; increases P/I/L | voxel | Continuous voxel coordinates and discrete array indices, with the coordinate kind recorded separately |
 | `BRAINGLOBE_PHYSICAL_ASR_UM` | `[AP, DV, ML]` | origin A/S/R; increases P/I/L | µm | BrainGlobe arrays, meshes, queries, and atlas-native exports |
 | `SURGERY_WORLD_RAS_UM` | `[ML, AP, DV]` | right/anterior/dorsal positive | µm | Canonical right-handed anatomical and renderer world basis |
-| `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` | named `[AP, ML, DV]` fields | user-declared bregma; anterior/right/dorsal positive | mm | Exact user-entered implant target storage before calibration; fixed as unprojected and unusable for navigation |
-| `STEREOTAXIC_<profile>` | named `ml`, `ap`, `dv` fields | defined by a versioned landmark/calibration profile | internally µm; UI may display mm | User-facing stereotaxic coordinates only after explicit calibration |
+| `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED` | named `[AP, ML, DV]` fields | user-declared bregma; anterior/right/dorsal positive | mm | Legacy v1–v3 target storage before subject calibration; fixed as unprojected and unusable for navigation |
+| `STEREOTAXIC_<profile>` | named `ml`, `ap`, `dv` fields | defined by a versioned landmark/calibration profile | internally µm; UI may display mm | Legacy v1–v3 stereotaxic coordinates after explicit subject calibration |
 
 For BrainGlobe ASR specifically:
 
@@ -116,6 +116,10 @@ Rules:
    offset.
 5. The coordinate kind (`continuous`, `index`, `index_anchor`, or `voxel_center`) is persisted
    whenever it cannot be inferred from the frame.
+6. A slice header labels its fixed coordinate as atlas-native physical `Atlas AP`, `Atlas ML`,
+   or `Atlas DV` in millimetres. It must not present that value as bregma-relative. The editable
+   user-facing slice number is one-based in `1...N`; it maps explicitly to internal array index
+   `i = number - 1`.
 
 BrainGlobe 2.3.1 converts micron queries with `int(c / resolution)` and does no bounds check.
 For positive finite values this behaves like `floor`, but negative fractions can truncate to
@@ -215,8 +219,65 @@ surgical uncertainty band. Biological or procedural uncertainty must be modeled 
 
 The Allen CCF was built from an average of 1,675 ex-cranio, fixed mouse brains. It has no
 single source skull and therefore no Allen-supplied, uniquely correct bregma or lambda. The
-atlas-native frame is the default. The application may preserve a user's bregma-relative implant
-entry before calibration only in `BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED`, with these fixed signs:
+application must therefore name and pin any external bregma convention. It must never label an
+atlas origin, midpoint, renderer anchor, or ML midline as Allen-official bregma.
+
+The primary v4 direct-plan path uses reference
+`pinpoint-allen-mouse-25um-bregma-2025-11-04`, pinned to Virtual Brain Lab Urchin commit
+`57be3cdc7d6230543ebbd367be1cbcf1a47862a5` and the SHA-256 of its source file. Its
+BrainGlobe physical ASR coordinate is `[AP,DV,ML] = [5200,332,5700] µm`. This is a named
+Pinpoint/Urchin population-atlas planning convention, not Allen ground truth, an individual
+animal's measured bregma, or a subject registration.
+
+The direct controls have these fixed signs:
+
+```text
+AP+ anterior / forward      AP− posterior / back
+ML+ right                   ML− left
+```
+
+For AP/ML input in millimetres, BrainGlobe ASR coordinates are:
+
+```text
+atlas_AP_um = reference_AP_um - 1000 * insertion_AP_mm
+atlas_ML_um = reference_ML_um - 1000 * insertion_ML_mm
+```
+
+At the resulting AP/ML column, v4 resolves the entry from the loaded annotation with
+`first-annotated-voxel-superior-boundary-v1`: scan DV from superior to inferior and use
+`first_nonzero_index * DV_resolution` as the physical surface boundary. That boundary is the
+surface crossing of user-facing Shank 1 (catalog ID `shank-0`), not an array midpoint or a point
+inside the brain. The plan persists the annotation source and digest, the reference
+source/revision/digest, the AP/ML controls, and the resolved entry. Validation re-resolves that
+evidence against the loaded annotation.
+
+V4 depth is a strictly positive path length from Shank 1's resolved surface crossing to that
+shank's distal target, not a bregma-relative DV value. With visible sagittal angle `θ`, the
+canonical `[AP,ML,DV]` inward direction is:
+
+```text
+[-sin(θ), 0, -cos(θ)]
+```
+
+Thus zero is deep/ventral, positive advances anterior-to-posterior, and negative advances
+posterior-to-anterior. The allowed layout values are `0°` and `90°`: `0°` puts the NP2013
+shank-spacing axis in the sagittal plane with Shank 1 most anterior and the other shanks extending
+posterior. `90°` rotates the whole array clockwise when viewed dorsally, making Shank 1
+animal-left-most and extending the other shanks toward animal right.
+
+Every supported NP2 shank retains its complete 10,000 µm catalogued proximal-to-distal extent in
+3D. At insertion depth `d`, the remaining `10,000 − d` µm projects proximally from the surface and
+can be outside the brain/atlas. Slice overlays, annotation traversal, export, and path analysis
+use the distinct implanted surface-to-tip segment; the external remainder is not tissue
+traversal.
+
+This direct v4 representation remains `usable_for_navigation=false` and requires independent
+verification against the animal and rig. It does not require a separate target projection or a
+subject calibration because it makes the population-atlas assumption explicit and
+provenance-bearing; this is not evidence that the assumption is biologically accurate.
+
+Legacy v1–v3 records preserve bregma-relative AP/ML/DV targets in
+`BREGMA_RELATIVE_AP_ML_DV_MM_UNPROJECTED`:
 
 ```text
 AP+ anterior / forward      AP− posterior / back
@@ -224,9 +285,33 @@ ML+ right                   ML− left
 DV+ dorsal / up             DV− deep / ventral
 ```
 
-That model must serialize `projected=false` and `usable_for_navigation=false`. It has no implicit
-Allen point, renderer point, region, or trajectory. Projected stereotaxic coordinates become
-available only after the user explicitly selects or creates a calibration profile.
+The legacy ML sign is intentionally preserved as serialized historical meaning and matches the
+current v4 UI's `ML (+R / −L)` display. The meanings are still not interchangeable: legacy
+coordinates describe an unprojected subject-stereotaxic target, while v4 coordinates identify
+an atlas-surface insertion column. Schema migration never copies a legacy ML number into a v4
+input; an explicit, reviewed conversion is required.
+
+Those target records must serialize `projected=false` and `usable_for_navigation=false`. They
+have no implicit Allen point, renderer point, region, or trajectory. Their projected stereotaxic
+coordinates become available only through their existing explicit subject-calibration path.
+
+A calibration's atlas bregma and lambda landmarks must lie within half one ML voxel of the
+persisted atlas midline. Its named right-skull and left-skull landmarks must straddle that
+midline on their respective BrainGlobe sides, each at least half one ML voxel away. A violation
+is rejected as `CALIBRATION_ATLAS_MIDLINE_MISMATCH` before project mutation. The same invariant
+is revalidated when a persisted project is loaded, so an older or forged calibration cannot
+bypass the create boundary. Together with the existing bregma-anterior-to-lambda AP ordering,
+this binds the calibration to the required presentation semantics: `AP−` is posterior and
+`ML−` is animal-left, which appears screen-right in the reviewed Dorsal, Coronal, and Horizontal
+camera presets.
+
+The persisted calibration is not trusted merely because its own digest is internally
+consistent. Validation regenerates the skull transform through the production landmark
+calibration and regenerates the atlas transform through the production anatomical fit. It
+compares the derived matrices, landmark correspondences and residuals, transform semantics,
+skull leveling angles, and skull QC at a tolerance far below one micrometre. Stored landmark
+UUIDs and calibration/transform UUIDs remain identity fields rather than regenerated geometry.
+Thus a changed and self-rehashed matrix, residual, leveling result, or QC result fails closed.
 
 A calibration profile records at least:
 
@@ -234,15 +319,42 @@ A calibration profile records at least:
 - source and citation;
 - landmark coordinates and their source frame;
 - full affine or other declared transform, including any rotation or scale;
+- an orientation-preserving anatomical linear component with positive determinant; a
+  left/right reflection is rejected rather than treated as affine distortion;
 - axis order, signs, units, and voxel-anchor policy;
 - atlas identity and content hash to which it applies;
 - uncertainty or validation notes.
 
+Every v4 plan is semantically bound to its exact reference, annotation surface evidence, AP/ML,
+depth, angle, layout, and probe-model snapshot—not only to a self-contained record hash.
+Project validation reproduces that geometry before display, analysis, or export.
+
+Legacy planning-algorithm v2/v3 records remain semantically bound to their exact source target
+and referenced calibration. Project validation fully reconstructs placement from preserved mode,
+entry when applicable, angles, depth, roll, probe model, target, and calibration; it then
+compares every physical geometry field as well as the target projection digest. Uniformly
+translated and same-target alternate-angle placements therefore fail even with recomputed
+record hashes. Historical v1 records do not preserve enough inputs for independent
+reconstruction; they remain load/review only and cannot enter 2D/3D planning overlays, PDF
+planning pages, or region analysis until updated. Vessel-clearance analysis is unavailable for
+every plan version.
+
+A catalog-owned probe-model snapshot is also compared field for field with the exact pinned
+catalog definition. Identity/version, source provenance, verification state, shank dimensions
+and offsets, tip geometry, and the complete ordered recording-site table are part of that
+semantic boundary. Unknown custom identities may survive only in a historical v1 audit record;
+they are not accepted for current planning geometry or analysis.
+
+Persistence schema 9 adds the optional calibration-free atlas-surface v4 representation.
+Migration from schema 8 deep-copies the record and advances only the envelope version; it does
+not convert a legacy target/calibration plan into v4, infer a surface, rewrite controls, or repair
+scientific geometry. The validator accepts reproducible v1–v4 state or rejects it with no guessed
+correction.
+
 The IBL estimate `[ML, AP, DV] = [5739, 5400, 332] µm` is explicitly part of the “IBL Bregma
-and coordinate system.” It may be offered later as a named, opt-in profile, for example
-`ibl-1.2.0-bregma-estimate`; it is not the application default and must not be labeled an
-official Allen bregma. Likewise, no 5-degree tilt, DV scale, or other empirical correction is
-applied invisibly.
+and coordinate system.” It is distinct from the selected Pinpoint/Urchin profile and must not be
+silently substituted or labeled an official Allen bregma. Likewise, no 5-degree tilt, DV scale,
+or other empirical correction is applied invisibly.
 
 ### 7. Separate CCF framework, annotation release, and BrainGlobe package provenance
 
@@ -310,14 +422,15 @@ The following are correctness errors:
 - treating AP/ML/DV, array axes, mesh axes, renderer XYZ, and screen axes as the same order;
 - identifying anatomical left or right from where a hemisphere appears on screen;
 - assuming all Allen files have the same array order after different readers load them;
-- applying a hidden left/right flip, half-voxel shift, tilt, scale, or unit conversion;
+- applying a hidden left/right flip, reflected anatomical calibration, half-voxel shift, tilt,
+  scale, or unit conversion;
 - treating `shape * resolution` as the last valid lookup coordinate;
 - passing negative, non-finite, or upper-bound coordinates to BrainGlobe;
 - using `shape` and `shape - 1` flip translations interchangeably;
 - hard-coding hemisphere file values from documentation instead of the installed API contract;
 - labeling atlas center, an IBL estimate, or a user landmark as official Allen bregma;
-- projecting an uncalibrated bregma AP/ML/DV entry into the atlas, renderer, anatomy, or a
-  vascular overlay;
+- projecting a legacy uncalibrated AP/ML/DV target, or using an unnamed/unpinned bregma estimate,
+  in the atlas, renderer, anatomy, or a vascular overlay;
 - equating the CCFv3/Wang 2020 publication, `ccf_2017` annotation, `Allen-CCF-2020`
   annotation, BrainGlobe package version, and library version;
 - assuming a successful BrainGlobe download has passed a cryptographic checksum;
@@ -341,7 +454,12 @@ Tests must exercise the application adapter, not only reproduce BrainGlobe inter
 | Mesh/volume | root plus selected region meshes | coordinates are in µm; bounds lie within the volume plus one-voxel generation tolerance; verified interior samples resolve to the region or a descendant |
 | Rendering/picking | asymmetric left/right landmarks and camera presets | landmarks render on the anatomically intended sides; normals/winding are correct; picking round-trips to the original BrainGlobe point |
 | External Allen import | asymmetric ASL/ASR golden fixtures | declared transforms produce the expected hemisphere and region; ambiguous XYZ or missing metadata is rejected |
+| V4 bregma AP/ML signs | positive/negative values around the pinned Pinpoint/Urchin reference | AP+ resolves toward anterior, AP− posterior, ML+ animal-right, and ML− animal-left |
+| V4 surface/depth | asymmetric annotation columns with different first nonzero DV indices | AP/ML anchors user-facing Shank 1 at the exact superior voxel boundary; Shank 1 surface-to-distal-target length equals requested positive depth; changed annotation evidence fails |
+| V4 angle/layout | positive/negative sagittal angle and NP2013 `0°`/`90°` layout | positive advances A→P, negative P→A; `0°` makes Shank 1 most anterior and `90°` clockwise makes it animal-left-most |
+| V4 full shaft | depths below 10,000 µm in 3D and slice/traversal payloads | each 3D shank spans the complete 10,000 µm proximal-to-distal extent; only the surface-to-tip segment contributes to slice/traversal/path analysis |
 | Unprojected bregma target | strict decimal AP/ML/DV input, zero values, signs, save/reopen | exact named values and frame survive; AP− is posterior, ML− is left, DV− is deep; projection and navigation remain false |
+| Calibration reproduction and direction | midline bregma/lambda, AP-reversed pair, named lateral pair, shifted axis, same-side pair, half-voxel boundary points, and forged matrices/residuals/QC | valid fits reproduce from stored landmarks and preserve AP−→posterior and ML−→animal-left; reversed, shifted, same-side, too-close, or forged fits fail before use |
 | Stereotaxic profile | explicit user anchor and optional named estimate | selected landmark maps to zero and inverses correctly; no profile is silently selected; profile/atlas mismatch is rejected |
 | Provenance/integrity | saved project with locked identity and hash | exact identity reloads; changed package, source annotation, resolution, transform schema, or hash fails closed |
 
@@ -356,7 +474,9 @@ validated.
 - Renderer reflection handling is explicit and testable instead of being hidden in camera or
   data flips.
 - The application can display atlas-native coordinates without implying stereotaxic accuracy.
-- The application can preserve a user's bregma-relative target without inventing an atlas
+- The application can use a named, source-pinned population-atlas bregma convention without
+  mislabeling it as Allen ground truth or individual-animal registration.
+- The application can preserve a legacy bregma-relative target without inventing a subject
   projection or navigation claim.
 - Supporting a new bregma estimate, atlas annotation, reader, or UI sign convention requires a
   named profile/adapter and validation fixtures rather than a global constant.
@@ -379,5 +499,6 @@ validated.
 - AllenSDK orientation and reference-space example: [Reference Space notebook](https://alleninstitute.github.io/AllenSDK/_static/examples/nb/reference_space.html)
 - Allen CCF 2020 assets, orientation, dimensions, and annotation description: [Allen Brain Cell Atlas CCF tutorial](https://alleninstitute.github.io/abc_atlas_access/notebooks/ccf_and_parcellation_annotation_tutorial.html)
 - Allen explanation for the absence of CCF bregma: [Allen Brain Map Community response](https://community.brain-map.org/t/why-doesnt-the-3d-mouse-brain-atlas-have-bregma-coordinates/158)
+- Pinned direct-plan reference: [Virtual Brain Lab Urchin `Utils.cs` at commit `57be3cdc`](https://github.com/VirtualBrainLab/Urchin/blob/57be3cdc7d6230543ebbd367be1cbcf1a47862a5/UnityClient/Packages/vbl.urchin/Scripts/Utils/Utils.cs)
 - CCFv3 publication: [Wang et al. 2020](https://doi.org/10.1016/j.cell.2020.04.007)
 - IBL's explicitly named bregma coordinate system: [`iblatlas` 1.2.0 `atlas.py`](https://github.com/int-brain-lab/iblatlas/blob/1.2.0/iblatlas/atlas.py)

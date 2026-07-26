@@ -11,31 +11,27 @@ import pytest
 from numpy.typing import NDArray
 from tests.fixtures.atlas_factory import make_allen_metadata_test_double
 
-import mouse_brain_planner.bridge.major_vessels as major_vessels_module
 from mouse_brain_planner.bridge.major_vessels import (
-    COORDINATE_QUALIFICATION_BLOCKING_REASONS,
-    COORDINATE_QUALIFICATION_REPORT_FILENAME,
-    COORDINATE_QUALIFICATION_REPORT_SHA256,
     MajorVesselReferenceBridge,
-    _qualification_report_is_verified_rejection,
     register_major_vessel_handlers,
 )
 from mouse_brain_planner.bridge.server import BridgeContext, BridgeDispatcher, BridgeError
 from mouse_brain_planner.domain.atlas_models import AtlasMetadata, RegionRecord
 from mouse_brain_planner.domain.coordinate_models import BrainGlobePhysicalPoint
 from mouse_brain_planner.domain.project_models import PlannerProject
-from mouse_brain_planner.vasculature.lambada_major_vessels import (
+from mouse_brain_planner.vasculature.vessap_major_vessels import (
     ASSET_SHA256,
+    EXPECTED_POINT_COUNT,
     EXPECTED_RUN_COUNT,
-    EXPECTED_RUN_POINT_COUNT,
     EXTRACTION_ALGORITHM_VERSION,
     MANDATORY_LIMITATIONS,
-    SOURCE_ARCHIVE_SHA256,
-    SOURCE_RECORD_DOI,
-    LambadaMajorVesselError,
-    LambadaMajorVesselGraph,
-    LambadaMajorVesselProvenance,
-    load_lambada_major_vessels,
+    REGISTRATION_TRANSFORM_ID,
+    SOURCE_BUNDLE_SHA256,
+    SOURCE_PAPER_DOI,
+    VesSAPMajorVesselError,
+    VesSAPMajorVesselGraph,
+    VesSAPMajorVesselProvenance,
+    load_vessap_major_vessels,
 )
 
 
@@ -72,42 +68,41 @@ def _exact_atlas() -> _FakeAtlas:
     return _FakeAtlas(make_allen_metadata_test_double(25))
 
 
-def _tiny_graph() -> LambadaMajorVesselGraph:
-    # Run zero crosses the test probe at [AP,DV,ML] = [4.5,2.0,4.5].
+def _tiny_graph() -> VesSAPMajorVesselGraph:
+    # Run zero crosses the test probe at [AP,DV,ML] = [4.5,2.0,5701.0].
     # Run one is distant and proves offsets prevent an artificial connection.
     points = np.array(
         [
-            [4.5, 2.0, 0.0],
-            [4.5, 2.0, 9.0],
+            [4.5, 2.0, 5696.5],
+            [4.5, 2.0, 5705.5],
             [1_000.0, 1_000.0, 1_000.0],
             [1_100.0, 1_000.0, 1_000.0],
         ],
         dtype=np.float32,
     )
     radii = np.array([15.0, 15.0, 20.0, 20.0], dtype=np.float32)
-    annotations = np.array([1, 1, 2, 2], dtype=np.int32)
     offsets = np.array([0, 2, 4], dtype=np.int64)
     source_edges = np.array([7, 9], dtype=np.int32)
-    for array in (points, radii, annotations, offsets, source_edges):
+    for array in (points, radii, offsets, source_edges):
         array.setflags(write=False)
-    provenance = LambadaMajorVesselProvenance(
-        dataset_title="Vascular graphs of the developing post-natal mouse brain",
-        authors=("Nicolas Renier", "Elisa de Launoit", "Sophie Skriabine"),
-        specimen_id="P60_606",
-        record_doi=SOURCE_RECORD_DOI,
-        record_url="https://zenodo.org/records/18876865",
-        license="CC BY 4.0",
-        license_url="https://creativecommons.org/licenses/by/4.0/",
+    provenance = VesSAPMajorVesselProvenance(
+        dataset_title="Machine learning analysis of whole mouse brain vasculature",
+        authors=("Mihail I. Todorov", "Johannes C. Paetzold", "Ali Ertürk"),
+        specimen_id="BL6J-no1",
+        record_doi=SOURCE_PAPER_DOI,
+        record_url="https://www.discotechnologies.org/VesSAP/",
+        license="CC BY-NC 4.0",
+        license_url="https://creativecommons.org/licenses/by-nc/4.0/",
         source_sha256="c" * 64,
         asset_sha256=ASSET_SHA256,
         extraction_algorithm_version=EXTRACTION_ALGORITHM_VERSION,
+        registration_transform_id=REGISTRATION_TRANSFORM_ID,
         minimum_radius_um=15.0,
         limitations=MANDATORY_LIMITATIONS,
     )
-    return LambadaMajorVesselGraph(
+    return VesSAPMajorVesselGraph(
         points_asr_um=points,
         radii_um=radii,
-        source_annotation_ids=annotations,
         run_offsets=offsets,
         source_edge_indices=source_edges,
         provenance=provenance,
@@ -165,24 +160,24 @@ def _decode_buffer(
     return np.frombuffer(raw, dtype=dtype).reshape(shape)
 
 
-def _allow_synthetic_reference(_bridge: MajorVesselReferenceBridge) -> None:
-    """Test-only bypass for legacy synthetic geometry and analysis contracts."""
+def _allow_synthetic_analysis(_bridge: MajorVesselReferenceBridge) -> None:
+    """Test-only bypass for the archived analysis implementation."""
 
 
 @pytest.fixture
 def qualified_test_reference(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         MajorVesselReferenceBridge,
-        "_reject_unqualified_reference",
-        _allow_synthetic_reference,
+        "_reject_clearance_analysis",
+        _allow_synthetic_analysis,
     )
 
 
-def test_registration_omits_unqualified_capabilities_without_loading_geometry() -> None:
+def test_registration_declares_display_capability_without_loading_geometry() -> None:
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
     load_count = 0
 
-    def loader() -> LambadaMajorVesselGraph:
+    def loader() -> VesSAPMajorVesselGraph:
         nonlocal load_count
         load_count += 1
         return _tiny_graph()
@@ -197,38 +192,22 @@ def test_registration_omits_unqualified_capabilities_without_loading_geometry() 
 
     hello = _call(dispatcher, "hello", client="major-vessel-contract-test")
     capabilities = _mapping(hello["capabilities"])
-    assert "auditedReferenceMajorVessels" not in capabilities
+    assert capabilities["auditedReferenceMajorVessels"] is True
     assert "radiusAwareReferenceVesselAnalysis" not in capabilities
     assert load_count == 0
 
 
-def test_planning_session_registers_fail_closed_major_vessel_methods() -> None:
+def test_planning_session_declares_display_only_major_vessels() -> None:
     from tests.integration.test_bridge_probe_planning import _probe_dispatcher
 
     dispatcher, _session = _probe_dispatcher()
     hello = _call(dispatcher, "hello", client="planning-registration-test")
     capabilities = _mapping(hello["capabilities"])
-    assert "auditedReferenceMajorVessels" not in capabilities
+    assert capabilities["auditedReferenceMajorVessels"] is True
     assert "radiusAwareReferenceVesselAnalysis" not in capabilities
-    with pytest.raises(BridgeError) as qualification_gate:
-        _call(dispatcher, "vessel.major.reference.get")
-    assert qualification_gate.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
-    assert qualification_gate.value.details == {
-        "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
-        "qualificationReportVerified": True,
-        "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
-    }
 
 
-@pytest.mark.parametrize(
-    "method",
-    [
-        "vessel.major.reference.get",
-        "vessel.major.reference.geometry",
-        "vessel.major.reference.analyze",
-    ],
-)
-def test_unqualified_reference_endpoints_reject_before_loading_or_mutating(method: str) -> None:
+def test_clearance_analysis_rejects_before_loading_or_mutating() -> None:
     dispatcher = _dispatcher_with_atlas()
     register_major_vessel_handlers(
         dispatcher,
@@ -239,51 +218,14 @@ def test_unqualified_reference_endpoints_reject_before_loading_or_mutating(metho
     )
 
     with pytest.raises(BridgeError) as rejected:
-        _call(dispatcher, method)
+        _call(dispatcher, "vessel.major.reference.analyze")
 
-    assert rejected.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
-    assert "laterality and whole-brain coverage" in rejected.value.message
+    assert rejected.value.code == "VESSEL_ANALYSIS_UNAVAILABLE"
+    assert "display-only" in rejected.value.message
     assert rejected.value.details == {
-        "qualificationReportSha256": COORDINATE_QUALIFICATION_REPORT_SHA256,
-        "qualificationReportVerified": True,
-        "reasonCodes": list(COORDINATE_QUALIFICATION_BLOCKING_REASONS),
+        "displayOnly": True,
+        "subjectSpecific": False,
     }
-
-
-def test_packaged_rejection_report_is_exactly_digest_bound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    report_path = (
-        Path(major_vessels_module.__file__).parent.parent
-        / "assets"
-        / "vasculature"
-        / COORDINATE_QUALIFICATION_REPORT_FILENAME
-    )
-
-    assert hashlib.sha256(report_path.read_bytes()).hexdigest() == (
-        COORDINATE_QUALIFICATION_REPORT_SHA256
-    )
-    assert _qualification_report_is_verified_rejection() is True
-
-    monkeypatch.setattr(
-        major_vessels_module,
-        "COORDINATE_QUALIFICATION_REPORT_SHA256",
-        "0" * 64,
-    )
-    assert _qualification_report_is_verified_rejection() is False
-
-    dispatcher = _dispatcher_with_atlas()
-    register_major_vessel_handlers(
-        dispatcher,
-        get_project=lambda: pytest.fail("project must not be read"),
-        get_revision=lambda: pytest.fail("revision must not be read"),
-        replace_project=lambda _project: pytest.fail("project must not be replaced"),
-        graph_loader=lambda: pytest.fail("graph must not be loaded"),
-    )
-    with pytest.raises(BridgeError) as rejected:
-        _call(dispatcher, "vessel.major.reference.geometry")
-    assert rejected.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
-    assert rejected.value.details["qualificationReportVerified"] is False
 
 
 def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed(
@@ -293,7 +235,7 @@ def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed(
     graph = _tiny_graph()
     load_count = 0
 
-    def loader() -> LambadaMajorVesselGraph:
+    def loader() -> VesSAPMajorVesselGraph:
         nonlocal load_count
         load_count += 1
         return graph
@@ -324,18 +266,18 @@ def test_reference_metadata_and_geometry_buffers_are_exact_and_hashed(
         "voxelAnchor": "physical_um = continuous_voxel * 25; no half-voxel shift",
     }
     provenance = _mapping(metadata["provenance"])
-    assert provenance["sourceDoi"] == SOURCE_RECORD_DOI
-    assert provenance["sourceArchiveDigest"] == f"sha256:{SOURCE_ARCHIVE_SHA256}"
+    assert provenance["sourceDoi"] == SOURCE_PAPER_DOI
+    assert provenance["sourceArchiveDigest"] == f"sha256:{SOURCE_BUNDLE_SHA256}"
     assert provenance["derivedAssetSha256"] == ASSET_SHA256
     assert provenance["minimumIncludedDiameterMicrometres"] == 30.0
     assert provenance["physicalUnitsDeclared"] is True
     assert provenance["atlasScaleApplied"] is True
     assert provenance["geometrySourceAudited"] is True
     assert provenance["subjectSpecific"] is False
-    assert provenance["pialVesselsExcluded"] is True
-    assert provenance["choroidalVesselsExcluded"] is True
+    assert provenance["pialVesselsExcluded"] is False
+    assert provenance["choroidalVesselsExcluded"] is False
     assert provenance["arteryVeinClassificationAvailable"] is False
-    assert provenance["registrationTransformId"] is None
+    assert provenance["registrationTransformId"] == REGISTRATION_TRANSFORM_ID
     assert provenance["registrationUncertaintyBoundMicrometres"] is None
     assert provenance["tissueDistortionUncertaintyBoundMicrometres"] is None
     assert provenance["uncertaintyBoundsReviewed"] is False
@@ -395,7 +337,7 @@ def test_real_bundled_graph_round_trips_through_bridge_buffers(
     qualified_test_reference: None,
 ) -> None:
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
-    graph = load_lambada_major_vessels()
+    graph = load_vessap_major_vessels()
     register_major_vessel_handlers(
         dispatcher,
         get_project=lambda: pytest.fail("project not expected"),
@@ -405,15 +347,15 @@ def test_real_bundled_graph_round_trips_through_bridge_buffers(
     )
 
     geometry = _call(dispatcher, "vessel.major.reference.geometry")
-    assert geometry["pointCount"] == EXPECTED_RUN_POINT_COUNT
+    assert geometry["pointCount"] == EXPECTED_POINT_COUNT
     assert geometry["runCount"] == EXPECTED_RUN_COUNT
-    assert geometry["segmentCount"] == EXPECTED_RUN_POINT_COUNT - EXPECTED_RUN_COUNT
+    assert geometry["segmentCount"] == EXPECTED_POINT_COUNT - EXPECTED_RUN_COUNT
     np.testing.assert_array_equal(
         _decode_buffer(
             geometry["pointsASRMicrometres"],
             dtype=np.dtype("<f4"),
             scalar_type="float32",
-            shape=(EXPECTED_RUN_POINT_COUNT, 3),
+            shape=(EXPECTED_POINT_COUNT, 3),
         ),
         graph.points_asr_um,
     )
@@ -422,7 +364,7 @@ def test_real_bundled_graph_round_trips_through_bridge_buffers(
             geometry["radiiMicrometres"],
             dtype=np.dtype("<f4"),
             scalar_type="float32",
-            shape=(EXPECTED_RUN_POINT_COUNT,),
+            shape=(EXPECTED_POINT_COUNT,),
         ),
         graph.radii_um,
     )
@@ -454,10 +396,10 @@ def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary(
     dispatcher = _dispatcher_with_atlas(_exact_atlas())
     load_count = 0
 
-    def failing_loader() -> LambadaMajorVesselGraph:
+    def failing_loader() -> VesSAPMajorVesselGraph:
         nonlocal load_count
         load_count += 1
-        raise LambadaMajorVesselError("test-only internal asset detail")
+        raise VesSAPMajorVesselError("test-only internal asset detail")
 
     register_major_vessel_handlers(
         dispatcher,
@@ -472,7 +414,7 @@ def test_integrity_failure_is_lazy_and_redacted_at_the_bridge_boundary(
     with pytest.raises(BridgeError) as failure:
         _call(dispatcher, "vessel.major.reference.get")
     assert failure.value.code == "VESSEL_GEOMETRY_UNAVAILABLE"
-    assert failure.value.details == {"exceptionType": "LambadaMajorVesselError"}
+    assert failure.value.details == {"exceptionType": "VesSAPMajorVesselError"}
     assert "internal asset detail" not in failure.value.message
     assert load_count == 1
 
@@ -494,7 +436,7 @@ def test_reference_rejects_every_nonexact_atlas_contract(
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(metadata))
     load_count = 0
 
-    def loader() -> LambadaMajorVesselGraph:
+    def loader() -> VesSAPMajorVesselGraph:
         nonlocal load_count
         load_count += 1
         return _tiny_graph()
@@ -514,23 +456,79 @@ def test_reference_rejects_every_nonexact_atlas_contract(
 
 
 def _project_with_probe_plan() -> tuple[PlannerProject, int]:
-    from tests.integration.test_bridge_probe_planning import (
-        _calibrated_target,
-        _create_plan,
-        _probe_dispatcher,
+    from tests.integration.test_bridge_calibration import (
+        _atlas_point,
+        _create_params,
+        _set_active,
+        _source_point,
     )
 
-    dispatcher, session = _probe_dispatcher()
-    target_id = _calibrated_target(dispatcher, session)
-    _create_plan(dispatcher, session, target_id)
-    assert session.project is not None
-    assert session.project.atlas is not None
-    exact_metadata = make_allen_metadata_test_double(25).model_copy(
-        update={"metadata_sha256": session.project.atlas.metadata_sha256}
+    from mouse_brain_planner.bridge.planning import register_planning_handlers
+    from mouse_brain_planner.probes.catalog import (
+        NEUROPIXELS_2_0_MODEL_VERSION,
+        NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
     )
-    payload = session.project.model_dump(mode="python")
-    payload["atlas"] = exact_metadata.model_dump(mode="python")
-    return PlannerProject.model_validate(payload), session.project_revision
+
+    dispatcher = _dispatcher_with_atlas(_exact_atlas())
+    session = register_planning_handlers(dispatcher)
+    _call(
+        dispatcher,
+        "project.new",
+        animalResearchOnlyAcknowledged=True,
+        title="Major-vessel probe test",
+        subjectId="mouse-A",
+    )
+    calibration_params = _create_params(session)
+    skull_landmarks = _mapping(calibration_params["skullLandmarks"])
+    skull_landmarks["leftSkull"] = _source_point(0, -25, 0)
+    skull_landmarks["rightSkull"] = _source_point(0, 25, 0)
+    atlas_landmarks = _mapping(calibration_params["atlasLandmarks"])
+    atlas_landmarks.update(
+        bregma=_atlas_point(3.5, 3.5, 5700),
+        lambdaPoint=_atlas_point(5.5, 3.5, 5700),
+        leftSkull=_atlas_point(3.5, 3.5, 5725),
+        rightSkull=_atlas_point(3.5, 3.5, 5675),
+    )
+    created_calibration = _call(
+        dispatcher,
+        "calibration.create",
+        **calibration_params,
+    )
+    calibration = _mapping(created_calibration["calibration"])
+    calibration_id = calibration["calibrationId"]
+    assert isinstance(calibration_id, str)
+    _set_active(dispatcher, session, calibration_id)
+    assert session.project is not None
+    added_target = _call(
+        dispatcher,
+        "implant.add",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        label="major-vessel test target",
+        apMillimetres=-0.001,
+        mlMillimetres=-0.001,
+        dvMillimetres=-0.001,
+    )
+    target = _mapping(added_target["target"])
+    target_id = target["targetId"]
+    assert isinstance(target_id, str)
+    _call(
+        dispatcher,
+        "probe.plan.create",
+        projectId=str(session.project.project_uuid),
+        expectedProjectRevision=session.project_revision,
+        targetId=target_id,
+        modelId=NEUROPIXELS_2_0_SINGLE_SHANK_MODEL_ID,
+        modelVersion=NEUROPIXELS_2_0_MODEL_VERSION,
+        name="Vertical NP2 single-shank major-vessel test",
+        azimuthDegrees=0,
+        elevationDegrees=-90,
+        insertionDepthMicrometres=4,
+        axialRotationDegrees=0,
+        customGeometryAcknowledged=True,
+    )
+    assert session.project is not None
+    return session.project, session.project_revision
 
 
 def _analysis_params(
@@ -638,10 +636,52 @@ def test_analysis_requires_both_acknowledgements_before_classifying_conflicts(
     provenance = _mapping(analysis["provenance"])
     assert provenance["physicalUnitsDeclared"] is True
     assert provenance["atlasScaleApplied"] is True
-    assert provenance["registrationTransformId"] is None
+    assert provenance["registrationTransformId"] == REGISTRATION_TRANSFORM_ID
     assert provenance["registrationUncertaintyBoundMicrometres"] is None
     assert provenance["tissueDistortionUncertaintyBoundMicrometres"] is None
     assert provenance["uncertaintyBoundsReviewed"] is False
+
+
+def test_analysis_rejects_same_target_rehashed_alternate_probe_before_loading_graph(
+    qualified_test_reference: None,
+) -> None:
+    from tests.integration.test_bridge_probe_planning import (
+        _same_target_alternate_trajectory_rehashed_plan,
+    )
+
+    project, revision = _project_with_probe_plan()
+    assert project.atlas is not None
+    forged = _same_target_alternate_trajectory_rehashed_plan(
+        project,
+        project.probe_plans[0],
+    )
+    project.probe_plans[0] = forged
+    state = _ProjectState(project=project, revision=revision)
+    dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
+    register_major_vessel_handlers(
+        dispatcher,
+        get_project=lambda: state.project,
+        get_revision=lambda: state.revision,
+        replace_project=state.replace,
+        graph_loader=lambda: pytest.fail("forged geometry must be rejected before graph loading"),
+    )
+
+    with pytest.raises(BridgeError) as rejection:
+        _call(
+            dispatcher,
+            "vessel.major.reference.analyze",
+            **_analysis_params(
+                state.project,
+                state.revision,
+                profile_confirmed=True,
+                coverage_acknowledged=True,
+            ),
+        )
+
+    assert rejection.value.code == "PROBE_PLAN_PROJECTION_INVALID"
+    assert "placement geometry does not match" in rejection.value.details["reason"]
+    assert state.revision == revision
+    assert state.project.probe_vessel_analyses == []
 
 
 def test_analysis_does_not_overwrite_project_when_revision_changes_during_compute(
@@ -652,7 +692,7 @@ def test_analysis_does_not_overwrite_project_when_revision_changes_during_comput
     state = _ProjectState(project=project, revision=revision)
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
 
-    def concurrently_mutating_loader() -> LambadaMajorVesselGraph:
+    def concurrently_mutating_loader() -> VesSAPMajorVesselGraph:
         state.revision += 1
         state.project = state.project.model_copy(update={"project_revision": state.revision})
         return _tiny_graph()
@@ -691,7 +731,7 @@ def test_analysis_rejects_stale_hash_and_nonboolean_acknowledgement_before_loadi
     dispatcher = _dispatcher_with_atlas(_FakeAtlas(project.atlas))
     load_count = 0
 
-    def loader() -> LambadaMajorVesselGraph:
+    def loader() -> VesSAPMajorVesselGraph:
         nonlocal load_count
         load_count += 1
         return _tiny_graph()

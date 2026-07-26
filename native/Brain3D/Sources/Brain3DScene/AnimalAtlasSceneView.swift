@@ -9,7 +9,7 @@ public struct AnimalAtlasSceneView: NSViewRepresentable {
     public let snapshot: AnimalSceneSnapshot
     public let reduceMotion: Bool
     public let resetGeneration: Int
-    private let phaseChanged: (AnimalScenePhase) -> Void
+    private let phaseChanged: (String, AnimalScenePhase) -> Void
     private let rayPicked: (AtlasRayPoint, AtlasRayPoint) -> Void
     private let blankSelected: () -> Void
 
@@ -17,7 +17,7 @@ public struct AnimalAtlasSceneView: NSViewRepresentable {
         snapshot: AnimalSceneSnapshot,
         reduceMotion: Bool,
         resetGeneration: Int,
-        phaseChanged: @escaping (AnimalScenePhase) -> Void,
+        phaseChanged: @escaping (String, AnimalScenePhase) -> Void,
         rayPicked: @escaping (AtlasRayPoint, AtlasRayPoint) -> Void,
         blankSelected: @escaping () -> Void
     ) {
@@ -88,10 +88,17 @@ public struct AnimalAtlasSceneView: NSViewRepresentable {
                 lastSnapshotIdentity = parent.snapshot.identity
                 applyTask?.cancel()
                 let snapshot = parent.snapshot
+                let snapshotIdentity = snapshot.identity
                 applyTask = Task { @MainActor [weak self, weak controller] in
                     guard let self, let controller else { return }
+                    // `updateNSView` runs inside SwiftUI's render transaction.
+                    // Defer renderer phase callbacks until that transaction has
+                    // ended so `.loading`/`.ready` never publish model changes
+                    // from within the representable update itself.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
                     await controller.apply(snapshot: snapshot) { [weak self] phase in
-                        self?.parent.phaseChanged(phase)
+                        self?.parent.phaseChanged(snapshotIdentity, phase)
                     }
                 }
             }
